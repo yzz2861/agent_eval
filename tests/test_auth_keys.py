@@ -150,6 +150,76 @@ class _TestAuthorizedKeys(TempDirTestCase):
                                             '1.2.3.4', None, False)
                 self.assertEqual(result, expected)
 
+    def test_quoted_options(self):
+        """Test quoted commas and escapes in authorized key options"""
+
+        tests = (
+            ('Quoted comma in command',
+             'command="echo a,b",from="1.2.3.4"',
+             'echo a,b'),
+            ('Escaped comma in command',
+             r'command="echo a\,b"',
+             'echo a,b'),
+            ('Escaped space in command',
+             r'command=echo\ a\ b',
+             'echo a b'),
+            ('Escaped quote in command',
+             r'command="echo \"a,b\""',
+             'echo "a,b"')
+        )
+
+        for msg, options, command in tests:
+            with self.subTest(msg):
+                auth_keys = self.build_keys([options])
+                result = auth_keys.validate(self.imported_keylist[0],
+                                            '1.2.3.4', '1.2.3.4')
+                self.assertEqual(result['command'], command)
+
+    def test_repeated_conditions(self):
+        """Test that repeated and negated conditions must all match"""
+
+        tests = (
+            ('Repeated from match',
+             'from="localhost*",from="127.0.0.0/8"',
+             'localhost', '127.0.0.1', None, True),
+            ('Repeated from mismatch',
+             'from="localhost*",from="127.0.0.0/8"',
+             'localhost', '10.0.0.1', None, False),
+            ('Repeated principals match',
+             'principals="cert*",principals="cert0"',
+             '1.2.3.4', '1.2.3.4', ['cert0'], True),
+            ('Repeated principals mismatch',
+             'principals="cert*",principals="cert0"',
+             '1.2.3.4', '1.2.3.4', ['cert1'], False),
+            ('Negated from match',
+             'from="127.0.0.0/8,!127.0.0.1"',
+             'localhost', '127.0.0.1', None, False),
+            ('Negated-only from',
+             'from="!127.0.0.1"',
+             'localhost', '127.0.0.2', None, False)
+        )
+
+        for msg, options, host, addr, principals, match in tests:
+            with self.subTest(msg):
+                auth_keys = self.build_keys([options])
+                result = auth_keys.validate(self.imported_keylist[0],
+                                            host, addr, principals)
+                self.assertEqual(result is not None, match)
+
+    def test_missing_cert_conditions(self):
+        """Test principals and subject conditions without certificate data"""
+
+        auth_keys = self.build_keys(['principals="cert0"'])
+        result = auth_keys.validate(self.imported_keylist[0],
+                                    '1.2.3.4', '1.2.3.4')
+        self.assertIsNone(result)
+
+        if x509_available: # pragma: no branch
+            auth_keys = self.build_keys(['subject=CN=cert0'])
+            result = auth_keys.validate(self.imported_keylist[0],
+                                        '1.2.3.4', '1.2.3.4')
+            self.assertIsNone(result)
+
     def test_file(self):
         """Test reading authorized keys from file"""
 
@@ -215,10 +285,44 @@ class _TestAuthorizedKeys(TempDirTestCase):
             ('Environment missing equals', 'environment="FOO"\n'),
             ('Environment missing variable name', 'environment="=xxx"\n'),
             ('PermitOpen missing colon', 'permitopen="xxx"\n'),
-            ('PermitOpen non-integer port', 'permitopen="xxx:yyy"\n')
+            ('PermitOpen non-integer port', 'permitopen="xxx:yyy"\n'),
+            ('Missing option value', 'from\n'),
+            ('Trailing comma', 'from="1.2.3.4",\n'),
+            ('Empty option', 'from="1.2.3.4",,\n'),
+            ('Invalid CIDR', 'from="1.2.3.0/33"\n'),
+            ('CIDR with wildcard', 'from="1.2.3.0/24*"\n'),
+            ('Repeated negation', 'from="!!1.2.3.4"\n')
         )
 
         for msg, data in tests:
             with self.subTest(msg):
                 with self.assertRaises(ValueError):
                     asyncssh.import_authorized_keys(data)
+
+    def test_parse_errors_include_line_and_option(self):
+        """Test parse errors identify the line and option without the key"""
+
+        key = self.keylist[0].strip()
+        data = (f'from="1.2.3.4" {key}\n'
+                f'from="1.2.3.0/33" {key}\n')
+
+        with self.assertRaises(ValueError) as ctx:
+            asyncssh.import_authorized_keys(data)
+
+        msg = str(ctx.exception)
+
+        self.assertIn('line 2', msg)
+        self.assertIn('from', msg)
+        self.assertNotIn(self.keylist[0], msg)
+        self.assertNotIn('AAAAB3', msg)
+
+    def test_invalid_line_not_ignored(self):
+        """Test an invalid line is rejected even when other entries are valid"""
+
+        key = self.keylist[0].strip()
+        data = f'from="1.2.3.4" {key}\nnot a public key\n'
+
+        with self.assertRaises(ValueError) as ctx:
+            asyncssh.import_authorized_keys(data)
+
+        self.assertIn('line 2', str(ctx.exception))

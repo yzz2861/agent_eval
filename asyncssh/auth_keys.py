@@ -31,8 +31,9 @@ try:
 except ImportError: # pragma: no cover
     _x509_available = False
 
-from .misc import FilePath, OptionsParser, ip_address, read_file
-from .pattern import HostPatternList, WildcardPatternList
+from .logging import logger
+from .misc import FilePath, IPAddress, OptionsParser, ip_address, read_file
+from .pattern import CIDRHostPattern, HostPatternList, WildcardPatternList
 from .public_key import KeyImportError, SSHKey
 from .public_key import SSHX509Certificate, SSHX509CertificateChain
 from .public_key import import_public_key, import_certificate
@@ -40,6 +41,151 @@ from .public_key import import_certificate_subject
 
 
 _EntryOptions = Mapping[str, object]
+
+
+class _AuthorizedKeysOptionError(ValueError):
+    """An error found while parsing an authorized_keys option"""
+
+    def __init__(self, option: str, reason: str):
+        self.option = option
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _AuthorizedKeysFromPatterns:
+    """Match a from pattern list without falling back to string matching"""
+
+    def __init__(self, patterns: str):
+        self._pos_patterns = []
+        self._neg_patterns = []
+
+        if not patterns:
+            raise ValueError('Empty from pattern list')
+
+        for pattern in patterns.split(','):
+            pattern = pattern.strip()
+
+            if not pattern:
+                raise ValueError('Empty from pattern')
+
+            negate = pattern.startswith('!')
+            if negate:
+                pattern = pattern[1:]
+
+                if not pattern:
+                    raise ValueError('Empty negated from pattern')
+
+            if pattern.startswith('!'):
+                raise ValueError('Invalid from pattern')
+
+            if any(ch in pattern for ch in ' \t'):
+                raise ValueError('Invalid from pattern')
+
+            if '/' in pattern:
+                try:
+                    matcher = CIDRHostPattern(pattern)
+                except ValueError:
+                    raise ValueError('Invalid CIDR from pattern') from None
+            else:
+                matcher = HostPatternList(pattern)
+
+            if negate:
+                self._neg_patterns.append(matcher)
+            else:
+                self._pos_patterns.append(matcher)
+
+    def matches(self, host: str, addr: str, ip: Optional[IPAddress]) -> bool:
+        """Return whether a host and address match this pattern list"""
+
+        pos_match = any(pattern.matches(host, addr, ip)
+                        for pattern in self._pos_patterns)
+        neg_match = any(pattern.matches(host, addr, ip)
+                        for pattern in self._neg_patterns)
+
+        return pos_match and not neg_match
+
+
+def _parse_option_list(line: str) -> Tuple[List[Tuple[str, Optional[str]]], str]:
+    """Parse a comma-separated authorized_keys option list"""
+
+    options: List[Tuple[str, Optional[str]]] = []
+    idx = 0
+    length = len(line)
+
+    while idx < length and line[idx] in ' \t':
+        idx += 1
+
+    while idx < length:
+        name_start = idx
+
+        while (idx < length and line[idx] not in '=," \t'):
+            if line[idx] == '\\':
+                raise _AuthorizedKeysOptionError(
+                    '<unknown>', 'Invalid escape in option name')
+
+            idx += 1
+
+        name = line[name_start:idx]
+
+        if not name:
+            raise _AuthorizedKeysOptionError('<unknown>',
+                                             'Missing option name')
+
+        if idx < length and line[idx] == '"':
+            raise _AuthorizedKeysOptionError(
+                name, 'Unexpected quote in option name')
+
+        value: Optional[str] = None
+
+        if idx < length and line[idx] == '=':
+            idx += 1
+            value_chars = []
+            quoted = False
+
+            while idx < length:
+                ch = line[idx]
+
+                if ch == '\\':
+                    idx += 1
+
+                    if idx >= length:
+                        raise _AuthorizedKeysOptionError(
+                            name, 'Trailing backslash in option value')
+
+                    value_chars.append(line[idx])
+                    idx += 1
+                elif ch == '"':
+                    quoted = not quoted
+                    idx += 1
+                elif not quoted and ch in ' \t,':
+                    break
+                else:
+                    value_chars.append(ch)
+                    idx += 1
+
+            if quoted:
+                raise _AuthorizedKeysOptionError(
+                    name, 'Unbalanced quote in option value')
+
+            value = ''.join(value_chars)
+
+        options.append((name, value))
+
+        if idx >= length:
+            break
+
+        if line[idx] == ',':
+            idx += 1
+
+            if idx >= length:
+                raise _AuthorizedKeysOptionError(
+                    name, 'Missing option after comma')
+
+            continue
+
+        return options, line[idx:].strip()
+
+    return options, ''
 
 
 class _SSHAuthorizedKeyEntry(OptionsParser):
@@ -58,7 +204,51 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
             pass
 
         line = self._parse_options(line)
+
+        if not line:
+            raise KeyImportError('Missing key data')
+
         self._import_key_or_cert(line)
+
+    def _parse_options(self, line: str) -> str:
+        """Parse options in this entry with full quoting and escaping"""
+
+        options, key_data = _parse_option_list(line)
+
+        for option, value in options:
+            self._add_parsed_option(option, value)
+
+        return key_data
+
+    def _add_parsed_option(self, option: str, value: Optional[str]) -> None:
+        """Add an option which has already had its value unquoted"""
+
+        if value is None:
+            if option in self._handlers:
+                raise _AuthorizedKeysOptionError(
+                    option, 'Missing option value')
+
+            self.options[option] = True
+            return
+
+        handler = self._handlers.get(option)
+
+        if handler:
+            try:
+                handler(self, option, value)
+            except _AuthorizedKeysOptionError:
+                raise
+            except ValueError as exc:
+                raise _AuthorizedKeysOptionError(option, str(exc)) from None
+        else:
+            values = self.options.get(option)
+
+            if values is None:
+                self.options[option] = [value]
+            elif isinstance(values, list):
+                values.append(value)
+            else:
+                self.options[option] = [value]
 
     def _import_key_or_cert(self, line: str) -> None:
         """Import key or certificate in this entry"""
@@ -89,6 +279,9 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
                 return
             except KeyImportError:
                 pass
+            except ValueError as exc:
+                raise _AuthorizedKeysOptionError(
+                    'subject', str(exc)) from None
 
         raise KeyImportError('Unrecognized key, certificate, or subject')
 
@@ -109,9 +302,9 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
     def _add_from(self, option: str, value: str) -> None:
         """Add a from host pattern"""
 
-        from_patterns = cast(List[HostPatternList],
+        from_patterns = cast(List[_AuthorizedKeysFromPatterns],
                              self.options.setdefault(option, []))
-        from_patterns.append(HostPatternList(value))
+        from_patterns.append(_AuthorizedKeysFromPatterns(value))
 
     def _add_permitopen(self, option: str, value: str) -> None:
         """Add a permitopen host/port pair"""
@@ -124,7 +317,7 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
 
             port = None if port_str == '*' else int(port_str)
         except ValueError:
-            raise ValueError(f'Illegal permitopen value: {value}') from None
+            raise ValueError('Illegal permitopen value') from None
 
         permitted_opens = cast(Set[Tuple[str, Optional[int]]],
                                self.options.setdefault(option, set()))
@@ -144,6 +337,8 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
             subject_patterns = cast(List[X509NamePattern],
                                     self.options.setdefault(option, []))
             subject_patterns.append(X509NamePattern(value))
+        else: # pragma: no cover
+            raise ValueError('X.509 support is not available')
 
     _handlers = {
         'command':     _set_string,
@@ -159,10 +354,15 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
                       cert_subject: Optional['X509Name'] = None) -> bool:
         """Match "from", "principals" and "subject" options in entry"""
 
-        from_patterns = cast(List[HostPatternList], self.options.get('from'))
+        from_patterns = cast(List[_AuthorizedKeysFromPatterns],
+                             self.options.get('from'))
 
         if from_patterns:
-            client_ip = ip_address(client_addr)
+            try:
+                client_ip: Optional[IPAddress] = (ip_address(client_addr)
+                                                  if client_addr else None)
+            except ValueError:
+                client_ip = None
 
             if not all(pattern.matches(client_host, client_addr, client_ip)
                        for pattern in from_patterns):
@@ -171,7 +371,10 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
         principal_patterns = cast(List[WildcardPatternList],
                                   self.options.get('principals'))
 
-        if cert_principals is not None and principal_patterns is not None:
+        if principal_patterns is not None:
+            if not cert_principals:
+                return False
+
             if not all(any(pattern.matches(principal)
                            for principal in cert_principals)
                        for pattern in principal_patterns):
@@ -180,7 +383,10 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
         subject_patterns = cast(List['X509NamePattern'],
                                 self.options.get('subject'))
 
-        if cert_subject is not None and subject_patterns is not None:
+        if subject_patterns is not None:
+            if cert_subject is None:
+                return False
+
             if not all(pattern.matches(cert_subject)
                        for pattern in subject_patterns):
                 return False
@@ -202,15 +408,28 @@ class SSHAuthorizedKeys:
     def load(self, authorized_keys: str) -> None:
         """Load authorized keys data into this object"""
 
-        for line in authorized_keys.splitlines():
+        for line_number, line in enumerate(authorized_keys.splitlines(), 1):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
 
             try:
                 entry = _SSHAuthorizedKeyEntry(line)
+            except _AuthorizedKeysOptionError as exc:
+                msg = (f'Invalid authorized_keys entry on line {line_number} '
+                       f'(option {exc.option}): {exc.reason}')
+                logger.warning(msg)
+                raise ValueError(msg) from None
             except KeyImportError:
-                continue
+                msg = (f'Invalid authorized_keys entry on line {line_number}: '
+                       'Unable to parse key data')
+                logger.warning(msg)
+                raise ValueError(msg) from None
+            except ValueError as exc:
+                msg = (f'Invalid authorized_keys entry on line {line_number}: '
+                       f'{exc}')
+                logger.warning(msg)
+                raise ValueError(msg) from None
 
             if entry.key:
                 if 'cert-authority' in entry.options:
