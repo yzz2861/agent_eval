@@ -12,6 +12,37 @@ def build_ranked_dict(ordered_list):
 
 RANKED_DICTIONARIES = None
 
+# name -> priority for registered dictionaries. Built-in frequency lists
+# have an implicit priority of DEFAULT_DICTIONARY_PRIORITY; custom
+# dictionaries default to CUSTOM_DICTIONARY_PRIORITY so that, when the same
+# span matches both a built-in and a custom dictionary, the custom match
+# wins and gets reported.
+DEFAULT_DICTIONARY_PRIORITY = 0
+CUSTOM_DICTIONARY_PRIORITY = 1
+DICTIONARY_PRIORITIES = {}
+
+# name -> (source_list, ranked_dict) cache, so re-registering an unchanged
+# word list doesn't rebuild the ranked dictionary.
+RANKED_DICT_CACHE = {}
+
+
+def get_dictionary_priorities():
+    """Return the global dictionary-name -> priority mapping."""
+    return DICTIONARY_PRIORITIES
+
+
+def build_ranked_dict_cached(name, ordered_list):
+    """build_ranked_dict with a per-name cache keyed on the source list."""
+    cached = RANKED_DICT_CACHE.get(name)
+    if cached is not None:
+        source, ranked = cached
+        if source is ordered_list or source == ordered_list:
+            return ranked
+    ranked = build_ranked_dict(ordered_list)
+    RANKED_DICT_CACHE[name] = (ordered_list, ranked)
+    return ranked
+
+
 def get_ranked_dictionaries():
     """
     Lazy-load large dictionary data set.
@@ -42,9 +73,23 @@ def ensure_ranked_dictionaries(func):
 
 
 @ensure_ranked_dictionaries
-def add_frequency_lists(frequency_lists_, *, _ranked_dictionaries):
+def add_frequency_lists(frequency_lists_, priority=CUSTOM_DICTIONARY_PRIORITY,
+                        _ranked_dictionaries=None):
+    """
+    Register custom frequency lists for dictionary matching.
+
+    frequency_lists_: dict mapping a dictionary name to an ordered word list
+        (most common word first). Registering a name that already exists
+        overrides the previous list. Empty lists are allowed and simply
+        never match.
+    priority: when the same password span matches several dictionaries,
+        only matches from the highest-priority dictionaries are kept.
+        Custom dictionaries default to CUSTOM_DICTIONARY_PRIORITY (1),
+        which beats the built-in lists (0).
+    """
     for name, lst in frequency_lists_.items():
-        _ranked_dictionaries[name] = build_ranked_dict(lst)
+        _ranked_dictionaries[name] = build_ranked_dict_cached(name, lst)
+        DICTIONARY_PRIORITIES[name] = priority
 
 
 GRAPHS = {
@@ -104,16 +149,29 @@ DATE_SPLITS = {
 
 # omnimatch -- perform all matches
 @ensure_ranked_dictionaries
-def omnimatch(password, _ranked_dictionaries=None, user_inputs=[]):
-    if _ranked_dictionaries is not None and user_inputs:
+def omnimatch(password, _ranked_dictionaries=None, user_inputs=[],
+              custom_dictionaries=None):
+    dictionary_priorities = None
+    if custom_dictionaries or user_inputs:
         _ranked_dictionaries = copy.copy(_ranked_dictionaries)
+    if custom_dictionaries:
+        # per-call custom dictionaries are merged into a copy of the global
+        # dictionaries, so registration never leaks across calls.
+        dictionary_priorities = dict(DICTIONARY_PRIORITIES)
+        for name, lst in custom_dictionaries.items():
+            _ranked_dictionaries[name] = build_ranked_dict_cached(name, lst)
+            dictionary_priorities.setdefault(name, CUSTOM_DICTIONARY_PRIORITY)
+    if user_inputs:
         _ranked_dictionaries['user_inputs'] = build_ranked_dict(user_inputs)
 
     matches = []
+    dictionary_kwargs = {
+        '_ranked_dictionaries': _ranked_dictionaries,
+        '_dictionary_priorities': dictionary_priorities,
+    }
+    for matcher in [dictionary_match, reverse_dictionary_match, l33t_match]:
+        matches.extend(matcher(password, **dictionary_kwargs))
     for matcher in [
-        dictionary_match,
-        reverse_dictionary_match,
-        l33t_match,
         spatial_match,
         repeat_match,
         sequence_match,
@@ -125,9 +183,42 @@ def omnimatch(password, _ranked_dictionaries=None, user_inputs=[]):
     return sorted(matches, key=lambda x: (x['i'], x['j']))
 
 
+def filter_by_dictionary_priority(matches, _dictionary_priorities=None):
+    """
+    When the same span matches several dictionaries, keep only the matches
+    from the highest-priority dictionaries. Spans whose matches all share
+    the same priority are left untouched.
+    """
+    if _dictionary_priorities is None:
+        _dictionary_priorities = DICTIONARY_PRIORITIES
+    if not _dictionary_priorities or len(matches) < 2:
+        return matches
+    spans = {}
+    for match in matches:
+        spans.setdefault((match['i'], match['j']), []).append(match)
+    filtered = []
+    for group in spans.values():
+        if len(group) == 1:
+            filtered.extend(group)
+            continue
+        priorities = [
+            _dictionary_priorities.get(match['dictionary_name'],
+                                       DEFAULT_DICTIONARY_PRIORITY)
+            for match in group
+        ]
+        if len(set(priorities)) == 1:
+            filtered.extend(group)
+            continue
+        best = max(priorities)
+        filtered.extend(match for match, priority in zip(group, priorities)
+                        if priority == best)
+    return sorted(filtered, key=lambda x: (x['i'], x['j']))
+
+
 # dictionary match (common passwords, english, last names, etc)
 @ensure_ranked_dictionaries
-def dictionary_match(password, _ranked_dictionaries=None):
+def dictionary_match(password, _ranked_dictionaries=None,
+                     _dictionary_priorities=None):
     matches = []
     length = len(password)
     password_lower = password.lower()
@@ -149,13 +240,17 @@ def dictionary_match(password, _ranked_dictionaries=None):
                         'l33t': False,
                     })
 
-    return sorted(matches, key=lambda x: (x['i'], x['j']))
+    return filter_by_dictionary_priority(sorted(matches, key=lambda x: (x['i'], x['j'])),
+                                         _dictionary_priorities)
 
 @ensure_ranked_dictionaries
 def reverse_dictionary_match(password,
-                             _ranked_dictionaries=None):
+                             _ranked_dictionaries=None,
+                             _dictionary_priorities=None):
     reversed_password = ''.join(reversed(password))
-    matches = dictionary_match(reversed_password, _ranked_dictionaries=_ranked_dictionaries)
+    matches = dictionary_match(reversed_password,
+                               _ranked_dictionaries=_ranked_dictionaries,
+                               _dictionary_priorities=_dictionary_priorities)
     for match in matches:
         match['token'] = ''.join(reversed(match['token']))
         match['reversed'] = True
@@ -248,7 +343,7 @@ def translate(string, chr_map):
 
 @ensure_ranked_dictionaries
 def l33t_match(password, _ranked_dictionaries=None,
-               _l33t_table=L33T_TABLE):
+               _l33t_table=L33T_TABLE, _dictionary_priorities=None):
     matches = []
 
     for sub in enumerate_l33t_subs(
@@ -257,7 +352,9 @@ def l33t_match(password, _ranked_dictionaries=None,
             break
 
         subbed_password = translate(password, sub)
-        for match in dictionary_match(subbed_password, _ranked_dictionaries=_ranked_dictionaries):
+        for match in dictionary_match(subbed_password,
+                                      _ranked_dictionaries=_ranked_dictionaries,
+                                      _dictionary_priorities=_dictionary_priorities):
             token = password[match['i']:match['j'] + 1]
             if token.lower() == match['matched_word']:
                 # only return the matches that contain an actual substitution
