@@ -359,6 +359,114 @@ class TestVerifyXML(unittest.TestCase, LoadExampleKeys):
         with self.assertRaises(InvalidDigest):
             XMLVerifier().verify(root, hmac_key=b"demo-key", expect_config=config)
 
+    def test_duplicate_ids_are_rejected_before_verification(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><data Id="signed">original content</data></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="#signed"
+        )
+        self.assertTrue(
+            XMLVerifier().verify(
+                etree.tostring(signed), hmac_key=b"secret", expect_config=config
+            ).signed_xml.text.startswith("original content")
+        )
+
+        # The duplicate node is inserted after signing, so the existing signature stays cryptographically valid;
+        # only strict ID uniqueness can keep the reference from resolving to the attacker-controlled node.
+        attack_variants = (
+            (b'<evil Id="signed">replacement content</evil>', "Id"),
+            (b'<evil ID="signed">replacement content</evil>', "ID"),
+            (b'<evil id="signed">replacement content</evil>', "id"),
+            (b'<evil xml:id="signed">replacement content</evil>', "xml:id"),
+        )
+        for attacker_node, duplicate_attribute in attack_variants:
+            with self.subTest(duplicate_attribute=duplicate_attribute):
+                tampered = etree.fromstring(etree.tostring(signed))
+                tampered.insert(0, etree.fromstring(attacker_node))
+                with self.assertRaisesRegex(InvalidSignature, "Duplicate ID value 'signed'"):
+                    XMLVerifier().verify(tampered, hmac_key=b"secret", expect_config=config)
+
+        # A document that never carried a valid signature must be rejected for the same reason first.
+        tampered = etree.fromstring(etree.tostring(signed))
+        tampered.insert(0, etree.fromstring(b'<evil Id="signed">replacement content</evil>'))
+        with self.assertRaisesRegex(InvalidSignature, "Duplicate ID value 'signed'"):
+            XMLVerifier().verify(tampered, hmac_key=b"wrong-secret", expect_config=config)
+
+        # Scoping the lookup to a single attribute name still rejects duplicates using that attribute.
+        tampered = etree.fromstring(etree.tostring(signed))
+        tampered.insert(0, etree.fromstring(b'<evil Id="signed">replacement content</evil>'))
+        with self.assertRaisesRegex(InvalidSignature, "Duplicate ID value 'signed'"):
+            XMLVerifier().verify(
+                tampered, hmac_key=b"secret", id_attribute="Id", expect_config=config
+            )
+
+        # References must still resolve to the unique node that actually carries the signed content.
+        unique = etree.fromstring(etree.tostring(signed))
+        unique.insert(0, etree.fromstring(b'<decoy Id="unsigned">outside the signature</decoy>'))
+        result = XMLVerifier().verify(unique, hmac_key=b"secret", expect_config=config)
+        self.assertEqual(result.signed_xml.get("Id"), "signed")
+
+    def test_signature_wrapping_attacks_fail_verification(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><data Id="signed">original content</data></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="#signed"
+        )
+
+        # Wrapping with unique IDs: the referenced node no longer matches the signed digest.
+        tampered = etree.fromstring(etree.tostring(signed))
+        tampered.find("data").text = "attacker-controlled content"
+        with self.assertRaises(InvalidDigest):
+            XMLVerifier().verify(tampered, hmac_key=b"secret", expect_config=config)
+
+        # Relocating the intact signed subtree keeps its canonical form; the unique reference still resolves to
+        # the genuine node, whose digest matches, and no unsigned data is returned.
+        tampered = etree.fromstring(etree.tostring(signed))
+        signed_data = tampered.find("data")
+        tampered.remove(signed_data)
+        etree.SubElement(tampered, "wrapper").append(signed_data)
+        relocated = XMLVerifier().verify(tampered, hmac_key=b"secret", expect_config=config)
+        self.assertEqual(relocated.signed_xml.get("Id"), "signed")
+        self.assertEqual(relocated.signed_xml.text, "original content")
+
+        # An unsigned element injected into the referenced node changes its digest and is rejected.
+        tampered = etree.fromstring(etree.tostring(signed))
+        tampered.find("data").append(etree.fromstring(b"<injected>unsigned</injected>"))
+        with self.assertRaises(InvalidDigest):
+            XMLVerifier().verify(tampered, hmac_key=b"secret", expect_config=config)
+
+        # Classic SAML-style wrapping: a same-ID forged assertion sits beside the genuine one.
+        tampered = etree.fromstring(etree.tostring(signed))
+        tampered.insert(0, etree.fromstring(b'<forged Id="signed">forged content</forged>'))
+        with self.assertRaisesRegex(InvalidSignature, "Duplicate ID value 'signed'"):
+            XMLVerifier().verify(tampered, hmac_key=b"secret", expect_config=config)
+
+        # Base64 decode ordering is preserved: a unique-ID tamper to the encoded text fails the digest.
+        with open(os.path.join(os.path.dirname(__file__), "base64-subtree.xml"), "rb") as fh:
+            base64_signature = etree.fromstring(fh.read())
+        tampered = etree.fromstring(etree.tostring(base64_signature))
+        tampered.find("data").text = b64encode(b"tampered").decode()
+        with self.assertRaises(InvalidDigest):
+            XMLVerifier().verify(
+                tampered,
+                hmac_key=b"demo-key",
+                expect_config=SignatureConfiguration(
+                    require_x509=False, signature_methods=frozenset({SignatureMethod.HMAC_SHA256})
+                ),
+            )
+
+        # A same-ID replacement around a base64 reference is rejected before the base64 transform runs.
+        tampered = etree.fromstring(etree.tostring(base64_signature))
+        tampered.insert(0, etree.fromstring(b'<evil Id="payload">dGFtcGVyZWQ=</evil>'))
+        with self.assertRaisesRegex(InvalidSignature, "Duplicate ID value 'payload'"):
+            XMLVerifier().verify(
+                tampered,
+                hmac_key=b"demo-key",
+                expect_config=SignatureConfiguration(
+                    require_x509=False, signature_methods=frozenset({SignatureMethod.HMAC_SHA256})
+                ),
+            )
+
     def test_example_multi(self):
         cert, _ = self.load_example_keys()
         with open(os.path.join(os.path.dirname(__file__), "example.pem")) as fh:

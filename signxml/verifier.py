@@ -521,6 +521,9 @@ class XMLVerifier(XMLSignatureProcessor):
 
         root = self.get_root(data)
         self._reject_manifests(root)
+        # Reject duplicate IDs before any reference is resolved: with duplicate IDs, fragment lookup depends on
+        # parser behavior and an attacker can place a same-ID replacement node outside the signed content.
+        self._check_id_uniqueness(root)
         signature_ref = self._get_signature(root)
 
         # We could do a deep copy here, but it wouldn't preserve root level namespaces

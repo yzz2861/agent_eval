@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.hashes import Hash
 from lxml import etree
 
 from .algorithms import CanonicalizationMethod, DigestAlgorithm, digest_algorithm_implementations
-from .exceptions import InvalidInput
+from .exceptions import InvalidInput, InvalidSignature
 from .util import namespaces
 
 logger = logging.getLogger(__name__)
@@ -161,6 +161,43 @@ class XMLSignatureProcessor(XMLProcessor):
         logger.debug("Canonicalized string (exclusive=%s, with_comments=%s): %s", exclusive, with_comments, c14n)
         return c14n
 
+    def _get_id_index(self, doc_root):
+        """
+        Build a mapping of ID attribute values to the elements carrying them, using every configured ID attribute
+        name (matching on local name, as in XMLDSig reference resolution). XMLDSig requires each ID value to identify
+        a single element: duplicate values let an attacker insert a replacement node with the same ID outside the
+        signed content and have an implementation-dependent lookup (such as lxml's) resolve the reference to it.
+        """
+        id_index: dict[str, list[etree._Element]] = {}
+        for element in doc_root.iter():
+            for attribute_name, attribute_value in element.attrib.items():
+                local_name = attribute_name.rsplit("}", 1)[-1]
+                if local_name in self.id_attributes:
+                    id_index.setdefault(attribute_value, []).append(element)
+        return id_index
+
+    def _check_id_uniqueness(self, doc_root):
+        """
+        Reject documents where a configured ID attribute value appears on more than one element, regardless of
+        whether the repeated attributes share a name or namespace. Such documents cannot be safely referenced by
+        fragment URIs, because the resolved node then depends on parser and lookup behavior.
+        """
+        for id_value, elements in self._get_id_index(doc_root).items():
+            if len(elements) > 1:
+                attribute_names = sorted(
+                    {
+                        name.rsplit("}", 1)[-1]
+                        for element in elements
+                        for name in element.attrib
+                        if name.rsplit("}", 1)[-1] in self.id_attributes
+                    }
+                )
+                raise InvalidSignature(
+                    f"Duplicate ID value {id_value!r} found on {len(elements)} elements "
+                    f"(ID attributes checked: {', '.join(attribute_names)}); fragment references must resolve to "
+                    "a unique element"
+                )
+
     def _resolve_reference(self, doc_root, reference, uri_resolver=None):
         uri = reference.get("URI")
         if uri is None:
@@ -171,13 +208,17 @@ class XMLSignatureProcessor(XMLProcessor):
             raise InvalidInput("XPointer references are not supported")
             # doc_root.xpath(uri.lstrip("#"))[0]
         elif uri.startswith("#"):
-            for id_attribute in self.id_attributes:
-                xpath_query = f"//*[@*[local-name() = '{id_attribute}']=$uri]"
-                results = doc_root.xpath(xpath_query, uri=uri.lstrip("#"))
-                if len(results) > 1:
-                    raise InvalidInput(f"Ambiguous reference URI {uri} resolved to {len(results)} nodes")
-                elif len(results) == 1:
-                    return results[0]
+            fragment = uri.lstrip("#")
+            # Resolve against a single document-wide ID index so every configured ID attribute name shares one
+            # namespace and a duplicate ID can never resolve ambiguously (or to an attacker-chosen node).
+            matches = self._get_id_index(doc_root).get(fragment, [])
+            if len(matches) > 1:
+                raise InvalidSignature(
+                    f"Reference URI {uri} resolved to {len(matches)} elements with the same ID; the document "
+                    "contains duplicate IDs"
+                )
+            elif len(matches) == 1:
+                return matches[0]
             raise InvalidInput(f"Unable to resolve reference URI: {uri}")
         else:
             if uri_resolver is None:
