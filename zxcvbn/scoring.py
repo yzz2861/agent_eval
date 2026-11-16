@@ -1,4 +1,4 @@
-from math import log, factorial
+from math import log, factorial, sqrt
 
 import re
 
@@ -24,6 +24,13 @@ MIN_SUBMATCH_GUESSES_MULTI_CHAR = 50
 
 MIN_YEAR_SPACE = 20
 REFERENCE_YEAR = 2017
+
+# l33t substitutions are scored from a finite table.  Combinations that mix
+# many independent substitutions can otherwise multiply without bound and
+# make a short, random-looking token look far stronger than it is.  Keep the
+# search-space estimate bounded, just as a real attacker would not enumerate
+# every theoretical table after finding a dictionary hit.
+MAX_L33T_VARIATIONS = 10000
 
 
 def nCk(n, k):
@@ -336,6 +343,80 @@ KEYBOARD_STARTING_POSITIONS = len(ADJACENCY_GRAPHS['qwerty'].keys())
 KEYPAD_STARTING_POSITIONS = len(ADJACENCY_GRAPHS['keypad'].keys())
 
 
+def _spatial_directions(token, graph):
+    """Return the adjacency-slot direction of every step in a spatial match.
+
+    Adjacency graphs list neighbours in six slots: left, upper-left,
+    upper-right, right, lower-right and lower-left.  A missing link means the
+    token was not a single contiguous walk, in which case no path penalty is
+    applied.
+    """
+    directions = []
+    for prev_char, cur_char in zip(token, token[1:]):
+        adjacents = graph.get(prev_char) or []
+        direction = None
+        for index, adjacent in enumerate(adjacents):
+            if adjacent and cur_char in adjacent:
+                direction = index
+                break
+        if direction is None:
+            return None
+        directions.append(direction)
+    return directions
+
+
+def _direction_cycle_repeats(directions):
+    """Return how many times the shortest repeating direction cycle occurs.
+
+    Straight rows repeat one direction; a snake commonly alternates two
+    directions.  Both are much cheaper than the independent-turn estimate.
+    """
+    length = len(directions)
+    for period in range(1, length // 2 + 1):
+        if length % period:
+            continue
+        if all(directions[i] == directions[i % period]
+               for i in range(length)):
+            return length // period
+    return 1
+
+
+def _regular_spatial_guesses(match):
+    """Estimate a periodic keyboard walk without exploding over its turns.
+
+    The canonical turn formula counts every possible choice of direction at
+    every turn.  For a path that follows a fixed direction cycle (a row sweep,
+    an alternating snake, or a repeated path) there is only one direction
+    sequence to try, so the useful search space is bounded by the starting
+    position, length, cycle repetitions and the key-to-key layout distance.
+    """
+    graph = ADJACENCY_GRAPHS.get(match['graph'])
+    if graph is None:
+        return None
+
+    directions = _spatial_directions(match['token'], graph)
+    if not directions:
+        return None
+
+    repeats = _direction_cycle_repeats(directions)
+    if repeats < 2:
+        return None
+
+    # Horizontal neighbours have distance 1; diagonal neighbours are farther
+    # apart.  This keeps wider sweeps at least as expensive as tight rows.
+    distance = sum(1.0 if direction in (0, 3) else sqrt(2.0)
+                   for direction in directions)
+    average_step = distance / float(len(directions))
+
+    if match['graph'] in ['qwerty', 'dvorak']:
+        starting_positions = KEYBOARD_STARTING_POSITIONS
+    else:
+        starting_positions = KEYPAD_STARTING_POSITIONS
+
+    return (starting_positions * max(1, len(match['token']) - 1) *
+            average_step * repeats)
+
+
 def spatial_guesses(match):
     if match['graph'] in ['qwerty', 'dvorak']:
         s = KEYBOARD_STARTING_POSITIONS
@@ -352,6 +433,15 @@ def spatial_guesses(match):
         possible_turns = min(t, i - 1) + 1
         for j in range(1, possible_turns):
             guesses += nCk(i - 1, j - 1) * s * pow(d, j)
+
+    # Long regular sweeps (full rows and QWERTY snakes) are a tiny family of
+    # paths, not an independent direction choice at every key.  Cap the
+    # turn-based count at their start/length/cycle search space so they do not
+    # get an unrealistically strong score.
+    regular_guesses = _regular_spatial_guesses(match)
+    if regular_guesses is not None:
+        guesses = min(guesses, regular_guesses)
+
     # add extra guesses for shifted keys. (% instead of 5, A instead of a.)
     # math is similar to extra guesses of l33t substitutions in dictionary
     # matches.
@@ -421,4 +511,7 @@ def l33t_variations(match):
                 possibilities += nCk(U + S, i)
             variations *= possibilities
 
-    return variations
+    # Bound the combinatorial product.  Without this, a long token containing
+    # many substitution types can produce an astronomically large multiplier
+    # and make a weak, repeated l33t token look unguessable.
+    return min(variations, MAX_L33T_VARIATIONS)
