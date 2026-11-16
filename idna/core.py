@@ -4,10 +4,12 @@ import bisect
 import re
 import unicodedata
 import warnings
+from dataclasses import dataclass
 from typing import Literal
 
 from . import idnadata
 from .intranges import intranges_contain
+from .package_data import __version__
 
 _virama_combining_class = 9
 _alabel_prefix = b"xn--"
@@ -867,3 +869,113 @@ def decode(
     if trailing_dot:
         result.append("")
     return ".".join(result)
+
+
+@dataclass(frozen=True)
+class CanonicalName:
+    """Canonical, comparison-ready form of a domain name.
+
+    Returned by :func:`canonicalize` so callers such as certificate
+    validators can compare domain names without re-implementing the
+    IDNA processing rules themselves. Comparing the raw input (for
+    example with :meth:`str.lower`) is not safe: it does not perform
+    the UTS #46 mappings, label separator normalisation, NFC
+    normalisation or A-label encoding that two spellings of the same
+    name require.
+
+    The table versions used to produce the result are carried with it
+    so a service can log or check which rule set canonicalised a name,
+    and reject comparisons made against tables from a different
+    release rather than silently mixing them.
+
+    * ``alabel`` -- the canonical domain as lowercase ASCII
+      :class:`bytes`, one A-label (or LDH label) per label, joined with
+      ``.`` and without a trailing dot. This is the value to compare
+      byte-for-byte against a certificate SAN or another canonical
+      name; two names are the same precisely when these are equal.
+    * ``idna_version`` -- the release version of this library
+      (``idna.__version__``).
+    * ``unicode_version`` -- the Unicode release of the generated IDNA
+      and UTS #46 lookup tables (``idna.unicode_version``).
+    """
+
+    alabel: bytes
+    idna_version: str
+    unicode_version: str
+
+
+def canonicalize(domain: str | bytes | bytearray) -> CanonicalName:
+    """Produce the canonical A-label form of a domain for comparison.
+
+    This is the single entry point applications should use before
+    comparing a user-supplied domain with an identifier such as a DNS
+    name in a certificate SAN. It runs the full mapping-then-encoding
+    pipeline on both names, so differences that are not meaningful to
+    DNS identity -- ASCII case, the trailing root dot, Unicode label
+    separators (``U+3002``, ``U+FF0E``, ``U+FF61``), UTS #46 mapped
+    and ignored characters, and non-NFC input -- are removed before
+    the comparison.
+
+    Processing follows the same tables throughout:
+
+    1. :func:`uts46_remap` applies the UTS #46 case fold, character
+       mappings (including the IDNA 2008 deviation handling), ignored
+       characters and NFC normalisation, and maps every accepted label
+       separator to ``U+002E`` (:rfc:`5890` treats these separators as
+       equivalent).
+    2. :func:`encode` validates each label under IDNA 2008 and emits
+       the A-label (``xn--``) form, lowercasing plain ASCII labels.
+    3. Any trailing dot, which is presentation only and not part of
+       the wire name, is dropped so the result is byte comparable.
+
+    Applying :meth:`str.lower` to the raw input instead would skip
+    steps 1-3 and reject valid names (for example an uppercase U-label
+    or a name ending in a dot), so it must not be used.
+
+    The returned :class:`CanonicalName` records the library and Unicode
+    table versions that produced it. Pass two results to
+    :func:`match` rather than comparing them by hand.
+
+    :param domain: The domain name to canonicalise; bytes are accepted
+        when they are ASCII, matching :func:`encode`.
+    :returns: A :class:`CanonicalName` whose ``alabel`` is the
+        lowercase, dot-joined A-label domain without a trailing dot.
+    :raises IDNAError: If the domain cannot be mapped or encoded.
+    """
+    encoded = encode(domain, uts46=True, std3_rules=True)
+    if encoded.endswith(b"."):
+        encoded = encoded[:-1]
+    return CanonicalName(
+        alabel=encoded,
+        idna_version=__version__,
+        unicode_version=idnadata.__version__,
+    )
+
+
+def match(left: str | bytes | bytearray | CanonicalName, right: str | bytes | bytearray | CanonicalName) -> bool:
+    """Return whether two domain names identify the same DNS name.
+
+    Both arguments are run through :func:`canonicalize` (values that
+    are already :class:`CanonicalName` are reused as-is) and their
+    canonical A-labels are compared as bytes. This is the comparison
+    a certificate or allow-list check needs: it treats case, the
+    trailing dot, Unicode separators and UTS #46 mappings as
+    equivalent while still rejecting names that fail IDNA 2008.
+
+    A pre-computed :class:`CanonicalName` keeps its attached version,
+    so callers that canonicalise once and compare many times do not
+    pay the mapping cost repeatedly and can audit the table versions
+    in use. The comparison does not require the two results to have
+    been built by the same release; callers that need to enforce that
+    should compare ``idna_version`` and ``unicode_version`` on the
+    :class:`CanonicalName` objects themselves.
+
+    :param left: A domain name, or a :class:`CanonicalName` from a
+        previous :func:`canonicalize` call.
+    :param right: A domain name, or a :class:`CanonicalName`.
+    :returns: ``True`` if the canonical A-labels are byte-identical.
+    :raises IDNAError: If either argument cannot be canonicalised.
+    """
+    left_name = left if isinstance(left, CanonicalName) else canonicalize(left)
+    right_name = right if isinstance(right, CanonicalName) else canonicalize(right)
+    return left_name.alabel == right_name.alabel

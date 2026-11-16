@@ -61,6 +61,40 @@ where a domain is in use, the A-label form can be presented when it
 is not a valid IDN.
 
 
+## Canonical name comparison
+
+Comparing a user-supplied domain against an identifier such as a DNS
+name in a certificate SAN must not be done by lowercasing the raw
+input: that skips the UTS #46 mappings, Unicode label separators,
+normalisation and A-label encoding, and wrongly rejects valid names
+that differ only in case or carry a trailing dot. Use
+`idna.canonicalize()`, which applies the full mapping-then-IDNA 2008
+pipeline and returns an `idna.CanonicalName`:
+
+```pycon
+>>> import idna
+>>> name = idna.canonicalize('WWW.Example.COM.')
+>>> name
+CanonicalName(alabel=b'www.example.com', idna_version='3.20', unicode_version='18.0.0')
+>>> name.alabel == idna.canonicalize('www.example.com').alabel
+True
+```
+
+`idna.match()` canonicalises both sides and performs the byte
+comparison, accepting an existing `CanonicalName` to avoid repeating
+the work:
+
+```pycon
+>>> idna.match('xn--ZCKZAH.', 'テスト')
+True
+```
+
+The result carries the library release (`idna_version`) and the
+Unicode release of the lookup tables (`unicode_version`) that
+produced it, so services can log or verify which rule set was used
+and avoid comparing names canonicalised with different tables.
+
+
 ## Exceptions
 
 All errors raised during conversion derive from the `idna.IDNAError`

@@ -589,6 +589,113 @@ class IDNATests(unittest.TestCase):
         )
 
 
+class CanonicalizationTests(unittest.TestCase):
+    def test_uppercase_ascii_is_casefolded(self):
+        # RFC 5890: ASCII letters are case-folded for comparison, but the
+        # raw input must not be lower()coded by the caller; canonicalize()
+        # runs the whole UTS #46 plus IDNA 2008 pipeline instead.
+        self.assertEqual(idna.canonicalize("WWW.EXAMPLE.COM").alabel, b"www.example.com")
+        self.assertEqual(idna.canonicalize("Example.COM").alabel, b"example.com")
+        # An uppercase ACE prefix and fullwidth letters normalise identically.
+        self.assertEqual(idna.canonicalize("XN--ZCKZAH").alabel, b"xn--zckzah")
+        self.assertEqual(idna.canonicalize("\uff21\uff22\uff23\uff0e\uff23\uff2f\uff2d").alabel, b"abc.com")
+        # Uppercase non-ASCII letters are mapped before A-label encoding.
+        self.assertEqual(idna.canonicalize("K\u00d6NIG.de").alabel, b"xn--knig-5qa.de")
+        self.assertTrue(idna.match("WWW.Example.COM", "www.example.com"))
+        self.assertTrue(idna.match("XN--ZCKZAH", "\u30c6\u30b9\u30c8"))
+
+    def test_trailing_dot_is_removed(self):
+        # The root label is presentation only; the canonical byte form never
+        # carries it, so a dotted and undotted name compare equal.
+        self.assertEqual(idna.canonicalize("example.com.").alabel, b"example.com")
+        self.assertEqual(idna.canonicalize("WWW.Example.COM.").alabel, b"www.example.com")
+        self.assertEqual(idna.canonicalize("\u30c6\u30b9\u30c8.").alabel, b"xn--zckzah")
+        self.assertFalse(idna.canonicalize("example.com.").alabel.endswith(b"."))
+        self.assertTrue(idna.match("example.com.", "example.com"))
+        self.assertTrue(idna.match("xn--zckzah.", "xn--zckzah"))
+
+    def test_unicode_separators_and_mapped_characters(self):
+        # UTS #46 maps every accepted label separator to U+002E, drops
+        # ignored characters (e.g. soft hyphen) and applies NFC, all before
+        # the A-label is produced.
+        self.assertEqual(idna.canonicalize("abc\uff0eexample\uff0ecom").alabel, b"abc.example.com")
+        self.assertEqual(idna.canonicalize("abc\u3002example\uff61com").alabel, b"abc.example.com")
+        self.assertEqual(idna.canonicalize("example\u00ad.com").alabel, b"example.com")
+        self.assertEqual(idna.canonicalize("e\u0301xample.com").alabel, b"xn--xample-9ua.com")
+        self.assertTrue(idna.match("abc\uff0eexample\uff0ecom", "abc.example.com"))
+
+    def test_mixed_scripts(self):
+        # Labels combining scripts are still encoded to a single A-label by
+        # IDNA 2008; the canonical form is stable regardless of the scripts.
+        self.assertEqual(idna.canonicalize("\u0440\u0430ypal.com").alabel, b"xn--ypal-43d9g.com")
+        self.assertEqual(
+            idna.canonicalize("\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444").alabel, b"xn--e1afmkfd.xn--p1ai",
+        )
+        self.assertEqual(
+            idna.canonicalize("\u0645\u062b\u0627\u0644.\u0625\u062e\u062a\u0628\u0627\u0631").alabel,
+            b"xn--mgbh0fb.xn--kgbechtv",
+        )
+        self.assertEqual(idna.canonicalize("example.\u0440\u0444").alabel, b"example.xn--p1ai")
+        # A Cyrillic homograph of an ASCII name keeps a distinct wire form,
+        # so canonical comparison does not conflate the two labels.
+        self.assertNotEqual(
+            idna.canonicalize("\u0440\u0430ypal.com").alabel,
+            idna.canonicalize("paypal.com").alabel,
+        )
+        self.assertFalse(idna.match("\u0440\u0430ypal.com", "paypal.com"))
+
+    def test_match_equivalence_classes(self):
+        equivalents = [
+            "WWW.EXAMPLE.COM.",
+            "www.example.com",
+            "www\uff0eexample\uff0ecom",
+            b"WWW.example.com",
+        ]
+        for left in equivalents:
+            for right in equivalents:
+                with self.subTest(left=left, right=right):
+                    self.assertTrue(idna.match(left, right))
+        self.assertFalse(idna.match("example.com", "example.org"))
+        self.assertFalse(idna.match("example.com", "www.example.com"))
+
+    def test_match_accepts_precomputed_canonical_name(self):
+        canonical = idna.canonicalize("WWW.Example.COM.")
+        self.assertTrue(idna.match(canonical, "www.example.com"))
+        self.assertTrue(idna.match("www.example.com", canonical))
+        # Passing both precomputed names reuses them without recomputation.
+        self.assertTrue(idna.match(canonical, idna.canonicalize("www.example.com")))
+        self.assertEqual(canonical.alabel, b"www.example.com")
+
+    def test_result_carries_table_versions(self):
+        from idna import idnadata, package_data
+
+        result = idna.canonicalize("example.com")
+        self.assertEqual(result.idna_version, package_data.__version__)
+        self.assertEqual(result.idna_version, idna.__version__)
+        self.assertEqual(result.unicode_version, idnadata.__version__)
+        self.assertEqual(result.unicode_version, idna.unicode_version)
+        # The same tables back every result, and the value is exposed for
+        # callers to log or check rather than guessing which table was used.
+        self.assertEqual(idna.canonicalize("\u30c6\u30b9\u30c8").idna_version, result.idna_version)
+        self.assertEqual(idna.canonicalize("\u30c6\u30b9\u30c8").unicode_version, result.unicode_version)
+
+    def test_canonical_name_is_value_type(self):
+        first = idna.canonicalize("WWW.Example.COM.")
+        second = idna.canonicalize("www.example.com")
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+        with self.assertRaises(Exception):
+            first.alabel = b"different"
+
+    def test_invalid_input_raises_idnaerror(self):
+        # STD3 rejects non-LDH ASCII such as underscore and wildcard, and
+        # empty labels are rejected; callers never get a silent mismatch.
+        for bad in ("_bad.example", "*.example.com", "a..b"):
+            with self.subTest(bad=bad):
+                self.assertRaises(idna.IDNAError, idna.canonicalize, bad)
+                self.assertRaises(idna.IDNAError, idna.match, bad, "example.com")
+
+
 class UnicodeVersionTests(unittest.TestCase):
     def test_unicode_version_is_exported_and_consistent(self):
         import idna.idnadata

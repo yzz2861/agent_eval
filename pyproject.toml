@@ -93,3 +93,9 @@ ignore = [
     # `__all__` lists __version__ first by convention; otherwise sorted.
     "RUF022",       # unsorted-dunder-all
 ]
+
+[tool.pytest.ini_options]
+# Keep conftest discovery inside the repository; without a cutoff pytest
+# walks above the checkout, which fails in sandboxed environments where
+# parent directories are not readable.
+addopts = "--confcutdir=tests"

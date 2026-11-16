@@ -2,6 +2,12 @@
 
 ## 3.21 (2026-XX-XX)
 
+- Add `idna.canonicalize()` and `idna.match()` for comparing domain
+  names (for example against certificate SANs) through one UTS #46
+  mapping plus IDNA 2008 encoding pipeline, instead of lowercasing the
+  raw input. `canonicalize()` returns a `CanonicalName` carrying the
+  library and Unicode table versions used, so callers do not silently
+  mix tables across services.
 - Raise the minimum supported Python version to 3.10
 
 ## 3.20 (2026-09-17)
