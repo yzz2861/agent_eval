@@ -1,6 +1,7 @@
 import pytest
 
 from pycose.algorithms import Es256
+from pycose.exceptions import CoseException
 from pycose.headers import Algorithm
 from pycose.keys import EC2Key
 from pycose.keys.curves import P256
@@ -17,5 +18,5 @@ def test_unknown_message_type(sign1_message):
     assert isinstance(decoded_msg, Sign1Message)
 
 def test_incorrect_message_type(sign1_message):
-    with pytest.raises(TypeError, match="CBOR tag .* does not match the expected message type"):
+    with pytest.raises(CoseException, match="CBOR tag .* does not match the expected message type"):
         Enc0Message.decode(sign1_message)

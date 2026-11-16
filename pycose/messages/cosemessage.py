@@ -3,7 +3,7 @@ from typing import Optional, TypeVar, Type, TYPE_CHECKING
 
 import cbor2
 
-from pycose.exceptions import CoseInvalidKey
+from pycose.exceptions import CoseException, CoseInvalidKey, CoseMalformedMessage
 from pycose.keys import CoseKey
 from pycose.keys.ec2 import EC2Key
 from pycose.keys.okp import OKPKey
@@ -43,35 +43,47 @@ class CoseMessage(CoseBase, metaclass=abc.ABCMeta):
 
         :param received: COSE messages encoded as bytes
 
-        :raises AttributeError: When the COSE message, it cannot be decoded properly
-        :raises ValueError: The received parameter must be bytes
-        :raises KeyError: thrown when the CBOR tag, identifying the COSE message is unrecognized
-        :raises TypeError: thrown when the messages cannot be decoded properly
-        :raises TypeError: The message's tag does not match the expected type.
+        :raises CoseException: When the input cannot be decoded as a COSE message.
         :returns: An initialized CoseMessage
         """
 
+        if not isinstance(received, bytes):
+            raise CoseMalformedMessage("Decode accepts only bytes as input.")
+
         try:
             cbor_msg = cbor2.loads(received)
+        except CoseException:
+            raise
+        except Exception as exc:
+            raise CoseMalformedMessage(f"Unable to decode CBOR message: {exc}") from exc
+
+        try:
             cbor_tag = cbor_msg.tag
             cose_obj = cbor_msg.value
-        except AttributeError:
-            raise AttributeError("Message was not tagged.")
-        except ValueError:
-            raise ValueError("Decode accepts only bytes as input.")
+        except AttributeError as exc:
+            raise CoseMalformedMessage("Message was not tagged.") from exc
+        except Exception as exc:
+            raise CoseMalformedMessage(f"Unable to read the COSE message envelope: {exc}") from exc
 
         if isinstance(cose_obj, list):
+            if cbor_tag not in cls._COSE_MSG_ID:
+                raise CoseMalformedMessage(f"CBOR tag is not recognized: {cbor_tag!r}")
+
             try:
                 decoded = cls._COSE_MSG_ID[cbor_tag].from_cose_obj(cose_obj, kwargs.get("allow_unknown_attributes", True))
-            except KeyError as e:
-                raise KeyError("CBOR tag is not recognized", e)
+            except CoseException:
+                raise
+            except Exception as exc:
+                raise CoseMalformedMessage(f"Unable to decode COSE message: {exc}") from exc
 
             if not isinstance(decoded, cls):
-                raise TypeError(f"CBOR tag {cbor_tag} does not match the expected message type {cls.__name__}.")
+                raise CoseMalformedMessage(
+                    f"CBOR tag {cbor_tag} does not match the expected message type {cls.__name__}."
+                )
 
             return decoded
         else:
-            raise TypeError("Bytes cannot be decoded as COSE message")
+            raise CoseMalformedMessage("Bytes cannot be decoded as COSE message")
 
     @classmethod
     def from_cose_obj(cls: Type['CM'], cose_obj: list, allow_unknown_attributes: bool) -> 'CM':

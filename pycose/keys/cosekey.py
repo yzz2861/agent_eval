@@ -9,7 +9,13 @@ from cryptography.hazmat.primitives.serialization import NoEncryption, load_pem_
 
 from pycose import utils
 from pycose.algorithms import CoseAlgorithm
-from pycose.exceptions import CoseException, CoseIllegalKeyType, CoseIllegalAlgorithm, CoseIllegalKeyOps
+from pycose.exceptions import (
+    CoseException,
+    CoseIllegalKeyType,
+    CoseIllegalAlgorithm,
+    CoseIllegalKeyOps,
+    CoseMalformedMessage,
+)
 from pycose.headers import EphemeralKey, StaticKey
 from pycose.keys.keyops import KeyOps
 from pycose.keys.keyparam import KpKty, KpKeyOps, KpAlg, KpKid, KpBaseIV, KeyParam
@@ -33,10 +39,26 @@ class CoseKey(MutableMapping, ABC):
         Decodes a CBOR-encoded COSE key object.
 
         :param received: A CBOR-encoded bytestring.
+        :raises CoseException: When the input cannot be decoded as a COSE key.
         :return: An initialized COSE key.
         """
 
-        return CoseKey.from_dict(cbor2.loads(received))
+        if not isinstance(received, bytes):
+            raise CoseMalformedMessage("Decode accepts only bytes as input.")
+
+        try:
+            cbor_key = cbor2.loads(received)
+        except CoseException:
+            raise
+        except Exception as exc:
+            raise CoseMalformedMessage(f"Unable to decode CBOR key: {exc}") from exc
+
+        try:
+            return CoseKey.from_dict(cbor_key)
+        except CoseException:
+            raise
+        except Exception as exc:
+            raise CoseMalformedMessage(f"Unable to decode COSE key: {exc}") from exc
 
     @classmethod
     def record_kty(cls, kty: Type['KTYPE']) -> Callable:

@@ -1,26 +1,26 @@
-class CoseIllegalAlgorithm(Exception):
-    pass
-
-
-class CoseUnsupportedCurve(Exception):
-    pass
-
-
-class CoseIllegalKeyOps(Exception):
-    pass
-
-
-class CoseIllegalKeyType(Exception):
-    pass
-
-
-class CoseMalformedMessage(Exception):
-    pass
-
-
-class CoseInvalidKey(Exception):
-    pass
-
-
 class CoseException(Exception):
+    """Base class for all exceptions raised by pycose."""
+
+
+class CoseIllegalAlgorithm(CoseException):
+    pass
+
+
+class CoseUnsupportedCurve(CoseException):
+    pass
+
+
+class CoseIllegalKeyOps(CoseException):
+    pass
+
+
+class CoseIllegalKeyType(CoseException):
+    pass
+
+
+class CoseMalformedMessage(CoseException):
+    pass
+
+
+class CoseInvalidKey(CoseException):
     pass
