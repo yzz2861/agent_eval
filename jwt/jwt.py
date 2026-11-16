@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from collections.abc import Sequence as SequenceABC
 from datetime import (
     datetime,
     timezone,
@@ -21,6 +22,8 @@ from typing import (
     AbstractSet,
     Any,
     Optional,
+    Sequence,
+    Union,
 )
 
 from jwt.utils import (
@@ -90,6 +93,8 @@ class JWT:
         do_verify=True,
         algorithms: Optional[AbstractSet[str]] = None,
         do_time_check: bool = True,
+        expected_issuer: Optional[str] = None,
+        expected_audience: Optional[Union[str, Sequence[str]]] = None,
     ) -> dict[str, Any]:
         if not isinstance(self, JWT):  # pragma: no cover
             # https://github.com/GehirnInc/python-jwt/issues/15
@@ -140,4 +145,53 @@ class JWT:
             if now < nbf:
                 raise JWTDecodeError("JWT Not valid yet")
 
+        self._validate_claims(payload, expected_issuer, expected_audience)
+
         return payload
+
+    def _validate_claims(
+        self,
+        payload: dict[str, Any],
+        expected_issuer: Optional[str],
+        expected_audience: Optional[Union[str, Sequence[str]]],
+    ) -> None:
+        if expected_issuer is not None:
+            if "iss" not in payload:
+                raise JWTDecodeError('JWT is missing the "iss" claim')
+            if payload["iss"] != expected_issuer:
+                raise JWTDecodeError(
+                    'JWT "iss" claim does not match the expected issuer'
+                )
+
+        if expected_audience is not None:
+            if "aud" not in payload:
+                raise JWTDecodeError('JWT is missing the "aud" claim')
+
+            audience = payload["aud"]
+            if isinstance(audience, str):
+                token_audiences = {audience}
+            elif isinstance(audience, list) and all(
+                isinstance(item, str) for item in audience
+            ):
+                token_audiences = set(audience)
+            else:
+                raise JWTDecodeError(
+                    'JWT "aud" claim must be a string or a list of strings'
+                )
+
+            if isinstance(expected_audience, str):
+                expected_audiences = {expected_audience}
+            elif isinstance(expected_audience, SequenceABC) and all(
+                isinstance(item, str) for item in expected_audience
+            ):
+                expected_audiences = set(expected_audience)
+            else:
+                raise TypeError(
+                    "expected_audience must be a string or a sequence of "
+                    "strings"
+                )
+
+            if not token_audiences & expected_audiences:
+                raise JWTDecodeError(
+                    'JWT "aud" claim does not match any expected audience'
+                )

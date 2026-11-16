@@ -108,3 +108,105 @@ class JWTTest(TestCase):
         key = jwk_from_dict(json.loads(load_testdata("rsa_privkey.json", "r")))
         comp = self.inst.encode(message, key, alg="PS256")
         assert self.inst.decode(comp, key) == message
+
+    def test_expected_issuer(self):
+        message = self.inst.decode(
+            self.compact_jws,
+            self.key,
+            do_time_check=False,
+            expected_issuer="joe",
+        )
+        self.assertEqual(message, self.message)
+
+    def test_expected_issuer_mismatch(self):
+        self.assertRaisesRegex(
+            JWTDecodeError,
+            'JWT "iss" claim does not match the expected issuer',
+            self.inst.decode,
+            self.compact_jws,
+            self.key,
+            do_time_check=False,
+            expected_issuer="not-joe",
+        )
+
+    def test_expected_audience_string(self):
+        message = {"aud": "client"}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertEqual(
+            self.inst.decode(
+                compact_jws, self.key, expected_audience="client"
+            ),
+            message,
+        )
+
+    def test_expected_audience_matches_list_claim(self):
+        message = {"aud": ["client-a", "client-b"]}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertEqual(
+            self.inst.decode(
+                compact_jws, self.key, expected_audience="client-b"
+            ),
+            message,
+        )
+
+    def test_expected_audience_list(self):
+        message = {"aud": "client-b"}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertEqual(
+            self.inst.decode(
+                compact_jws,
+                self.key,
+                expected_audience=["client-a", "client-b"],
+            ),
+            message,
+        )
+
+    def test_expected_audience_mismatch(self):
+        message = {"aud": ["client-a", "client-b"]}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertRaisesRegex(
+            JWTDecodeError,
+            'JWT "aud" claim does not match any expected audience',
+            self.inst.decode,
+            compact_jws,
+            self.key,
+            expected_audience=["client-c"],
+        )
+
+    def test_missing_issuer_rejected(self):
+        message = {"sub": "joe"}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertRaisesRegex(
+            JWTDecodeError,
+            'JWT is missing the "iss" claim',
+            self.inst.decode,
+            compact_jws,
+            self.key,
+            expected_issuer="joe",
+        )
+
+    def test_missing_audience_rejected(self):
+        message = {"sub": "joe"}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertRaisesRegex(
+            JWTDecodeError,
+            'JWT is missing the "aud" claim',
+            self.inst.decode,
+            compact_jws,
+            self.key,
+            expected_audience="client",
+        )
+
+    def test_claims_validation_disabled_allows_missing_claims(self):
+        message = {"sub": "joe"}
+        compact_jws = self.inst.encode(message, self.key)
+        self.assertEqual(
+            self.inst.decode(
+                compact_jws,
+                self.key,
+                do_time_check=False,
+                expected_issuer=None,
+                expected_audience=None,
+            ),
+            message,
+        )

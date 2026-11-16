@@ -72,6 +72,35 @@ Examples
    assert message == message_received
 
 
+Claims Validation
+-----------------
+
+The ``decode`` method can validate the standard ``iss`` and ``aud`` claims.
+Pass ``expected_issuer`` for an exact, case-sensitive issuer match, and
+``expected_audience`` for a single acceptable audience or a list of
+acceptable audiences.  When ``expected_audience`` is a list, the token is
+accepted if its ``aud`` claim matches at least one entry.  The ``aud`` claim
+in the token may itself be either a string or a list of strings.
+
+.. code-block:: python
+
+   message_received = instance.decode(
+       compact_jws,
+       verifying_key,
+       expected_issuer='https://example.com/',
+       expected_audience=['client-a', 'client-b'],
+   )
+
+Claims validation is disabled by default by leaving ``expected_issuer`` and
+``expected_audience`` as ``None``.  When an expected value is supplied, the
+corresponding claim is required: a token missing ``iss`` or ``aud`` is
+rejected with ``JWTDecodeError``.  A missing claim is never treated as a
+wildcard.  An issuer or audience that does not match also raises
+``JWTDecodeError``.  Claims validation is independent of ``do_time_check``
+and ``do_verify``; disabling either of those does not disable the requested
+issuer or audience checks.
+
+
 Installation
 ------------
 
