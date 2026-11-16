@@ -1432,6 +1432,80 @@ class TestSignXML(unittest.TestCase, LoadExampleKeys):
             with open(filename, "rb") as fh, self.assertRaises((InvalidInput, etree.XMLSyntaxError)):
                 XMLVerifier().verify(fh.read())
 
+    def test_xxe_external_entity_not_resolved(self):
+        secret = "XXE-SECRET-TOKEN-7f3a9c"
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write(secret)
+            secret_path = fh.name
+        try:
+            xxe = (
+                '<?xml version="1.0"?>\n'
+                f'<!DOCTYPE data [<!ENTITY xxe SYSTEM "file://{secret_path}">]>\n'
+                "<data>&xxe;</data>"
+            )
+            with self.assertRaises(InvalidInput) as ctx:
+                XMLVerifier().verify(xxe)
+            self.assertNotIn(secret, str(ctx.exception))
+        finally:
+            os.unlink(secret_path)
+
+    def test_external_dtd_not_loaded(self):
+        # The external subset must neither be fetched (no network access) nor honored.
+        with self.assertRaisesRegex(InvalidInput, "DTD"):
+            XMLVerifier().verify(b'<!DOCTYPE data SYSTEM "http://127.0.0.1:9/evil.dtd"><data/>')
+
+    def test_billion_laughs_rejected(self):
+        bomb = [
+            '<?xml version="1.0"?>',
+            "<!DOCTYPE lolz [",
+            '<!ENTITY lol "lollollollollollollollollollol">',
+        ]
+        for i in range(1, 10):
+            bomb.append(f'<!ENTITY lol{i} "{("&lol" + str(i - 1) + ";") * 10}">')
+        bomb.append("]>")
+        bomb.append("<data>&lol9;</data>")
+        start = time.time()
+        with self.assertRaises((InvalidInput, etree.XMLSyntaxError)):
+            XMLVerifier().verify("".join(bomb))
+        self.assertLess(time.time() - start, 10)
+
+    def test_excessively_deep_document_rejected(self):
+        # Just past SignXML's depth limit but below libxml2's hard limit: controlled InvalidInput.
+        depth = processor._MAX_TREE_DEPTH + 50
+        deep = b"<a>" * depth + b"x" + b"</a>" * depth
+        with self.assertRaisesRegex(InvalidInput, "depth"):
+            XMLVerifier().verify(deep)
+        # Absurdly deep documents must still fail fast with a controlled exception, not a crash or hang.
+        extreme = b"<a>" * 5000 + b"x" + b"</a>" * 5000
+        start = time.time()
+        with self.assertRaises((InvalidInput, etree.XMLSyntaxError)):
+            XMLVerifier().verify(extreme)
+        self.assertLess(time.time() - start, 10)
+
+    def test_oversized_document_rejected(self):
+        many = b"<root>" + b"<a/>" * (processor._MAX_NODE_COUNT + 1) + b"</root>"
+        with self.assertRaisesRegex(InvalidInput, "node count"):
+            XMLVerifier().verify(many)
+
+    def test_tree_limits_configurable(self):
+        class StrictVerifier(XMLVerifier):
+            _max_node_count = 5
+            _max_tree_depth = 3
+
+        with self.assertRaisesRegex(InvalidInput, "node count"):
+            StrictVerifier().verify(b"<root><a><b/><b/><b/><b/></a></root>")
+        with self.assertRaisesRegex(InvalidInput, "depth"):
+            StrictVerifier().verify(b"<root><a><b><c/></b></a></root>")
+
+    def test_secure_schema_parser(self):
+        # Schemas are parsed with the same hardened parser: no entities, no DTD, no network.
+        parser = processor._get_secure_xml_parser()
+        self.assertIsInstance(parser, etree.XMLParser)
+        doc = etree.fromstring(b'<!DOCTYPE data SYSTEM "http://127.0.0.1:9/evil.dtd"><data/>', parser=parser)
+        self.assertIsNone(doc.text)
+        for schema in XMLVerifier().schemas():
+            self.assertIsInstance(schema, etree.XMLSchema)
+
     def test_signature_properties_with_detached_method(self):
         doc = etree.Element("Test", attrib={"Id": "mytest"})
         sigprop = etree.Element("{http://somenamespace}MyCustomProperty")

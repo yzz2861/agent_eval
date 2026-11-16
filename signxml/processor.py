@@ -19,13 +19,68 @@ from .util import namespaces
 logger = logging.getLogger(__name__)
 
 
+# Security limits applied when parsing XML input and schemas. These mitigate entity expansion
+# ("billion laughs"), deeply nested documents, and oversized documents used in denial-of-service attacks.
+_MAX_TREE_DEPTH = 100
+_MAX_NODE_COUNT = 100_000
+_MAX_ENTITY_EXPANSION_FACTOR = 100.0
+
+
+def _get_secure_xml_parser(**kwargs) -> etree.XMLParser:
+    # Hardened against XXE and entity expansion attacks:
+    # - resolve_entities=False: never expand internal or external entities
+    # - load_dtd=False: never load the external DTD subset
+    # - no_network=True: forbid network access while parsing
+    # - attribute_defaults=False: do not inject default attributes from DTDs
+    # - huge_tree=False: keep libxml2's built-in limits on text size, depth, and amplification
+    options = dict(
+        resolve_entities=False,
+        load_dtd=False,
+        no_network=True,
+        attribute_defaults=False,
+        huge_tree=False,
+    )
+    options.update(kwargs)
+    return etree.XMLParser(**options)
+
+
+def _check_tree_limits(
+    xml_node,
+    source_size: int | None = None,
+    max_tree_depth: int = _MAX_TREE_DEPTH,
+    max_node_count: int = _MAX_NODE_COUNT,
+    max_entity_expansion_factor: float = _MAX_ENTITY_EXPANSION_FACTOR,
+) -> None:
+    node_count = 0
+    max_depth = 0
+    text_size = 0
+    stack = [(xml_node, 1)]
+    while stack:
+        node, depth = stack.pop()
+        node_count += 1
+        max_depth = max(max_depth, depth)
+        if node.text:
+            text_size += len(node.text)
+        if node.tail:
+            text_size += len(node.tail)
+        stack.extend((child, depth + 1) for child in node)
+    if max_depth > max_tree_depth:
+        raise InvalidInput(f"XML document exceeds the maximum supported depth of {max_tree_depth}")
+    if node_count > max_node_count:
+        raise InvalidInput(f"XML document exceeds the maximum supported node count of {max_node_count}")
+    if source_size and text_size > max_entity_expansion_factor * source_size:
+        raise InvalidInput("XML document exceeds the maximum supported entity expansion factor")
+
+
 @lru_cache
 def get_schema(schema_file: str) -> etree.XMLSchema:
     pkg_name = "signxml.xades.schemas" if schema_file.startswith("XAdES") else "signxml.schemas"
 
     pkg_resources = importlib.resources.files(pkg_name)
     with pkg_resources.joinpath(schema_file).open("r") as schema_fh:
-        return etree.XMLSchema(etree.parse(schema_fh))
+        schema_doc = etree.parse(schema_fh, parser=_get_secure_xml_parser())
+    _check_tree_limits(schema_doc.getroot())
+    return etree.XMLSchema(schema_doc)
 
 
 class XMLProcessor:
@@ -33,6 +88,9 @@ class XMLProcessor:
     _schemas_lock = threading.Lock()
     schema_files: ClassVar[list[str]] = []
     _default_parser, _parser = None, None
+    _max_tree_depth: ClassVar[int] = _MAX_TREE_DEPTH
+    _max_node_count: ClassVar[int] = _MAX_NODE_COUNT
+    _max_entity_expansion_factor: ClassVar[float] = _MAX_ENTITY_EXPANSION_FACTOR
 
     @classmethod
     def schemas(cls):
@@ -45,7 +103,7 @@ class XMLProcessor:
     def parser(self):
         if self._parser is None:
             if self._default_parser is None:
-                self._default_parser = etree.XMLParser(resolve_entities=False)
+                self._default_parser = _get_secure_xml_parser()
             return self._default_parser
         return self._parser
 
@@ -56,6 +114,13 @@ class XMLProcessor:
             raise InvalidInput("DTD declarations are not supported in XML input")
         for entity in xml_node.iter(etree.Entity):
             raise InvalidInput("Entities are not supported in XML input")
+        _check_tree_limits(
+            xml_node,
+            source_size=len(xml_string),
+            max_tree_depth=self._max_tree_depth,
+            max_node_count=self._max_node_count,
+            max_entity_expansion_factor=self._max_entity_expansion_factor,
+        )
         return xml_node
 
     def _tostring(self, xml_node, **kwargs):

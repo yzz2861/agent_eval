@@ -467,7 +467,8 @@ class XMLVerifier(XMLSignatureProcessor):
         :param validate_schema: Whether to validate **data** against the XML Signature schema.
         :param parser:
             Custom XML parser instance to use when parsing **data**. The default parser arguments used by SignXML are:
-            ``resolve_entities=False``. See https://lxml.de/FAQ.html#how-do-i-use-lxml-safely-as-a-web-service-endpoint.
+            ``resolve_entities=False``, ``load_dtd=False``, ``no_network=True``, ``attribute_defaults=False``, and
+            ``huge_tree=False``. See https://lxml.de/FAQ.html#how-do-i-use-lxml-safely-as-a-web-service-endpoint.
         :type parser: :class:`lxml.etree.XMLParser` compatible parser
         :param uri_resolver:
             Function to use to resolve reference URIs that are not empty and don't start with "#" (such references are
