@@ -95,6 +95,12 @@ class CPE(dict):
     #: Version of CPE Name
     VERSION = VERSION_UNDEFINED
 
+    #: Maximum accepted length in characters of a CPE Name string.
+    #: Longer inputs are rejected before any parsing or string
+    #: duplication happens, so hostile or truncated names cannot
+    #: exhaust CPU or memory.
+    MAX_CPE_STR_LENGTH = 4096
+
     ###############
     #  VARIABLES  #
     ###############
@@ -219,7 +225,17 @@ class CPE(dict):
 
         :param string cpe_str: CPE Name
         :returns: None
+        :exception: ValueError - CPE Name exceeds the maximum input length
         """
+
+        # Linear budget: reject oversized input before copying or
+        # parsing it. The error reports only lengths, never the
+        # input itself.
+        if len(cpe_str) > self.MAX_CPE_STR_LENGTH:
+            errmsg = ("CPE Name too long: {0} characters "
+                      "(maximum is {1})").format(
+                          len(cpe_str), self.MAX_CPE_STR_LENGTH)
+            raise ValueError(errmsg)
 
         # The original CPE Name as string
         self.cpe_str = cpe_str
@@ -231,7 +247,13 @@ class CPE(dict):
         self._str = cpe_str.lower()
 
         # Check if CPE Name is correct
-        self._parse()
+        try:
+            self._parse()
+        except Exception:
+            # Do not retain the input string on the error path
+            self.cpe_str = ""
+            self._str = ""
+            raise
 
     def __len__(self):
         """
