@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from pycose.algorithms import Es256
-from pycose.keys.curves import P521, P384, P256
+from pycose.keys.curves import Ed25519, P521, P384, P256, SECP256K1
 from pycose.exceptions import CoseInvalidKey, CoseIllegalKeyType, CoseException, CoseUnsupportedCurve
 from pycose.keys import EC2Key, CoseKey
 from pycose.keys.keyops import SignOp
@@ -76,6 +76,131 @@ def test_ec2_public_keys_from_dicts(kty_attr, kty_value, crv_attr, crv_value, x_
     dct = {kty_attr: kty_value, crv_attr: crv_value, x_attr: x_value, y_attr: y_value}
     cose_key = CoseKey.from_dict(dct)
     assert _is_valid_ec2_key(cose_key)
+
+
+@pytest.mark.parametrize('crv, x, y, d', [
+    (P256, p256_x, p256_y, p256_d),
+    (P384, p384_x, p384_y, p384_d),
+    (P521, p521_x, p521_y, p521_d),
+])
+def test_ec2_valid_from_dict_encoding_roundtrip(crv, x, y, d):
+    cose_key = EC2Key.from_dict({
+        KpKty: KtyEC2,
+        EC2KpCurve: crv,
+        EC2KpX: x,
+        EC2KpY: y,
+        EC2KpD: d,
+    })
+
+    assert cose_key.crv == crv
+    assert cose_key.x == x
+    assert cose_key.y == y
+    assert cose_key.d == d
+
+    decoded = CoseKey.decode(cose_key.encode())
+    assert decoded.crv == crv
+    assert decoded.x == x
+    assert decoded.y == y
+    assert decoded.d == d
+
+
+@pytest.mark.parametrize('crv, x, y', [
+    (P256, p256_x, p256_y),
+    (P384, p384_x, p384_y),
+    (P521, p521_x, p521_y),
+])
+def test_ec2_rejects_off_curve_points(crv, x, y):
+    invalid_y = y[:-1] + bytes([y[-1] ^ 0x01])
+
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpX: x,
+            EC2KpY: invalid_y,
+        })
+
+
+@pytest.mark.parametrize('crv', [P256, P384, P521])
+def test_ec2_rejects_point_at_infinity(crv):
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpX: b'\x00' * crv.size,
+            EC2KpY: b'\x00' * crv.size,
+        })
+
+
+@pytest.mark.parametrize('crv, x, y', [
+    (P256, p256_x, p256_y),
+    (P384, p384_x, p384_y),
+    (P521, p521_x, p521_y),
+])
+@pytest.mark.parametrize('coordinate', ['x', 'y'])
+def test_ec2_rejects_wrong_coordinate_length(crv, x, y, coordinate):
+    if coordinate == 'x':
+        x = x[:-1]
+    else:
+        y = y + b'\x00'
+
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpX: x,
+            EC2KpY: y,
+        })
+
+
+@pytest.mark.parametrize('crv', [P256, P384, P521])
+def test_ec2_rejects_invalid_x_only(crv):
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpX: b'\xff' * crv.size,
+        })
+
+
+@pytest.mark.parametrize('crv', [P256, P384, P521])
+def test_ec2_rejects_wrong_private_scalar_length(crv):
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpD: b'\x01' * (crv.size - 1),
+        })
+
+
+def test_ec2_rejects_curve_mismatch():
+    # P-256 coordinates have the same width as secp256k1 coordinates, but
+    # they generally do not describe a point on secp256k1.
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: SECP256K1,
+            EC2KpX: p256_x,
+            EC2KpY: p256_y,
+        })
+
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: P384,
+            EC2KpX: b'\x00' * (P384.size - len(p256_x)) + p256_x,
+            EC2KpY: b'\x00' * (P384.size - len(p256_y)) + p256_y,
+        })
+
+
+@pytest.mark.parametrize('crv', [Ed25519, 'ED25519', 6])
+def test_ec2_rejects_ed25519_curve(crv):
+    with pytest.raises(CoseException):
+        EC2Key.from_dict({
+            KpKty: KtyEC2,
+            EC2KpCurve: crv,
+            EC2KpX: b'\x01' * 32,
+        })
 
 
 def test_ec2_private_key_from_pem():
@@ -316,5 +441,3 @@ def test_unknown_key_attribute():
     decoded_key = CoseKey.decode(k)
 
     assert decoded_key['subject_name'] == "signing key"
-
-

@@ -99,6 +99,58 @@ class EC2Key(CoseKey):
     def _key_transform(key: Union[Type['EC2KeyParam'], Type['KeyParam'], str, int], allow_unknown_attrs: bool = False):
         return EC2KeyParam.from_id(key, allow_unknown_attrs)
 
+    @staticmethod
+    def _validate_coordinate(crv: Type['CoseCurve'], value: bytes, name: str) -> None:
+        """
+        Validate that a public coordinate has the fixed width mandated by the curve.
+        """
+        if not isinstance(value, bytes):
+            raise CoseInvalidKey(f"EC2 public coordinate {name} must be of type 'bytes'")
+        if len(value) != crv.size:
+            raise CoseInvalidKey(
+                f"Invalid length for EC2 public coordinate {name} on curve {crv.fullname}: "
+                f"expected {crv.size} bytes, got {len(value)}"
+            )
+
+    @classmethod
+    def _validate_public_point(cls, crv: Type['CoseCurve'], x: bytes, y: bytes) -> None:
+        """
+        Validate that (x, y) is a finite point on the declared curve.
+
+        The COSE representation uses fixed-width, big-endian affine coordinates.
+        Coordinates of the wrong width, the point at infinity, and points that do
+        not satisfy the curve equation are rejected.
+        """
+        cls._validate_coordinate(crv, x, 'x')
+        cls._validate_coordinate(crv, y, 'y')
+
+        if not any(x) and not any(y):
+            raise CoseInvalidKey(f"EC2 public point is the point at infinity on curve {crv.fullname}")
+
+        try:
+            ec.EllipticCurvePublicKey.from_encoded_point(
+                crv.curve_obj,
+                b'\x04' + x + y,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CoseInvalidKey(
+                f"Invalid EC2 public point for curve {crv.fullname}: "
+                "coordinates are not a point on the declared curve"
+            ) from exc
+
+    @staticmethod
+    def _validate_private_scalar(crv: Type['CoseCurve'], d: bytes) -> None:
+        """
+        Validate that the private scalar has the fixed width mandated by the curve.
+        """
+        if not isinstance(d, bytes):
+            raise CoseInvalidKey("EC2 private key must be of type 'bytes'")
+        if len(d) != crv.size:
+            raise CoseInvalidKey(
+                f"Invalid length for EC2 private key on curve {crv.fullname}: "
+                f"expected {crv.size} bytes, got {len(d)}"
+            )
+
     def __init__(self,
                  crv: Union[Type['CoseCurve'], str, int],
                  x: bytes = b'',
@@ -146,32 +198,57 @@ class EC2Key(CoseKey):
         if not d and not x:
             raise CoseInvalidKey("Missing public coordinate X")
 
+        if x:
+            self._validate_coordinate(self.crv, x, 'x')
+        if y:
+            self._validate_coordinate(self.crv, y, 'y')
+
         if d:
-            public_nums = ec.derive_private_key(int.from_bytes(d, byteorder="big"),
-                                                curve=self.crv.curve_obj,
-                                                backend=default_backend()).public_key().public_numbers()
+            self._validate_private_scalar(self.crv, d)
+            try:
+                public_nums = ec.derive_private_key(int.from_bytes(d, byteorder="big"),
+                                                    curve=self.crv.curve_obj,
+                                                    backend=default_backend()).public_key().public_numbers()
+            except ValueError as exc:
+                raise CoseInvalidKey(
+                    f"Invalid EC2 private key for curve {self.crv.fullname}: {exc}"
+                ) from exc
+
             if x:
-                assert x == public_nums.x.to_bytes(self.crv.size, 'big')
+                if x != public_nums.x.to_bytes(self.crv.size, 'big'):
+                    raise CoseInvalidKey("EC2 public coordinate X does not match the private key")
             else:
                 x = public_nums.x.to_bytes(self.crv.size, 'big')
 
             if y:
-                assert y == public_nums.y.to_bytes(self.crv.size, 'big')
+                if y != public_nums.y.to_bytes(self.crv.size, 'big'):
+                    raise CoseInvalidKey("EC2 public coordinate Y does not match the private key")
             else:
                 y = public_nums.y.to_bytes(self.crv.size, 'big')
 
         if x and not y:
             # try to derive y from x
-            key = ec.EllipticCurvePublicKey.from_encoded_point(self.crv.curve_obj,
-                                                               # don't care which of the two possible Y values we get
-                                                               b'\x03' +
-                                                               x  # or [::-1]?
-                                                               )
+            try:
+                key = ec.EllipticCurvePublicKey.from_encoded_point(
+                    self.crv.curve_obj,
+                    # don't care which of the two possible Y values we get
+                    b'\x03' + x  # or [::-1]?
+                )
+            except (TypeError, ValueError) as exc:
+                raise CoseInvalidKey(
+                    f"Invalid EC2 public coordinate X for curve {self.crv.fullname}: "
+                    "no point on the declared curve"
+                ) from exc
+
             # Just to check the endianness of the conversions -- if we get the
             # right X back out, then the X and Y are consistent, and anyway the
             # crypto backend will check whether the point is on the curve
-            assert x == key.public_numbers().x.to_bytes(self.crv.size, 'big')
+            if x != key.public_numbers().x.to_bytes(self.crv.size, 'big'):
+                raise CoseInvalidKey("Invalid EC2 public coordinate X")
             y = key.public_numbers().y.to_bytes(self.crv.size, 'big')
+
+        if x and y:
+            self._validate_public_point(self.crv, x, y)
 
         if x != b'':
             self.x = x
