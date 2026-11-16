@@ -498,9 +498,29 @@ class SSHConfig:
             if isinstance(config[k], list):
                 for i, value in enumerate(config[k]):
                     config[k][i] = tokenizer(value)
+            elif k == "proxycommand":
+                config[k] = self._tokenize_proxycommand(tokenizer, config[k])
             else:
                 config[k] = tokenizer(config[k])
         return config
+
+    def _tokenize_proxycommand(self, tokenizer, value):
+        """
+        Tokenize a ProxyCommand string while preserving argument boundaries.
+
+        The command is split into an argv first, tokens (``%h``/``%p``/``%r``
+        and ``~``) are expanded within each individual argument, and the
+        result is re-quoted with `shlex.join`. This keeps substituted values
+        containing whitespace or shell syntax (e.g. a hostname with spaces)
+        inside their original argument instead of letting them reshape the
+        command line.
+        """
+        try:
+            argv = shlex.split(value)
+        except ValueError:
+            # Unbalanced quotes etc: fall back to plain string tokenization.
+            return tokenizer(value)
+        return shlex.join([tokenizer(argument) for argument in argv])
 
     def _get_hosts(self, host):
         """

@@ -1,10 +1,16 @@
 import signal
 import socket
 
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 from pytest import raises
 
-from paramiko import ProxyCommand, ProxyCommandFailure
+from paramiko import (
+    ProxyCommand,
+    ProxyCommandFailure,
+    ProxyCommandNotFound,
+    ProxyCommandPermissionDenied,
+    ProxyCommandValidationError,
+)
 
 
 class TestProxyCommand:
@@ -17,7 +23,171 @@ class TestProxyCommand:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            shell=False,
+            env=ANY,
         )
+
+    @patch("paramiko.proxy.subprocess")
+    def test_init_takes_argv_sequence_preserving_boundaries(self, subprocess):
+        ProxyCommand(["nc", "my host", "22"])
+        subprocess.Popen.assert_called_once_with(
+            ["nc", "my host", "22"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            shell=False,
+            env=ANY,
+        )
+
+    @patch("paramiko.proxy.subprocess")
+    def test_shell_metacharacters_rejected_by_default(self, subprocess):
+        for bad in (
+            "nc %h %p; touch /tmp/pwned",
+            "nc `whoami` 22",
+            "nc $(whoami) 22",
+            "nc host 22 | tee log",
+            "nc host 22 && id",
+            "nc host 22 > out",
+        ):
+            with raises(ProxyCommandValidationError):
+                ProxyCommand(bad)
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_newlines_and_nul_rejected_by_default(self, subprocess):
+        for bad in ("nc host 22\nid", "nc host 22\rid", "nc host 22\x00id"):
+            with raises(ProxyCommandValidationError):
+                ProxyCommand(["nc", bad])
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_argument_length_limit_enforced(self, subprocess):
+        with raises(ProxyCommandValidationError):
+            ProxyCommand(["nc", "a" * 4097])
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_argument_count_limit_enforced(self, subprocess):
+        with raises(ProxyCommandValidationError):
+            ProxyCommand(["cmd"] + ["arg"] * 64)
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_empty_command_rejected(self, subprocess):
+        with raises(ProxyCommandValidationError):
+            ProxyCommand([])
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_allow_shell_passes_string_verbatim_to_shell(self, subprocess):
+        ProxyCommand("nc %h %p | tee log", allow_shell=True)
+        subprocess.Popen.assert_called_once_with(
+            "nc %h %p | tee log",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            shell=True,
+            env=ANY,
+        )
+
+    @patch("paramiko.proxy.subprocess")
+    def test_allow_shell_quotes_argv_elements(self, subprocess):
+        ProxyCommand(["nc", "my host", "22"], allow_shell=True)
+        subprocess.Popen.assert_called_once_with(
+            "nc 'my host' 22",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            shell=True,
+            env=ANY,
+        )
+
+    @patch("paramiko.proxy.subprocess")
+    def test_subprocess_environment_is_sanitized(self, subprocess):
+        env = {
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "SSH_AGENT_PID": "1234",
+            "AWS_SECRET_ACCESS_KEY": "sekrit",
+            "MY_API_TOKEN": "tok",
+            "PATH": "/usr/bin:/bin",
+        }
+        with patch("paramiko.proxy.os.environ", env):
+            ProxyCommand("nc host 22")
+        passed_env = subprocess.Popen.call_args[1]["env"]
+        assert "SSH_AUTH_SOCK" not in passed_env
+        assert "SSH_AGENT_PID" not in passed_env
+        assert "AWS_SECRET_ACCESS_KEY" not in passed_env
+        assert "MY_API_TOKEN" not in passed_env
+        assert passed_env["PATH"] == "/usr/bin:/bin"
+
+    @patch("paramiko.proxy.subprocess")
+    def test_from_config_substitutes_tokens_within_arguments(self, subprocess):
+        ProxyCommand.from_config(
+            "nc %h %p", hostname="my host", port=22, username="me"
+        )
+        argv = subprocess.Popen.call_args[0][0]
+        assert argv == ["nc", "my host", "22"]
+
+    @patch("paramiko.proxy.subprocess")
+    def test_from_config_keeps_argv_boundaries_for_sequence(self, subprocess):
+        ProxyCommand.from_config(
+            ["nc", "%h", "%p"], hostname="my host", port="22"
+        )
+        argv = subprocess.Popen.call_args[0][0]
+        assert argv == ["nc", "my host", "22"]
+
+    @patch("paramiko.proxy.subprocess")
+    def test_from_config_rejects_hostile_hostname_by_default(self, subprocess):
+        with raises(ProxyCommandValidationError):
+            ProxyCommand.from_config(
+                "nc %h %p", hostname="x; touch /tmp/pwned", port=22
+            )
+        assert not subprocess.Popen.called
+
+    @patch("paramiko.proxy.subprocess")
+    def test_from_config_shell_mode_quotes_substituted_values(self, subprocess):
+        ProxyCommand.from_config(
+            "nc %h %p | tee log",
+            hostname="x; touch /tmp/pwned",
+            port=22,
+            allow_shell=True,
+        )
+        command = subprocess.Popen.call_args[0][0]
+        assert command == "nc 'x; touch /tmp/pwned' 22 | tee log"
+        assert subprocess.Popen.call_args[1]["shell"] is True
+
+    @patch("paramiko.proxy.subprocess")
+    def test_command_not_found_is_classified(self, subprocess):
+        subprocess.Popen.side_effect = FileNotFoundError("no such file")
+        with raises(ProxyCommandNotFound) as info:
+            ProxyCommand("definitely-not-a-real-command")
+        assert isinstance(info.value, ProxyCommandFailure)
+        assert "not found" in info.value.error
+
+    @patch("paramiko.proxy.subprocess")
+    def test_permission_denied_is_classified(self, subprocess):
+        subprocess.Popen.side_effect = PermissionError("nope")
+        with raises(ProxyCommandPermissionDenied) as info:
+            ProxyCommand("/etc/shadow")
+        assert isinstance(info.value, ProxyCommandFailure)
+        assert "permission denied" in info.value.error
+
+    @patch("paramiko.proxy.subprocess.Popen")
+    def test_nonzero_exit_sanitizes_stderr_in_failure(self, Popen):
+        process = Popen.return_value
+        process.stdin.write.side_effect = IOError(0, "broken pipe")
+        process.poll.return_value = 1
+        process.stderr.read.return_value = (
+            b"password=hunter2\nconnection refused by upstream\n"
+        )
+        with raises(ProxyCommandFailure) as info:
+            ProxyCommand("nc host 22").send(b"data")
+        assert "status 1" in info.value.error
+        assert "connection refused by upstream" in info.value.error
+        assert "hunter2" not in info.value.error
 
     @patch("paramiko.proxy.subprocess.Popen")
     def test_send_writes_to_process_stdin_returning_length(self, Popen):

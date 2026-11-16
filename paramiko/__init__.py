@@ -63,6 +63,9 @@ from paramiko.ssh_exception import (
     MessageOrderError,
     PasswordRequiredException,
     ProxyCommandFailure,
+    ProxyCommandNotFound,
+    ProxyCommandPermissionDenied,
+    ProxyCommandValidationError,
     SSHException,
 )
 from paramiko.server import ServerInterface, SubsystemHandler, InteractiveQuery

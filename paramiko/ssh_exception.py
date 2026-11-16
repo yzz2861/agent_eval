@@ -175,6 +175,31 @@ class ProxyCommandFailure(SSHException):
         )
 
 
+class ProxyCommandValidationError(ProxyCommandFailure, ValueError):
+    """
+    A "ProxyCommand" argv failed safety validation before any subprocess was
+    spawned (shell metacharacters, newlines, NUL bytes, or size limits).
+
+    .. versionadded:: 3.5
+    """
+
+
+class ProxyCommandNotFound(ProxyCommandFailure):
+    """
+    The "ProxyCommand" executable could not be found.
+
+    .. versionadded:: 3.5
+    """
+
+
+class ProxyCommandPermissionDenied(ProxyCommandFailure):
+    """
+    The "ProxyCommand" executable exists but may not be executed.
+
+    .. versionadded:: 3.5
+    """
+
+
 class NoValidConnectionsError(socket.error):
     """
     Multiple connection attempts were made and no families succeeded.
