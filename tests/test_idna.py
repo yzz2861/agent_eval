@@ -501,6 +501,136 @@ class IDNATests(unittest.TestCase):
         self.assertEqual(str(cm.exception), "Codepoint U+005F at position 2 of 'a_b' not allowed")
         self.assertEqual(idna.encode("a\u00adb", uts46=True, std3_rules=True), b"ab")
 
+    def test_uts46_deviation_characters(self):
+        # Deviation (status D) codepoints are kept under the nontransitional
+        # processing this library applies, matching browser behaviour; the
+        # deprecated transitional mappings (ß->ss, ς->σ, joiners dropped)
+        # must never be applied.
+        self.assertEqual(idna.encode("faß.de", uts46=True), b"xn--fa-hia.de")
+        self.assertEqual(idna.encode("βόλο\u03c2.gr", uts46=True), b"xn--nxasmm1c.gr")
+        self.assertEqual(idna.decode(b"xn--fa-hia.de", uts46=True), "faß.de")
+        # U+1E9E (LATIN CAPITAL LETTER SHARP S) is mapped, not a deviation:
+        # it case-folds to ß, which is then kept.
+        self.assertEqual(idna.uts46_remap("ẞ"), "ß")
+        self.assertEqual(idna.encode("FAẞ.DE", uts46=True), b"xn--fa-hia.de")
+        # The zero-width joiners are deviations too: kept by mapping, then
+        # validated in context by the IDNA 2008 CONTEXTJ rules.
+        remap = idna.uts46_remap
+        self.assertEqual(remap("a\u200cb"), "a\u200cb")  # ZWNJ
+        self.assertEqual(remap("a\u200db"), "a\u200db")  # ZWJ
+        # ZWJ after a virama (Devanagari) and ZWNJ between dual-joining
+        # letters (Persian) are valid and round-trip.
+        self.assertEqual(idna.encode("क्\u200dक", uts46=True), b"xn--11ba1o090g")
+        self.assertEqual(idna.decode(b"xn--11ba1o090g", uts46=True), "क्\u200dक")
+        self.assertEqual(
+            idna.encode("\u0645\u064a\u200c\u062e\u0648\u0627\u0646\u064a", uts46=True),
+            b"xn--mgbn2egike1683c",
+        )
+        # A joiner that fails its CONTEXTJ rule is rejected even though the
+        # mapping kept it.
+        with self.assertRaises(idna.IDNAError) as cm:
+            idna.encode("a\u200db", uts46=True)
+        self.assertEqual(cm.exception.code, "contextj")
+
+    def test_uts46_cross_version_samples(self):
+        # The mapping tables carry their own Unicode version, exposed both
+        # as idna.uts46data.__version__ and via the explicit alias.
+        import idna.uts46data
+
+        self.assertEqual(idna.uts46data.uts46_unicode_version, idna.uts46data.__version__)
+        self.assertEqual(idna.uts46data.uts46_unicode_version, idna.unicode_version)
+        self.assertEqual(idna.uts46data.DEFAULT_MODE, idna.uts46data.MODE_NONTRANSITIONAL)
+        self.assertEqual(idna.uts46data.MAPPING_FAILURE_POLICY, "strict")
+        # U+08B5 ARABIC LETTER QAF WITH DOT BELOW was unassigned before
+        # Unicode 6.1; under the current table it is valid.
+        self.assertEqual(idna.encode("\u08b5", uts46=True), b"xn--bzb")
+        # U+1E9E was unassigned before Unicode 5.1; it is now mapped to ß.
+        self.assertEqual(idna.uts46_remap("\u1e9e"), "ß")
+        # U+0378 is still unassigned: the strict mapping failure policy
+        # rejects it rather than dropping or passing it through.
+        with self.assertRaises(idna.InvalidCodepoint) as cm:
+            idna.encode("\u0378", uts46=True)
+        self.assertEqual(cm.exception.code, "uts46_disallowed")
+
+    def test_uts46_remap_mode_parameter(self):
+        remap = idna.uts46_remap
+        # The default and the explicit nontransitional mode agree and do
+        # not warn.
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self.assertEqual(remap("aßb"), "aßb")
+            self.assertEqual(remap("aßb", mode="nontransitional"), "aßb")
+            self.assertEqual(len(w), 0)
+        # The transitional mode is selectable explicitly but deprecated,
+        # and still has no effect on the output.
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self.assertEqual(remap("aßb", mode="transitional"), "aßb")
+            self.assertEqual(len(w), 1)
+            self.assertTrue(issubclass(w[0].category, DeprecationWarning))
+        # Contradictory or unknown modes are rejected.
+        self.assertRaises(ValueError, remap, "a", mode="nontransitional", transitional=True)
+        self.assertRaises(ValueError, remap, "a", mode="bogus")
+
+    def test_encode_decode_record_processing_rules(self):
+        # The result of encode()/decode() records the rules actually
+        # applied, while remaining a plain bytes/str for existing callers.
+        encoded = idna.encode("faß.de", uts46=True, std3_rules=True, strict=True)
+        self.assertIsInstance(encoded, bytes)
+        self.assertEqual(encoded, b"xn--fa-hia.de")
+        self.assertEqual(encoded.decode("ascii"), "xn--fa-hia.de")
+        rules = encoded.rules
+        self.assertEqual(
+            rules,
+            idna.core.ProcessingRules(
+                uts46=True,
+                mode="nontransitional",
+                transitional=False,
+                std3_rules=True,
+                strict=True,
+                display=False,
+                unicode_version=idna.unicode_version,
+            ),
+        )
+        # Without uts46=True no UTS #46 mode was in effect at all.
+        plain = idna.encode("example.com")
+        self.assertIsNone(plain.rules.mode)
+        self.assertFalse(plain.rules.uts46)
+        # decode() records its rules too, including display semantics.
+        decoded = idna.decode(b"xn--fa-hia.de", uts46=True)
+        self.assertIsInstance(decoded, str)
+        self.assertEqual(decoded, "faß.de")
+        self.assertEqual(decoded.rules.mode, "nontransitional")
+        self.assertFalse(decoded.rules.display)
+        displayed = idna.decode(b"xn--fa-hia.de", uts46=True, display=True)
+        self.assertTrue(displayed.rules.display)
+        # A requested (but deprecated and never applied) transitional flag
+        # is recorded as requested while the applied mode stays
+        # nontransitional.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            transitional = idna.encode("faß.de", uts46=True, transitional=True)
+        self.assertTrue(transitional.rules.transitional)
+        self.assertEqual(transitional.rules.mode, "nontransitional")
+        self.assertEqual(transitional, b"xn--fa-hia.de")
+
+    def test_encode_lengths_rechecked_after_mapping(self):
+        # U+0587 ARMENIAN SMALL LIGATURE ECH YIWN maps to two characters
+        # (U+0565 U+0582), so mapping can push a name over a limit that
+        # the input text still satisfied.
+        ligature = "\u0587"
+        self.assertEqual(idna.uts46_remap(ligature), "\u0565\u0582")
+        # 32 chars in, 64 chars out: over the 63-octet label limit.
+        with self.assertRaises(idna.IDNAError) as cm:
+            idna.encode(ligature * 32, uts46=True)
+        self.assertEqual(cm.exception.code, "label_too_long")
+        # 224 chars in, 256 chars out: over the 253-octet domain limit.
+        domain = ("a" * 63 + ".") * 3 + ligature * 32
+        self.assertTrue(idna.valid_string_length(domain, trailing_dot=True))
+        with self.assertRaises(idna.IDNAError) as cm:
+            idna.encode(domain, uts46=True)
+        self.assertEqual(cm.exception.code, "domain_too_long")
+
     def test_bytes_input_errors_are_idnaerror(self):
         # bytes given to the label helpers must fail with IDNAError, not leak
         # UnicodeDecodeError: check_label() decodes bytes as UTF-8, ulabel()

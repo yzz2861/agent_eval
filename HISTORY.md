@@ -3,6 +3,14 @@
 ## 3.21 (2026-XX-XX)
 
 - Raise the minimum supported Python version to 3.10
+- Make UTS #46 processing explicit: `idna.uts46data` now names the
+  transitional/nontransitional modes, the Unicode version of the mapping
+  table, and the strict mapping-failure policy; `uts46_remap()` accepts an
+  explicit `mode` argument; and `encode()`/`decode()` return results
+  (still plain `bytes`/`str`) whose `rules` attribute records the
+  `ProcessingRules` actually applied, so cross-implementation mismatches
+  (e.g. for deviation codepoints such as ß or the zero-width joiners) can
+  be diagnosed.
 
 ## 3.20 (2026-09-17)
 

@@ -9,6 +9,32 @@ from array import array
 
 __version__ = "18.0.0"
 
+# --- UTS #46 processing metadata -------------------------------------------
+# This block is emitted by tools/idna-data; keep it in sync with the
+# generator if you edit it.
+
+#: Unicode version of the IDNA Mapping Table in this module. Kept in sync
+#: with ``idna.idnadata.__version__`` (a test pins them equal).
+uts46_unicode_version: str = __version__
+
+#: Processing modes named by UTS #46 section 4. Transitional processing was
+#: deprecated in Unicode 15.1 and is never applied by this library:
+#: deviation (status ``D``) codepoints such as U+00DF, U+03C2, U+200C and
+#: U+200D are always kept, never mapped, so the effective mode is always
+#: ``MODE_NONTRANSITIONAL``. ``MODE_TRANSITIONAL`` exists only so callers
+#: can name (and be warned about) the deprecated behaviour.
+MODE_TRANSITIONAL = "transitional"
+MODE_NONTRANSITIONAL = "nontransitional"
+
+#: The processing mode actually applied to every remapped domain.
+DEFAULT_MODE = MODE_NONTRANSITIONAL
+
+#: Mapping failure policy: a disallowed codepoint always raises
+#: ``idna.InvalidCodepoint`` (error code ``"uts46_disallowed"``, or
+#: ``"uts46_std3"`` when UseSTD3ASCIIRules rejects an ASCII character in
+#: the mapped output). There is no silent-drop or replacement policy.
+MAPPING_FAILURE_POLICY = "strict"
+
 uts46_starts: array[int] = array(
     "I",
     (

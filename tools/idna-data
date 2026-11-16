@@ -651,6 +651,33 @@ def uts46_libdata(ucdata):
 
     yield '__version__ = "{}"\n'.format(ucdata.version)
 
+    yield "# --- UTS #46 processing metadata -------------------------------------------"
+    yield "# This block is emitted by tools/idna-data; keep it in sync with the"
+    yield "# generator if you edit it."
+    yield ""
+    yield "#: Unicode version of the IDNA Mapping Table in this module. Kept in sync"
+    yield "#: with ``idna.idnadata.__version__`` (a test pins them equal)."
+    yield "uts46_unicode_version: str = __version__"
+    yield ""
+    yield "#: Processing modes named by UTS #46 section 4. Transitional processing was"
+    yield "#: deprecated in Unicode 15.1 and is never applied by this library:"
+    yield "#: deviation (status ``D``) codepoints such as U+00DF, U+03C2, U+200C and"
+    yield "#: U+200D are always kept, never mapped, so the effective mode is always"
+    yield "#: ``MODE_NONTRANSITIONAL``. ``MODE_TRANSITIONAL`` exists only so callers"
+    yield "#: can name (and be warned about) the deprecated behaviour."
+    yield 'MODE_TRANSITIONAL = "transitional"'
+    yield 'MODE_NONTRANSITIONAL = "nontransitional"'
+    yield ""
+    yield "#: The processing mode actually applied to every remapped domain."
+    yield "DEFAULT_MODE = MODE_NONTRANSITIONAL"
+    yield ""
+    yield "#: Mapping failure policy: a disallowed codepoint always raises"
+    yield "#: ``idna.InvalidCodepoint`` (error code ``\"uts46_disallowed\"``, or"
+    yield "#: ``\"uts46_std3\"`` when UseSTD3ASCIIRules rejects an ASCII character in"
+    yield "#: the mapped output). There is no silent-drop or replacement policy."
+    yield 'MAPPING_FAILURE_POLICY = "strict"'
+    yield ""
+
     rows = list(uts46_ranges(ucdata))
 
     yield "uts46_starts: array[int] = array("

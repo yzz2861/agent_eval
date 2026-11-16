@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import re
 import unicodedata
 import warnings
@@ -636,7 +637,102 @@ def _warn_transitional() -> None:
     )
 
 
-def uts46_remap(domain: str, std3_rules: bool = True, transitional: bool = False) -> str:
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProcessingRules:
+    """The exact rule set an :func:`encode` or :func:`decode` call applied.
+
+    Recording the rules alongside the result lets callers diagnose
+    cross-implementation mismatches (for example, a browser that applies
+    UTS #46 nontransitional processing while a server applied IDNA 2008
+    only, producing different A-labels for deviation codepoints such as
+    ``U+00DF`` or the zero-width joiners).
+
+    Attributes:
+
+    * ``uts46`` -- whether UTS #46 mapping was applied before IDNA 2008
+      processing.
+    * ``mode`` -- the UTS #46 processing mode actually applied:
+      ``"nontransitional"`` when ``uts46`` is set (the only mode this
+      library applies; see :mod:`idna.uts46data`), otherwise ``None``.
+    * ``transitional`` -- whether transitional processing was *requested*.
+      Transitional processing is deprecated and never applied, so this
+      flag never changes ``mode``; it is recorded for diagnostics only.
+    * ``std3_rules`` -- whether UTS #46's ``UseSTD3ASCIIRules`` was in
+      effect during mapping.
+    * ``strict`` -- whether only ``U+002E`` was recognised as a label
+      separator.
+    * ``display`` -- whether decoding used display (per-label recovery)
+      semantics. Always ``False`` for :func:`encode` results.
+    * ``unicode_version`` -- the Unicode version of the mapping tables
+      that were used.
+    """
+
+    uts46: bool
+    mode: str | None
+    transitional: bool
+    std3_rules: bool
+    strict: bool
+    display: bool
+    unicode_version: str
+
+
+class EncodedDomain(bytes):
+    """The :class:`bytes` result of :func:`encode`.
+
+    Behaves exactly like :class:`bytes` (equality, hashing, indexing and
+    all methods are unchanged); the additional :attr:`rules` attribute
+    records the :class:`ProcessingRules` the call applied.
+    """
+
+    rules: ProcessingRules | None
+
+    def __new__(cls, value: bytes, rules: ProcessingRules | None = None) -> EncodedDomain:
+        self = super().__new__(cls, value)
+        self.rules = rules
+        return self
+
+
+class DecodedDomain(str):
+    """The :class:`str` result of :func:`decode`.
+
+    Behaves exactly like :class:`str`; the additional :attr:`rules`
+    attribute records the :class:`ProcessingRules` the call applied.
+    """
+
+    rules: ProcessingRules | None
+
+    def __new__(cls, value: str, rules: ProcessingRules | None = None) -> DecodedDomain:
+        self = super().__new__(cls, value)
+        self.rules = rules
+        return self
+
+
+def _processing_rules(uts46: bool, transitional: bool, std3_rules: bool, strict: bool, display: bool) -> ProcessingRules:
+    mode = None
+    if uts46:
+        # Imported lazily so pure IDNA 2008 callers never load the table.
+        from .uts46data import DEFAULT_MODE
+
+        mode = DEFAULT_MODE
+
+    return ProcessingRules(
+        uts46=uts46,
+        mode=mode,
+        transitional=transitional,
+        std3_rules=std3_rules,
+        strict=strict,
+        display=display,
+        unicode_version=idnadata.__version__,
+    )
+
+
+def uts46_remap(
+    domain: str,
+    std3_rules: bool = True,
+    transitional: bool = False,
+    *,
+    mode: str | None = None,
+) -> str:
     """Apply the UTS #46 character mapping to a domain string.
 
     Implements the mapping table from `UTS #46 §4
@@ -656,11 +752,28 @@ def uts46_remap(domain: str, std3_rules: bool = True, transitional: bool = False
         ``D``) codepoints are now always kept, so this has no effect
         beyond emitting a :class:`DeprecationWarning`. It will be removed
         in a future version.
+    :param mode: The UTS #46 processing mode, explicitly. Must be one of
+        ``idna.uts46data.MODE_NONTRANSITIONAL`` (the default, and the only
+        mode actually applied) or ``idna.uts46data.MODE_TRANSITIONAL``,
+        which is equivalent to passing ``transitional=True`` and likewise
+        deprecated. Passing ``mode="nontransitional"`` together with
+        ``transitional=True`` is contradictory and raises
+        :class:`ValueError`.
     :returns: The remapped domain, in Normalisation Form C.
     :raises InvalidCodepoint: If the domain contains a disallowed
         codepoint under the chosen rules.
     :raises IDNAError: If ``domain`` exceeds the defensive input length limit.
     """
+    if mode is not None:
+        from .uts46data import MODE_NONTRANSITIONAL, MODE_TRANSITIONAL
+
+        if mode == MODE_TRANSITIONAL:
+            transitional = True
+        elif mode == MODE_NONTRANSITIONAL:
+            if transitional:
+                raise ValueError("mode='nontransitional' conflicts with transitional=True")
+        else:
+            raise ValueError(f"Unknown UTS #46 processing mode {mode!r}")
     if transitional:
         _warn_transitional()
     if len(domain) > _max_input_length:
@@ -745,6 +858,9 @@ def encode(
     STOP ``U+FF0E``, and HALFWIDTH IDEOGRAPHIC FULL STOP ``U+FF61``),
     encodes each label with :func:`alabel`, and rejoins them with ``.``.
     Optionally pre-processes the input through :func:`uts46_remap`.
+    All length limits (63 octets per label, 253 per domain) are checked
+    against the *mapped* text, so a mapping that expands a name beyond a
+    limit is rejected rather than silently accepted.
 
     :param s: The domain name to encode.
     :param strict: If ``True``, only ``U+002E`` is recognised as a label
@@ -755,7 +871,9 @@ def encode(
     :param transitional: Deprecated and ignored (see :func:`uts46_remap`):
         emits a :class:`DeprecationWarning` and will be removed in a
         future version.
-    :returns: The encoded domain as ASCII :class:`bytes`.
+    :returns: The encoded domain as ASCII :class:`bytes` (an
+        :class:`EncodedDomain`, whose ``rules`` attribute records the
+        :class:`ProcessingRules` the call applied).
     :raises IDNAError: If the domain is empty, contains an invalid label,
         or exceeds the maximum domain length.
     """
@@ -797,7 +915,7 @@ def encode(
     s = b".".join(result)
     if not valid_string_length(s, trailing_dot):
         raise IDNAError("Domain too long", code="domain_too_long")
-    return s
+    return EncodedDomain(s, _processing_rules(uts46, transitional, std3_rules, strict, display=False))
 
 
 def decode(
@@ -812,7 +930,8 @@ def decode(
     Splits the input on label separators (see :func:`encode` for the
     rules), decodes each label with :func:`ulabel`, and rejoins them
     with ``.``. Optionally pre-processes the input through
-    :func:`uts46_remap`.
+    :func:`uts46_remap`; length limits are re-checked against the mapped
+    text before any label is decoded.
 
     :param s: The domain name to decode.
     :param strict: If ``True``, only ``U+002E`` is recognised as a label
@@ -827,7 +946,9 @@ def decode(
         the user the label as it appears on the wire when it cannot be
         rendered as Unicode. Matches the per-label recovery prescribed
         by UTS #46 §4 and the WHATWG URL "domain to Unicode" algorithm.
-    :returns: The decoded domain as a Unicode string.
+    :returns: The decoded domain as a Unicode string (a
+        :class:`DecodedDomain`, whose ``rules`` attribute records the
+        :class:`ProcessingRules` the call applied).
     :raises IDNAError: If the input is not valid ASCII, contains an
         invalid label, or is empty.
     """
@@ -866,4 +987,4 @@ def decode(
             raise IDNAError("Empty label", code="empty_label")
     if trailing_dot:
         result.append("")
-    return ".".join(result)
+    return DecodedDomain(".".join(result), _processing_rules(uts46, False, std3_rules, strict, display))
