@@ -92,7 +92,7 @@ The :func:`new` function at the module level under ``Crypto.Cipher`` instantiate
 a new CBC cipher object for the relevant base algorithm.
 In the following definition, ``<algorithm>`` could be ``AES``:
 
-.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, iv=None)
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, iv=None, reuse=None)
 
   Create a new CBC object, using <algorithm> as the base block cipher.
   
@@ -101,6 +101,10 @@ In the following definition, ``<algorithm>`` could be ``AES``:
   :param bytes iv: the *Initialization Vector*. A piece of data unpredictable to adversaries.
          It is as long as the block size (e.g. 16 bytes for AES).
          If not present, the library creates a random IV value.
+  :param reuse: the semantic of the IV. With ``False``, the IV is one-time and
+         initializing another cipher with the same key and IV raises
+         ``ReusedInitializationValueError``. With ``True`` or ``None`` (the default),
+         reuse is allowed for backward compatibility.
   :return: a CBC cipher object (:class:`~Crypto.Cipher._mode_cbc.CbcMode`)
 
 The method :meth:`~Crypto.Cipher._mode_cbc.CbcMode.encrypt` (and likewise :meth:`~Crypto.Cipher._mode_cbc.CbcMode.decrypt`) of a CBC cipher object
@@ -177,7 +181,7 @@ The :func:`new` function at the module level under ``Crypto.Cipher`` instantiate
 a new CTR cipher object for the relevant base algorithm.
 In the following definition, ``<algorithm>`` could be ``AES``:
 
-.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, initial_value=None, counter=None, threads=1)
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, initial_value=None, counter=None, threads=1), reuse=None
 
   Create a new CTR object, using <algorithm> as the base block cipher.
   
@@ -196,6 +200,10 @@ In the following definition, ``<algorithm>`` could be ``AES``:
   :param int threads: the maximum number of threads used to
     encrypt or decrypt long data (default: 1, no extra threads).
     Use 0 for as many threads as the CPU cores available to the process.
+  :param reuse: the semantic of the initial counter block (nonce). With ``False``,
+    the nonce is one-time and initializing another cipher with the same key and
+    counter block raises ``ReusedInitializationValueError``. With ``True`` or
+    ``None`` (the default), reuse is allowed for backward compatibility.
   :return: a CTR cipher object (:class:`~Crypto.Cipher._mode_ctr.CtrMode`)
 
 The methods :meth:`~Crypto.Cipher._mode_ctr.CtrMode.encrypt` and :meth:`~Crypto.Cipher._mode_ctr.CtrMode.decrypt` of a CTR cipher object

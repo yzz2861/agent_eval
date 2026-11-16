@@ -33,6 +33,7 @@ import struct
 
 from Crypto import MessageTooLongError
 from Crypto.Cipher._state_machine import Method
+from Crypto.Cipher._mode_usage import normalize_reuse, one_time_registry
 from Crypto.Random import get_random_bytes
 from Crypto.Util._raw_api import (
     _MIN_BYTES_OUTPUT,
@@ -206,9 +207,34 @@ class CtrMode:
 
         self._threads = threads_param(threads)
 
+        # Validate and normalize all mode parameters up-front, before any
+        # native resource is allocated, so that misconfiguration fails at
+        # initialization rather than during the first encryption.
+        if not isinstance(prefix_len, int) or isinstance(prefix_len, bool) or prefix_len < 0:
+            raise ValueError("'prefix_len' must be a non-negative integer")
+        if not isinstance(counter_len, int) or isinstance(counter_len, bool) or counter_len < 1:
+            raise ValueError("'counter_len' must be a positive integer")
+        if not isinstance(little_endian, (int, bool)):
+            raise TypeError("'little_endian' must be a boolean")
+        try:
+            block_len = len(initial_counter_block)
+        except TypeError:
+            raise TypeError(
+                "The initial counter block must be a byte string, bytearray or memoryview"
+            )
+        if prefix_len + counter_len > block_len:
+            raise ValueError(
+                "The prefix and the counter (%d bytes) do not fit into the"
+                " counter block (%d bytes)" % (prefix_len + counter_len, block_len)
+            )
+
+        initial_counter_block = bytes(initial_counter_block)
+        self.block_size = block_len
+        """The block size of the underlying cipher, in bytes."""
+
         self._nonce: Optional[bytes] = None
-        if len(initial_counter_block) == prefix_len + counter_len:
-            self._nonce = bytes(initial_counter_block[:prefix_len])
+        if block_len == prefix_len + counter_len:
+            self._nonce = initial_counter_block[:prefix_len]
 
         state = VoidPointer()
         initial_counter_block_ptr, initial_counter_block_len = c_uint8_ptr_len(initial_counter_block)
@@ -231,9 +257,6 @@ class CtrMode:
         # Memory allocated for the underlying block cipher is now owed
         # by the cipher mode
         block_cipher.release()
-
-        self.block_size = len(initial_counter_block)
-        """The block size of the underlying cipher, in bytes."""
 
         self._next = [Method.ENCRYPT, Method.DECRYPT]
 
@@ -348,6 +371,12 @@ class CtrMode:
     ) -> Optional[bytes]:
         """Encrypt or decrypt (which are the same operation in CTR mode)"""
 
+        data_len = len(data)
+        # Reject up-front any request that would make the counter wrap
+        # around and silently reuse the key stream. The check happens before
+        # any native call, so no state is changed and nothing is processed.
+        self._check_capacity(data_len)
+
         # Short messages spend most of their time here, not in the cipher.
         # A bytes object cannot change during the call, and the output is ours,
         # so this path skips what protects shared buffers.
@@ -382,6 +411,19 @@ class CtrMode:
             return get_raw_buffer(result_buffer)
         else:
             return None
+
+    def _check_capacity(self, data_len: int) -> None:
+        """Ensure that processing data_len more bytes cannot make the
+        counter wrap around and reuse a key stream block.
+
+        The native counter state is only inspected (CTR_check), never
+        modified: the caller rejects the whole request without consuming any
+        counter value.
+        """
+
+        result = raw_ctr_lib.CTR_check(self._state.get(), c_size_t(data_len))
+        if result:
+            self._check(result, "encrypting")
 
     def _ctr(self, in_ptr, out_ptr, data_len: int) -> int:
         if self._threads > 1:
@@ -432,10 +474,26 @@ def _create_ctr_cipher(factory, **kwargs):
             The maximum number of threads used to process long data
             (default: 1, no extra threads; 0 for all CPU cores).
 
+        reuse (boolean or None):
+            Explicit semantic for the initial counter block (nonce).
+            With ``False`` (one-time), creating another CTR cipher with the
+            same key and initial counter block raises
+            :class:`ReusedInitializationValueError`. With ``True`` or
+            ``None`` (the default), reuse is allowed, for backward
+            compatibility.
+
     Any other keyword will be passed to the underlying block cipher.
     See the relevant documentation for details (at least ``key`` will need
     to be present).
     """
+
+    reuse = normalize_reuse(kwargs.pop("reuse", None), "CTR")
+    # Capture the key before the base cipher consumes it: it identifies the
+    # scope of the one-time nonce registry.
+    try:
+        key = bytes(kwargs["key"])
+    except KeyError:
+        raise TypeError("Missing 'key' parameter")
 
     threads = kwargs.pop("threads", 1)
 
@@ -478,6 +536,9 @@ def _create_ctr_cipher(factory, **kwargs):
                 )
             initial_counter_block = nonce + initial_value
 
+        # Claim the one-time value before the native mode is instantiated,
+        # so a rejected initialization leaves no cipher state behind.
+        one_time_registry.claim(factory.__name__, key, bytes(initial_counter_block), reuse)
         return CtrMode(
             cipher_state,
             initial_counter_block,
@@ -517,4 +578,7 @@ def _create_ctr_cipher(factory, **kwargs):
             " block size (%d)" % (len(initial_counter_block), factory.block_size)
         )
 
+    # Claim the one-time value before the native mode is instantiated, so a
+    # rejected initialization leaves no cipher state behind.
+    one_time_registry.claim(factory.__name__, key, bytes(initial_counter_block), reuse)
     return CtrMode(cipher_state, initial_counter_block, len(prefix), counter_len, little_endian, threads)

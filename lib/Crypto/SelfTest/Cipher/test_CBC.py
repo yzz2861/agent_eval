@@ -515,3 +515,73 @@ class TestSP800TestVectors:
         assert cipher.encrypt(plaintext) == ciphertext
         cipher = AES.new(key, AES.MODE_CBC, iv)
         assert cipher.decrypt(ciphertext) == plaintext
+
+
+class TestCbcReuseSemantics:
+    """The explicit reuse keyword gives a one-time/reusable semantic for IVs."""
+
+    key_128 = get_tag_random("reuse_key_128", 16)
+    iv_128 = get_tag_random("reuse_iv_128", 16)
+
+    def setup_method(self):
+        from Crypto.Cipher._mode_usage import one_time_registry
+
+        one_time_registry.reset()
+
+    def test_default_allows_reuse(self):
+        # Backward compatibility: the same (key, IV) can be used twice.
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128)
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128)
+
+    def test_explicit_reuse_true_allows_reuse(self):
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=True)
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=True)
+
+    def test_one_time_rejects_second_initialization(self):
+        from Crypto.Cipher._mode_usage import ReusedInitializationValueError
+
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=False)
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=False)
+        # The lowercase keyword is accepted as well
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CBC, iv=self.iv_128, reuse=False)
+
+    def test_one_time_is_scoped_to_key_and_iv(self):
+        from Crypto.Cipher._mode_usage import ReusedInitializationValueError
+
+        AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=False)
+        # A different IV with the same key is fine
+        AES.new(self.key_128, AES.MODE_CBC, get_tag_random("other_iv", 16), reuse=False)
+        # The same IV with a different key is fine
+        AES.new(get_tag_random("other_key", 16), AES.MODE_CBC, self.iv_128, reuse=False)
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=False)
+
+    def test_reuse_must_be_boolean(self):
+        for bad in (0, 1, "yes", object()):
+            with pytest.raises(TypeError):
+                AES.new(self.key_128, AES.MODE_CBC, self.iv_128, reuse=bad)
+
+    def test_bad_iv_length_rejected_before_native_mode(self):
+        from Crypto.Cipher._mode_cbc import CbcMode
+
+        for bad_iv in (b"", self.iv_128[:15], self.iv_128 + b"0"):
+            with pytest.raises(ValueError):
+                AES.new(self.key_128, AES.MODE_CBC, bad_iv)
+
+        # The class constructor itself rejects a mismatched IV length
+        cipher_state = AES._create_base_cipher({"key": self.key_128})
+        with pytest.raises(ValueError):
+            CbcMode(cipher_state, self.iv_128[:15], AES.block_size)
+
+    def test_non_buffer_iv_rejected(self):
+        with pytest.raises(TypeError):
+            AES.new(self.key_128, AES.MODE_CBC, iv=1234)
+
+    def test_block_alignment_checked_on_every_call(self):
+        cipher = AES.new(self.key_128, AES.MODE_CBC, self.iv_128)
+        cipher.encrypt(b"5" * 16)
+        for wrong_length in (1, 15, 17, 31):
+            with pytest.raises(ValueError):
+                cipher.encrypt(b"5" * wrong_length)

@@ -11,6 +11,7 @@ from typing import Optional, Union, overload
 
 __all__ = ["CbcMode"]
 from Crypto.Cipher._state_machine import Method
+from Crypto.Cipher._mode_usage import normalize_reuse, one_time_registry
 from Crypto.Random import get_random_bytes
 from Crypto.Util._raw_api import (
     SmartPointer,
@@ -59,7 +60,12 @@ class CbcMode:
     .. _`NIST SP800-38A` : http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf
     """
 
-    def __init__(self, block_cipher: SmartPointer, iv: Buffer) -> None:
+    def __init__(
+        self,
+        block_cipher: SmartPointer,
+        iv: Buffer,
+        block_size: Optional[int] = None,
+    ) -> None:
         """Create a new block cipher, configured in CBC mode.
 
         Args:
@@ -74,7 +80,30 @@ class CbcMode:
 
                 Reusing the *IV* for encryptions performed with the same key
                 compromises confidentiality.
+            block_size (integer):
+                The block size, in bytes, of the underlying block cipher.
+                When given, the IV length is validated against it before any
+                native resource is allocated.
         """
+
+        # Validate the IV up-front, so that an incorrect length cannot reach
+        # the raw library (which would otherwise fail late or silently).
+        try:
+            iv_len = len(iv)
+        except TypeError:
+            raise TypeError("IV must be a byte string, bytearray or memoryview")
+
+        if block_size is None:
+            block_size = iv_len
+        elif iv_len != block_size:
+            raise ValueError(
+                "Incorrect IV length (it must be %d bytes long)" % block_size
+            )
+
+        if block_size <= 0:
+            raise ValueError("The block size must be a positive integer")
+
+        iv = bytes(iv)
 
         state = VoidPointer()
         iv_ptr, iv_len = c_uint8_ptr_len(iv)
@@ -92,10 +121,10 @@ class CbcMode:
         # by the cipher mode
         block_cipher.release()
 
-        self.block_size = len(iv)
+        self.block_size = iv_len
         """The block size of the underlying cipher, in bytes."""
 
-        self.iv = bytes(iv)
+        self.iv = iv
         """The Initialization Vector originally used to create the object.
         The value does not change."""
 
@@ -103,6 +132,21 @@ class CbcMode:
         """Alias for `iv`"""
 
         self._next = [Method.ENCRYPT, Method.DECRYPT]
+
+    def _check_block_alignment(self, data: Buffer) -> int:
+        """Validate that the piece of data to process is a multiple of the
+        cipher block size, and return the length seen by the raw library.
+
+        The check is performed on the Python side, before any native call, so
+        that misaligned input is rejected deterministically."""
+
+        _, data_len = c_uint8_ptr_len(data)
+        if data_len % self.block_size:
+            raise ValueError(
+                "Data must be padded to %d byte boundary in CBC mode"
+                % self.block_size
+            )
+        return data_len
 
     @overload
     def encrypt(self, plaintext: Buffer) -> bytes: ...
@@ -168,6 +212,7 @@ class CbcMode:
             # Check the lengths of the buffers that C code gets
             if len(ciphertext_ptr) != plaintext_len:
                 raise ValueError("output must have the same length as the input  (%d bytes)" % plaintext_len)
+            self._check_block_alignment(plaintext)
             result = raw_cbc_lib.CBC_encrypt(
                 self._state.get(), plaintext_ptr, ciphertext_ptr, c_size_t(plaintext_len)
             )
@@ -242,6 +287,7 @@ class CbcMode:
             # Check the lengths of the buffers that C code gets
             if len(plaintext_ptr) != ciphertext_len:
                 raise ValueError("output must have the same length as the input  (%d bytes)" % ciphertext_len)
+            self._check_block_alignment(ciphertext)
             result = raw_cbc_lib.CBC_decrypt(
                 self._state.get(), ciphertext_ptr, plaintext_ptr, c_size_t(ciphertext_len)
             )
@@ -270,10 +316,24 @@ def _create_cbc_cipher(factory, **kwargs):
         IV (bytes/bytearray/memoryview):
             Alias for ``iv``.
 
+        reuse (boolean or None):
+            Explicit semantic for the IV. With False (one-time), reusing
+            the same IV with the same key in another cipher raises
+            :class:`ReusedInitializationValueError`. With True or None
+            (the default), reuse is allowed, for backward compatibility.
+
     Any other keyword will be passed to the underlying block cipher.
     See the relevant documentation for details (at least ``key`` will need
     to be present).
     """
+
+    reuse = normalize_reuse(kwargs.pop("reuse", None), "CBC")
+    # Capture the key before the base cipher consumes it: it identifies the
+    # scope of the one-time IV registry.
+    try:
+        key = bytes(kwargs["key"])
+    except KeyError:
+        raise TypeError("Missing 'key' parameter")
 
     cipher_state = factory._create_base_cipher(kwargs)
     iv = kwargs.pop("IV", None)
@@ -287,10 +347,20 @@ def _create_cbc_cipher(factory, **kwargs):
     else:
         iv = IV
 
-    if len(iv) != factory.block_size:
+    # Validate the IV before the native mode is instantiated.
+    try:
+        iv_len = len(iv)
+    except TypeError:
+        raise TypeError("IV must be a byte string, bytearray or memoryview")
+    if iv_len != factory.block_size:
         raise ValueError("Incorrect IV length (it must be %d bytes long)" % factory.block_size)
+    iv = bytes(iv)
 
     if kwargs:
         raise TypeError("Unknown parameters for CBC: %s" % str(kwargs))
 
-    return CbcMode(cipher_state, iv)
+    # One-time semantic: claim the IV before the native mode is
+    # instantiated, so a rejected initialization leaves no cipher state.
+    one_time_registry.claim(factory.__name__, key, iv, reuse)
+
+    return CbcMode(cipher_state, iv, factory.block_size)

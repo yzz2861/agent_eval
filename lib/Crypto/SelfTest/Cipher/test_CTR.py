@@ -753,3 +753,109 @@ class TestRFC3686TestVectors:
             cipher = AES.new(key, AES.MODE_CTR, counter=counter)
             result = cipher.encrypt(pt)
             assert hexlify(ct) == hexlify(result)
+
+
+class TestCtrBoundariesAndReuse:
+    """Counter limits are enforced and the initial counter block is one-time
+    when the reuse semantic asks for it."""
+
+    key_128 = get_tag_random("boundary_key_128", 16)
+
+    def setup_method(self):
+        from Crypto.Cipher._mode_usage import one_time_registry
+
+        one_time_registry.reset()
+
+    def test_wrap_around_rejected_as_overflow(self):
+        # An 8-bit counter offers exactly 256 blocks (4096 bytes) of key stream
+        counter = Counter.new(8, prefix=bytes([9]) * 15)
+        max_bytes = 4096
+
+        cipher = AES.new(self.key_128, AES.MODE_CTR, counter=counter)
+        cipher.encrypt(b"9" * max_bytes)
+        with pytest.raises(OverflowError):
+            cipher.encrypt(b"9")
+
+        cipher = AES.new(self.key_128, AES.MODE_CTR, counter=counter)
+        with pytest.raises(OverflowError):
+            cipher.encrypt(b"9" * (max_bytes + 1))
+
+    def test_oversized_request_processes_nothing(self):
+        # If the data does not fit, no counter value is consumed: the key
+        # stream remains usable from where it was.
+        counter = Counter.new(8, prefix=bytes([9]) * 15)
+        cipher = AES.new(self.key_128, AES.MODE_CTR, counter=counter)
+        cipher.encrypt(b"9" * 100)
+        with pytest.raises(OverflowError):
+            cipher.encrypt(b"9" * 4000)
+        # 3996 bytes still fit after the first 100
+        cipher.encrypt(b"9" * 3996)
+        with pytest.raises(OverflowError):
+            cipher.encrypt(b"9")
+
+    def test_boundary_request_of_exact_capacity_succeeds(self):
+        counter = Counter.new(8, prefix=bytes([9]) * 15)
+        cipher = AES.new(self.key_128, AES.MODE_CTR, counter=counter)
+        data = cipher.encrypt(b"7" * 4096)
+        assert len(data) == 4096
+        with pytest.raises(OverflowError):
+            cipher.encrypt(b"7")
+
+    def test_decrypt_also_rejects_wrap_around(self):
+        counter = Counter.new(8, prefix=bytes([9]) * 15)
+        cipher = AES.new(self.key_128, AES.MODE_CTR, counter=counter)
+        cipher.decrypt(b"9" * 4096)
+        with pytest.raises(OverflowError):
+            cipher.decrypt(b"9")
+
+    def test_counter_block_validation_at_initialization(self):
+        from Crypto.Cipher._mode_ctr import CtrMode
+
+        # Prefix + counter longer than the cipher block
+        cipher_state = AES._create_base_cipher({"key": self.key_128})
+        with pytest.raises(ValueError):
+            CtrMode(cipher_state, b"0" * 16, prefix_len=12, counter_len=8, little_endian=False)
+
+        # A counter must be at least one byte long
+        cipher_state = AES._create_base_cipher({"key": self.key_128})
+        with pytest.raises(ValueError):
+            CtrMode(cipher_state, b"0" * 16, prefix_len=16, counter_len=0, little_endian=False)
+
+        # The initial counter block must be a buffer
+        cipher_state = AES._create_base_cipher({"key": self.key_128})
+        with pytest.raises(TypeError):
+            CtrMode(cipher_state, 12345, prefix_len=8, counter_len=8, little_endian=False)
+
+    def test_default_allows_initial_counter_block_reuse(self):
+        nonce = get_tag_random("reuse_nonce", 8)
+        AES.new(self.key_128, AES.MODE_CTR, nonce=nonce)
+        AES.new(self.key_128, AES.MODE_CTR, nonce=nonce)
+
+    def test_one_time_rejects_reused_initial_counter_block(self):
+        from Crypto.Cipher._mode_usage import ReusedInitializationValueError
+
+        nonce = get_tag_random("one_time_nonce", 8)
+        AES.new(self.key_128, AES.MODE_CTR, nonce=nonce, reuse=False)
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CTR, nonce=nonce, reuse=False)
+
+        # The same holds for a fully customized counter object
+        counter = Counter.new(64, prefix=get_tag_random("prefix", 8))
+        AES.new(self.key_128, AES.MODE_CTR, counter=counter, reuse=False)
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CTR, counter=counter, reuse=False)
+
+    def test_one_time_scoped_to_key_and_counter_block(self):
+        from Crypto.Cipher._mode_usage import ReusedInitializationValueError
+
+        nonce = get_tag_random("scoped_nonce", 8)
+        AES.new(self.key_128, AES.MODE_CTR, nonce=nonce, reuse=False)
+        AES.new(get_tag_random("other_key", 16), AES.MODE_CTR, nonce=nonce, reuse=False)
+        AES.new(self.key_128, AES.MODE_CTR, nonce=get_tag_random("other_nonce", 8), reuse=False)
+        with pytest.raises(ReusedInitializationValueError):
+            AES.new(self.key_128, AES.MODE_CTR, nonce=nonce, reuse=False)
+
+    def test_reuse_must_be_boolean(self):
+        for bad in (0, 1, "no"):
+            with pytest.raises(TypeError):
+                AES.new(self.key_128, AES.MODE_CTR, nonce=b"n" * 8, reuse=bad)
