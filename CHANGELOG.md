@@ -3,6 +3,13 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-16:
+    - security: hardened stream reading against malformed FAT/DIFAT chains:
+      each sector in a chain must be unique and in range, declared stream
+      sizes are validated against the FAT capacity, FAT/DIFAT updates are
+      atomic, and truncated or overlapping chains now raise a fatal error
+      instead of returning forged data
+    - added tests for FAT loops, DIFAT overlaps and out-of-bounds stream sizes
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

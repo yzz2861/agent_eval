@@ -7,6 +7,7 @@ import unittest
 
 import os, sys
 import io
+import struct
 from shutil import copy2
 
 # Insert the olefile package relative to this test dir in the sys.path
@@ -20,6 +21,58 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import olefile
+
+
+# --- Helpers to build minimal OLE files in memory ---------------------------
+# Used by the security tests below to craft malformed FAT/DIFAT structures
+# without relying on external sample files.
+
+OLE_MAGIC = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+FREESECT = 0xFFFFFFFF
+ENDOFCHAIN = 0xFFFFFFFE
+FATSECT = 0xFFFFFFFD
+DIFSECT = 0xFFFFFFFC
+NOSTREAM = 0xFFFFFFFF
+STGTY_STREAM = 2
+STGTY_ROOT = 5
+SECTOR_SIZE = 512
+
+
+def make_direntry(name, entry_type, child_sid=NOSTREAM,
+                  isect_start=ENDOFCHAIN, size=0):
+    """Build a 128-bytes directory entry."""
+    name_utf16 = name.encode('utf-16-le') + b'\x00\x00'
+    return struct.pack(
+        '<64sHBBIII16sIQQIII',
+        name_utf16.ljust(64, b'\x00'), len(name_utf16), entry_type, 1,
+        NOSTREAM, NOSTREAM, child_sid, b'\x00' * 16, 0, 0, 0,
+        isect_start, size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF)
+
+
+def make_header(num_fat_sectors, first_dir_sector, header_difat,
+                first_difat_sector=ENDOFCHAIN, num_difat_sectors=0):
+    """Build a 512-bytes OLE header (512-bytes sectors, no MiniFAT)."""
+    header = struct.pack(
+        '<8s16sHHHHHHLLLLLLLLLL',
+        OLE_MAGIC, b'\x00' * 16, 0x003E, 3, 0xFFFE, 9, 6, 0, 0, 0,
+        num_fat_sectors, first_dir_sector, 0, 0x1000,
+        ENDOFCHAIN, 0, first_difat_sector, num_difat_sectors)
+    difat = list(header_difat) + [FREESECT] * (109 - len(header_difat))
+    return header + struct.pack('<109I', *difat)
+
+
+def make_fat_sector(entries):
+    """Build a 512-bytes FAT sector from a list of up to 128 entries."""
+    entries = list(entries) + [FREESECT] * (128 - len(entries))
+    return struct.pack('<128I', *entries)
+
+
+def make_directory_sector(stream_isect_start, stream_size):
+    """Build a 512-bytes directory sector: root entry + one stream 's'."""
+    root = make_direntry('Root Entry', STGTY_ROOT, child_sid=1)
+    stream = make_direntry('s', STGTY_STREAM,
+                           isect_start=stream_isect_start, size=stream_size)
+    return (root + stream).ljust(SECTOR_SIZE, b'\x00')
 
 
 class Test_isOleFile(unittest.TestCase):
@@ -274,6 +327,129 @@ class FileHandleCloseTest(unittest.TestCase):
     #
     #     # now should be closed
     #     self.assertTrue(file_handle.closed)
+
+
+class TestMalformedFatChains(unittest.TestCase):
+    """Security tests: malformed FAT/DIFAT chains must be rejected."""
+
+    def make_fat_loop_file(self):
+        """OLE file whose stream FAT chain loops: sectors 2 -> 3 -> 2 -> ..."""
+        # sectors: 0=FAT, 1=directory, 2..11=data
+        fat_entries = [FATSECT, ENDOFCHAIN, 3, 2] + [FREESECT] * 8
+        header = make_header(num_fat_sectors=1, first_dir_sector=1,
+                             header_difat=[0])
+        # declared size >= mini stream cutoff so the stream is read via FAT,
+        # and requires 9 sectors while the chain loops over 2 sectors:
+        directory = make_directory_sector(stream_isect_start=2,
+                                          stream_size=9 * SECTOR_SIZE)
+        data = b''.join(bytes([i]) * SECTOR_SIZE for i in range(2, 12))
+        return header + make_fat_sector(fat_entries) + directory + data
+
+    def make_difat_overlap_file(self):
+        """OLE file whose DIFAT references a FAT sector already listed in
+        the header (FAT/DIFAT overlap)."""
+        # sectors: 0..108=FAT, 109=DIFAT, 110=directory
+        fat0 = [FATSECT] * 109 + [DIFSECT, ENDOFCHAIN]
+        header = make_header(num_fat_sectors=110, first_dir_sector=110,
+                             header_difat=list(range(109)),
+                             first_difat_sector=109, num_difat_sectors=1)
+        # the DIFAT sector points to sector 0, already used as a FAT sector:
+        difat = [0] + [FREESECT] * 126 + [ENDOFCHAIN]
+        sectors = [make_fat_sector(fat0)]
+        sectors += [make_fat_sector([]) for _ in range(108)]
+        sectors.append(struct.pack('<128I', *difat))
+        sectors.append(make_directory_sector(ENDOFCHAIN, 0))
+        return header + b''.join(sectors)
+
+    def make_oversize_stream_file(self):
+        """OLE file whose stream declares a size beyond the FAT capacity."""
+        # sectors: 0=FAT, 1=directory, 2=data (only 3 sectors in the file)
+        fat_entries = [FATSECT, ENDOFCHAIN, ENDOFCHAIN]
+        header = make_header(num_fat_sectors=1, first_dir_sector=1,
+                             header_difat=[0])
+        directory = make_directory_sector(stream_isect_start=2,
+                                          stream_size=10 * SECTOR_SIZE)
+        return (header + make_fat_sector(fat_entries) + directory
+                + bytes([7]) * SECTOR_SIZE)
+
+    def make_valid_difat_file(self):
+        """Valid large OLE file using a DIFAT sector (110 FAT sectors)."""
+        # sectors: 0..108=FAT, 109=DIFAT, 110=FAT, 111=directory, 112..120=data
+        fat0 = ([FATSECT] * 109 + [DIFSECT, FATSECT, ENDOFCHAIN]
+                + list(range(113, 121)) + [ENDOFCHAIN])
+        header = make_header(num_fat_sectors=110, first_dir_sector=111,
+                             header_difat=list(range(109)),
+                             first_difat_sector=109, num_difat_sectors=1)
+        difat = [110] + [FREESECT] * 126 + [ENDOFCHAIN]
+        sectors = [make_fat_sector(fat0)]
+        sectors += [make_fat_sector([]) for _ in range(108)]
+        sectors.append(struct.pack('<128I', *difat))
+        sectors.append(make_fat_sector([]))
+        sectors.append(make_directory_sector(stream_isect_start=112,
+                                             stream_size=9 * SECTOR_SIZE))
+        data = b''.join(bytes([i % 256]) * SECTOR_SIZE for i in range(112, 121))
+        return header + b''.join(sectors) + data, data
+
+    def make_sparse_end_file(self):
+        """Valid OLE file whose last sector is physically truncated (sparse
+        ending): the file ends before the last sector is complete."""
+        # sectors: 0=FAT, 1=directory, 2..9=data, 10=data (only 88 bytes present)
+        fat_entries = ([FATSECT, ENDOFCHAIN] + list(range(3, 11))
+                       + [ENDOFCHAIN])
+        header = make_header(num_fat_sectors=1, first_dir_sector=1,
+                             header_difat=[0])
+        stream_size = 8 * SECTOR_SIZE + 88
+        directory = make_directory_sector(stream_isect_start=2,
+                                          stream_size=stream_size)
+        data = b''.join(bytes([i]) * SECTOR_SIZE for i in range(2, 10))
+        data += bytes([10]) * 88
+        return (header + make_fat_sector(fat_entries) + directory + data,
+                data)
+
+    def test_fat_loop_rejected(self):
+        """A stream whose FAT chain loops must fail instead of returning
+        duplicated sectors."""
+        data = self.make_fat_loop_file()
+        ole = olefile.OleFileIO(io.BytesIO(data))
+        with self.assertRaises(IOError) as cm:
+            ole.openstream('s')
+        ole.close()
+        # the error message must not embed the file contents:
+        self.assertLess(len(str(cm.exception)), 200)
+
+    def test_difat_overlap_rejected(self):
+        """A DIFAT sector referencing an already used FAT sector must fail."""
+        data = self.make_difat_overlap_file()
+        with self.assertRaises(IOError) as cm:
+            olefile.OleFileIO(io.BytesIO(data))
+        self.assertLess(len(str(cm.exception)), 200)
+
+    def test_stream_size_out_of_bounds_rejected(self):
+        """A stream declaring a size larger than the FAT capacity must fail."""
+        data = self.make_oversize_stream_file()
+        ole = olefile.OleFileIO(io.BytesIO(data))
+        with self.assertRaises(IOError) as cm:
+            ole.openstream('s')
+        ole.close()
+        self.assertLess(len(str(cm.exception)), 200)
+
+    def test_valid_difat_file_compatible(self):
+        """A valid large file using DIFAT must still load and read correctly."""
+        data, expected = self.make_valid_difat_file()
+        ole = olefile.OleFileIO(io.BytesIO(data))
+        stream = ole.openstream('s')
+        self.assertEqual(stream.read(), expected)
+        stream.close()
+        ole.close()
+
+    def test_sparse_end_file_compatible(self):
+        """A file whose last sector is truncated at EOF must still read."""
+        data, expected = self.make_sparse_end_file()
+        ole = olefile.OleFileIO(io.BytesIO(data))
+        stream = ole.openstream('s')
+        self.assertEqual(stream.read(), expected)
+        stream.close()
+        ole.close()
 
 
 if __name__ == '__main__':

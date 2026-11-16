@@ -638,7 +638,7 @@ class OleStream(io.BytesIO):
         # This number should (at least) be less than the total number of
         # sectors in the given FAT:
         if nb_sectors > len(fat):
-            self.ole._raise_defect(DEFECT_INCORRECT, 'malformed OLE document, stream too large')
+            self.ole._raise_defect(DEFECT_FATAL, 'malformed OLE document, stream size exceeds FAT capacity')
         # optimization(?): data is first a list of strings, and join() is called
         # at the end to concatenate all in one string.
         # (this may not be really useful with recent Python versions)
@@ -649,6 +649,11 @@ class OleStream(io.BytesIO):
             self.ole._raise_defect(DEFECT_INCORRECT, 'incorrect OLE sector index for empty stream')
         # [PL] A fixed-length for loop is used instead of an undefined while
         # loop to avoid DoS attacks:
+        # [PL] Each sector index in the chain must be unique: a repeated
+        # sector means a FAT loop or an overlapping chain, which would
+        # otherwise cause the same sector to be appended several times
+        # (memory exhaustion and forged stream contents):
+        seen_sectors = set()
         for i in range(nb_sectors):
             log.debug('Reading stream sector[%d] = %Xh' % (i, sect))
             # Sector index may be ENDOFCHAIN, but only if size was unknown
@@ -659,7 +664,7 @@ class OleStream(io.BytesIO):
                 else:
                     # else this means that the stream is smaller than declared:
                     log.debug('sect=ENDOFCHAIN before expected size')
-                    self.ole._raise_defect(DEFECT_INCORRECT, 'incomplete OLE stream')
+                    self.ole._raise_defect(DEFECT_FATAL, 'incomplete OLE stream')
             # sector index should be within FAT:
             if sect<0 or sect>=len(fat):
                 log.debug('sect=%d (%X) / len(fat)=%d' % (sect, sect, len(fat)))
@@ -669,9 +674,16 @@ class OleStream(io.BytesIO):
 ##                f.write(tmp_data)
 ##                f.close()
 ##                log.debug('data read so far: %d bytes' % len(tmp_data))
-                self.ole._raise_defect(DEFECT_INCORRECT, 'incorrect OLE FAT, sector index out of range')
+                self.ole._raise_defect(DEFECT_FATAL, 'incorrect OLE FAT, sector index out of range')
                 # stop reading here if the exception is ignored:
                 break
+            # each sector may only appear once in the chain:
+            if sect in seen_sectors:
+                log.debug('sect=%d (%X) already present in this stream chain' % (sect, sect))
+                self.ole._raise_defect(DEFECT_FATAL, 'FAT loop detected, sector referenced twice in stream chain')
+                # stop reading here if the exception is ignored:
+                break
+            seen_sectors.add(sect)
             # TODO: merge this code with OleFileIO.getsect() ?
             # TODO: check if this works with 4K sectors:
             try:
@@ -679,7 +691,7 @@ class OleStream(io.BytesIO):
             except Exception:
                 log.debug('sect=%d, seek=%d, filesize=%d' %
                     (sect, offset+sectorsize*sect, filesize))
-                self.ole._raise_defect(DEFECT_INCORRECT, 'OLE sector index out of range')
+                self.ole._raise_defect(DEFECT_FATAL, 'OLE sector index out of range')
                 # stop reading here if the exception is ignored:
                 break
             sector_data = fp.read(sectorsize)
@@ -691,14 +703,14 @@ class OleStream(io.BytesIO):
                 log.debug('sect=%d / len(fat)=%d, seek=%d / filesize=%d, len read=%d' %
                     (sect, len(fat), offset+sectorsize*sect, filesize, len(sector_data)))
                 log.debug('seek+len(read)=%d' % (offset+sectorsize*sect+len(sector_data)))
-                self.ole._raise_defect(DEFECT_INCORRECT, 'incomplete OLE sector')
+                self.ole._raise_defect(DEFECT_FATAL, 'incomplete OLE sector')
             data.append(sector_data)
             # jump to next sector in the FAT:
             try:
                 sect = fat[sect] & 0xFFFFFFFF  # JYTHON-WORKAROUND
             except IndexError:
                 # [PL] if pointer is out of the FAT an exception is raised
-                self.ole._raise_defect(DEFECT_INCORRECT, 'incorrect OLE FAT, sector index out of range')
+                self.ole._raise_defect(DEFECT_FATAL, 'incorrect OLE FAT, sector index out of range')
                 # stop reading here if the exception is ignored:
                 break
         # [PL] Last sector should be a "end of chain" marker:
@@ -872,13 +884,21 @@ class OleDirectoryEntry:
         if self.is_minifat and not ole_file.minifat:
             ole_file.loadminifat()
 
+        fat = ole_file.minifat if self.is_minifat else ole_file.fat
         next_sect = self.isectStart
+        # each sector may only appear once in the chain, and must be within
+        # the FAT/MiniFAT, otherwise the chain is looped or corrupted:
+        seen_sect = set()
         while next_sect != ENDOFCHAIN:
+            if next_sect in seen_sect:
+                ole_file._raise_defect(DEFECT_FATAL, 'FAT loop detected, sector referenced twice in sector chain')
+                break
+            if next_sect < 0 or next_sect >= len(fat):
+                ole_file._raise_defect(DEFECT_FATAL, 'sector index out of range in sector chain')
+                break
+            seen_sect.add(next_sect)
             self.sect_chain.append(next_sect)
-            if self.is_minifat:
-                next_sect = ole_file.minifat[next_sect]
-            else:
-                next_sect = ole_file.fat[next_sect]
+            next_sect = fat[next_sect]
 
     def build_storage_tree(self):
         """
@@ -1549,6 +1569,11 @@ class OleFileIO:
             if log.isEnabledFor(logging.DEBUG):
                 self.dumpsect(sect)
         # The FAT is a sector chain starting at the first index of itself.
+        # FAT updates are first collected in a temporary list, and only
+        # appended to the main FAT once the whole chain has been validated,
+        # so that a malformed file cannot leave a partially updated FAT
+        # (atomic update):
+        fat_updates = []
         # initialize isect, just in case:
         isect = None
         for isect in fat1:
@@ -1558,11 +1583,29 @@ class OleFileIO:
                 # the end of the sector chain has been reached
                 log.debug("found end of sector chain")
                 break
+            # each FAT sector index must be within the file:
+            if isect >= self.nb_sect:
+                log.debug('FAT sector index out of range: %X / nb_sect=%X'
+                    % (isect, self.nb_sect))
+                self._raise_defect(DEFECT_FATAL, 'incorrect FAT, sector index out of range')
+                # if the defect is ignored, discard the updates:
+                return isect
+            # each FAT sector may only be referenced once, otherwise the
+            # same FAT entries would be appended twice (FAT/DIFAT overlap):
+            if isect in self._fat_difat_sectors:
+                log.debug('FAT sector referenced twice: %X' % isect)
+                self._raise_defect(DEFECT_FATAL, 'incorrect FAT, sector referenced twice (FAT/DIFAT overlap)')
+                # if the defect is ignored, discard the updates:
+                return isect
+            self._fat_difat_sectors.add(isect)
             # read the FAT sector
             s = self.getsect(isect)
             # parse it as an array of 32 bits integers, and add it to the
             # global FAT array
             nextfat = self.sect2array(s)
+            fat_updates.append(nextfat)
+        # all sectors were validated, apply the updates atomically:
+        for nextfat in fat_updates:
             self.fat = self.fat + nextfat
         return isect
 
@@ -1583,6 +1626,9 @@ class OleFileIO:
         # to use an array than a list in Python.
         # It's initialized as empty first:
         self.fat = array.array(UINT32)
+        # set of sector indices already used as FAT or DIFAT sectors, to
+        # detect duplicates and overlaps between the FAT and DIFAT chains:
+        self._fat_difat_sectors = set()
         self.loadfat_sect(sect)
         # self.dumpfat(self.fat)
         # for i in range(0, len(sect), 4):
@@ -1618,6 +1664,14 @@ class OleFileIO:
             for i in iterrange(nb_difat):
                 log.debug( "DIFAT block %d, sector %X" % (i, isect_difat) )
                 # TODO: check if corresponding FAT SID = DIFSECT
+                # each DIFAT sector index must be within the file:
+                if isect_difat >= self.nb_sect:
+                    self._raise_defect(DEFECT_FATAL, 'incorrect DIFAT, sector index out of range')
+                # each DIFAT sector may only appear once, and must not
+                # overlap with a FAT sector (DIFAT loop or FAT/DIFAT overlap):
+                if isect_difat in self._fat_difat_sectors:
+                    self._raise_defect(DEFECT_FATAL, 'incorrect DIFAT, sector referenced twice (DIFAT loop or FAT/DIFAT overlap)')
+                self._fat_difat_sectors.add(isect_difat)
                 sector_difat = self.getsect(isect_difat)
                 difat = self.sect2array(sector_difat)
                 # Display the sector contents only if the logging level is debug:
