@@ -1,0 +1,59 @@
+dist: xenial
+os:
+  - linux
+  # - osx
+language: python
+python:
+  - "3.8"
+  - "3.7"
+  - "3.6"
+  - "3.5"
+  - "pypy3"
+jobs:
+  include:
+    # add a pep8 test
+    - python: 3.6
+      env: TOXENV=pep8
+
+    # test setup.py using each tested version
+    - python: 3.8
+      env: TOXENV=py38-setup
+
+    - python: 3.7
+      env: TOXENV=py37-setup
+
+    - python: 3.6
+      env: TOXENV=py36-setup
+
+    - python: 3.5
+      env: TOXENV=py35-setup
+
+    # do some tests with LC_ALL=C to check for locale variance
+    - python: 3.6
+      env: LC_ALL=C
+
+  allow_failures:
+    # pep8 failures shouldn't be considered fatal
+    - env: TOXENV=pep8
+    # pypy and pypy3 tests are just for fun
+    - python: "pypy"
+    - python: "pypy3"
+    # osx, until it's working
+    # - os: osx
+
+# install requirements
+install:
+  - sed -i -e 's/^/#/' tests/gnupghome/gpg-agent.conf
+  - ./install_dependencies.${TRAVIS_OS_NAME}.sh
+  # ensure tox and virtualenv are up to date
+  - pip install -U tox virtualenv
+
+# set TOXENV if it isn't yet
+before_script:
+  - if [[ -z "$TOXENV" ]]; then export TOXENV=py${TRAVIS_PYTHON_VERSION//.}; fi
+  - if [[ "${TRAVIS_PYTHON_VERSION}" == 'pypy' ]]; then export TOXENV=pypy; fi
+  - if [[ "${TRAVIS_PYTHON_VERSION}" == 'pypy3' ]]; then export TOXENV=pypy3; fi
+
+# run tox
+script:
+  - ./tox.sh
