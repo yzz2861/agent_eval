@@ -1,0 +1,362 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) Copyright &copy; 2023, Hsiaoming Yang
+# This file is distributed under the same license as the joserfc package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2023.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  joserfc\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-01 20:41+0900\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh\n"
+"Language-Team: zh <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../recipes/azure.rst:4
+msgid "Dynamic keys for Azure"
+msgstr ""
+
+#: ../../recipes/azure.rst:6
+msgid ""
+"In scenarios where you need to decode a JWT received from Azure "
+"(Microsoft), you may encounter a situation where you are unaware of the "
+"public key required for the decoding process until after the token "
+"arrives. In such cases, you will typically need to retrieve the key set "
+"dynamically from the ``iss`` (issuer) value contained within the JWT."
+msgstr ""
+
+#: ../../recipes/azure.rst:12
+msgid ""
+"Let's illustrate this process using a JWT token extracted from "
+"Microsoft's official documentation https://learn.microsoft.com/en-"
+"us/azure/active-directory/develop/access-tokens:"
+msgstr ""
+
+#: ../../recipes/azure.rst:31
+msgid ""
+"This token, obtained from Microsoft's official documentation, serves as "
+"an example for decoding JWTs originating from Azure. The decoded payload "
+"might look like:"
+msgstr ""
+
+#: ../../recipes/azure.rst:57
+msgid "Steps for decoding"
+msgstr ""
+
+#: ../../recipes/azure.rst:59
+msgid ""
+"In order to decode JWT tokens from Azure, it is essential to retrieve the"
+" necessary information from Microsoft's OpenID configuration, including "
+"the JSON Web Key Set (JWK Set) URI. This information is crucial for "
+"verifying the tokens."
+msgstr ""
+
+#: ../../recipes/azure.rst:64
+msgid "OpenID Configuration Endpoint"
+msgstr ""
+
+#: ../../recipes/azure.rst:66
+msgid ""
+"You can obtain the OpenID configuration endpoint from Microsoft by "
+"forming a URL in the following format:"
+msgstr ""
+
+#: ../../recipes/azure.rst:73
+#, python-brace-format
+msgid ""
+"In the example provided, replace ``{tenant}`` with your specific Azure "
+"tenant ID or the tenant's globally unique identifier (GUID). The "
+"resulting URL will lead you to the OpenID configuration details. Then, "
+"the OpenID configuration endpoint for the above example could be:"
+msgstr ""
+
+#: ../../recipes/azure.rst:83
+msgid "JWK Set URI"
+msgstr ""
+
+#: ../../recipes/azure.rst:85
+msgid ""
+"Within the OpenID configuration details, you will find the JSON Web Key "
+"Set (JWK Set) URI. This URI is used to access the keys required for "
+"verifying JWT tokens. The JWK Set URI can typically be found within the "
+"configuration as follows:"
+msgstr ""
+
+#: ../../recipes/azure.rst:93
+#, python-brace-format
+msgid ""
+"Once again, remember to replace ``{tenant}`` with your Azure tenant ID or"
+" the appropriate identifier. In the above example, the ``jwks_uri`` could"
+" be:"
+msgstr ""
+
+#: ../../recipes/azure.rst:101
+msgid "Validating JWT Tokens"
+msgstr ""
+
+#: ../../recipes/azure.rst:103
+msgid ""
+"Once you have retrieved the JSON Web Key Set (JWK Set) from the JWK Set "
+"URI provided in the OpenID configuration, you can proceed to validate JWT"
+" tokens."
+msgstr ""
+
+#: ../../recipes/azure.rst:107
+msgid "Using a Callable Key"
+msgstr ""
+
+#: ../../recipes/azure.rst:109
+msgid ""
+"In ``joserfc``, a callable key is a powerful feature that allows you to "
+"dynamically retrieve and use the appropriate JSON Web Key (JWK) for token"
+" decoding. In the context of Azure tokens, you can implement a callable "
+"key to fetch the JWKs from the JWK Set URI and select the correct key "
+"based on the kid (Key ID) in the token's header."
+msgstr ""
+
+#: ../../recipes/azure.rst:139
+msgid ""
+"When using the callable key method in ``joserfc`` to decode the tokens, "
+"it retrieves the key dynamically on each token decoding request. However,"
+" you may encounter performance issues due to the repeated retrieval of "
+"keys. In such cases, it's advisable to optimize the callable key by "
+"implementing key set caching based on the issuer."
+msgstr ""
+
+#: ../../recipes/azure.rst:144
+msgid "Let's enhance the callable key method to improve its efficiency."
+msgstr ""
+
+#: ../../recipes/azure.rst:163
+msgid ""
+"In this enhanced callable key, an LRU (Least Recently Used) cache is used"
+" to store JWK Sets for different issuers. When decoding a token, the "
+"callable key function first checks if the JWK Set for the specific issuer"
+" is available in the cache. If it's not, it fetches the JWK Set for the "
+"issuer, caches it, and then selects the appropriate JWK based on the kid."
+" This caching mechanism significantly reduces the network requests for "
+"JWK Sets and improves the efficiency of token decoding."
+msgstr ""
+
+#: ../../recipes/azure.rst:171
+msgid "Manual Token Decoding"
+msgstr ""
+
+#: ../../recipes/azure.rst:173
+msgid ""
+"If you prefer a more hands-on approach and want to decode the token step "
+"by step, you can opt for a manual decoding process. This method allows "
+"you to extract the token string and work with it directly. Since the "
+"token is a JWT in JWS format, you can utilize the ``extract_compact`` "
+"method from the JWS module to obtain the necessary information. The "
+"result of this extraction is an object of type "
+":class:`~joserfc.jws.CompactSignature`."
+msgstr ""
+
+#: ../../recipes/azure.rst:186
+msgid ""
+"Similar to the approach detailed in the \"Using a Callable Key\" section,"
+" you can retrieve the key set based on the issuer (``iss``) claim. This "
+"method allows you to access the necessary keys for token verification."
+msgstr ""
+
+#: ../../recipes/azure.rst:203
+msgid ""
+"Once you have obtained the key set based on the issuer (``iss``) claim, "
+"you can use this set of keys to decode the token."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:1
+msgid "Cheatsheet"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:3
+msgid ""
+"This cheatsheet provides quick reference for the `joserfc` library, "
+"covering key management (JWK), signing (JWS), encryption (JWE), and "
+"tokens (JWT)."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:5
+msgid "Installation"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:11
+msgid "JWK (JSON Web Key)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:13
+msgid "Manage cryptographic keys."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:15
+msgid "Import Keys"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:17
+msgid "Import keys from various sources with `jwk.import_key()` method:"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:58
+msgid "Import keys directly using the key type class:"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:75
+msgid "Generate Keys"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:95
+msgid "Use KeyParameters"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:97
+msgid ""
+"When importing a key, or generating a key, you can pass a `KeyParameters`"
+" to set additional key properties."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:110
+msgid "Export Keys"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:121
+msgid "Key Sets (JWKS)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:141
+msgid "JWS (JSON Web Signature)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:143
+msgid "Sign and verify data."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:145
+msgid "Compact Serialization (Most Common)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:165
+msgid "JSON Serialization (Multiple Signatures)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:201
+msgid "JWE (JSON Web Encryption)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:203
+msgid "Encrypt and decrypt data."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:205
+msgid "Compact Encryption"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:225
+msgid "JSON Encryption (Multiple Recipients)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:257
+msgid "JWT (JSON Web Token)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:259
+msgid "Create and verify tokens with claims."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:261
+msgid "Encode (Create Token)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:279
+msgid "Decode (Verify Token)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:289
+msgid "Validate Claims"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:291
+msgid ""
+"Use `JWTClaimsRegistry` to enforce claim rules (essential, values, "
+"format)."
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:313
+msgid "Nested JWT (JWE containing JWT)"
+msgstr ""
+
+#: ../../recipes/cheatsheet.md:315
+msgid "To create an encrypted JWT, use `JWERegistry`."
+msgstr ""
+
+#: ../../recipes/openssl.rst:2
+msgid "Using OpenSSL command"
+msgstr ""
+
+#: ../../recipes/openssl.rst:7
+msgid ""
+"JOSE RFC provides a method :meth:`generate_key` for generating keys to be"
+" used for JWS/JWE/JWT. However, you can also use other tools to generate "
+"the keys, here lists some of the commands you might find helpful for "
+"``openssl``."
+msgstr ""
+
+#: ../../recipes/openssl.rst:13
+msgid "Generating EC keys"
+msgstr ""
+
+#: ../../recipes/openssl.rst:16
+msgid "EC key with crv P-256"
+msgstr ""
+
+#: ../../recipes/openssl.rst:26
+msgid "Using OpenSSL command line tool:"
+msgstr ""
+
+#: ../../recipes/openssl.rst:36
+msgid "OpenSSL encourage using prime256v1 instead of secp256r1"
+msgstr ""
+
+#: ../../recipes/openssl.rst:40
+msgid "EC key with crv P-384"
+msgstr ""
+
+#: ../../recipes/openssl.rst:60
+msgid "EC key with crv P-512"
+msgstr ""
+
+#: ../../recipes/openssl.rst:78
+msgid ""
+"It is **secp521r1**, not secp512r1. But the \"crv\" value in EC Key is "
+"\"P-512\"."
+msgstr ""
+
+#: ../../recipes/openssl.rst:82
+msgid "EC key with crv secp256k1"
+msgstr ""
+
+#~ msgid ""
+#~ "In the example provided, replace "
+#~ "{tenant} with your specific Azure tenant"
+#~ " ID or the tenant's globally unique"
+#~ " identifier (GUID). The resulting URL "
+#~ "will lead you to the OpenID "
+#~ "configuration details. Then, the OpenID "
+#~ "configuration endpoint for the above "
+#~ "example could be:"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Once again, remember to replace {tenant}"
+#~ " with your Azure tenant ID or "
+#~ "the appropriate identifier. In the above"
+#~ " example, the ``jwks_uri`` could be:"
+#~ msgstr ""
+

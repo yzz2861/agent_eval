@@ -1,0 +1,271 @@
+from copy import deepcopy
+from unittest import TestCase
+
+from joserfc import jwe
+from joserfc.errors import (
+    ConflictAlgorithmError,
+    DecodeError,
+    ExceededSizeError,
+    InvalidKeyTypeError,
+    UnsupportedHeaderError,
+)
+from joserfc.jwa import JWEKeyEncryption
+from joserfc.jwe import FlattenedJSONEncryption, GeneralJSONEncryption
+from joserfc.jwk import ECKey, KeySet, OctKey, RSAKey
+
+
+class CountingKeyEncryption(JWEKeyEncryption):
+    name = "TEST-COUNT"
+    description = "Counting test key encryption"
+    key_types = ["oct"]
+
+    def __init__(self):
+        self.decrypt_count = 0
+
+    def encrypt_cek(self, cek, recipient):
+        return cek
+
+    def decrypt_cek(self, recipient):
+        self.decrypt_count += 1
+        assert recipient.encrypted_key is not None
+        return recipient.encrypted_key
+
+
+class TestJWEJSON(TestCase):
+    rsa_key = RSAKey.generate_key()
+    ec_key = ECKey.generate_key()
+
+    def test_multiple_recipients_with_key(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        obj.add_recipient({"alg": "ECDH-ES+A128KW"}, self.ec_key)
+        value = jwe.encrypt_json(obj, None)
+        self.assertIn("recipients", value)
+        self.assertEqual(len(value["recipients"]), 2)
+
+    def test_reusing_json_encryption_model_generates_fresh_ephemeral_keys(self):
+        for model in (GeneralJSONEncryption, FlattenedJSONEncryption):
+            for alg in ("ECDH-ES", "ECDH-ES+A128KW"):
+                with self.subTest(model=model.__name__, alg=alg):
+                    obj = model({"enc": "A128GCM"}, b"hello")
+                    obj.add_recipient({"alg": alg}, self.ec_key)
+                    first = deepcopy(jwe.encrypt_json(obj, None))
+                    second = jwe.encrypt_json(obj, None)
+
+                    if model is GeneralJSONEncryption:
+                        first_header = first["recipients"][0]["header"]
+                        second_header = second["recipients"][0]["header"]
+                    else:
+                        first_header = first["header"]
+                        second_header = second["header"]
+
+                    self.assertNotEqual(first_header["epk"], second_header["epk"])
+                    self.assertEqual(jwe.decrypt_json(first, self.ec_key).plaintext, b"hello")
+                    self.assertEqual(jwe.decrypt_json(second, self.ec_key).plaintext, b"hello")
+
+    def test_multiple_recipients_without_key(self):
+        key1 = RSAKey.generate_key(parameters={"kid": "rsa"})
+        key2 = ECKey.generate_key(parameters={"kid": "ec"})
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "RSA-OAEP", "kid": "rsa"})
+        obj.add_recipient({"alg": "ECDH-ES+A128KW", "kid": "ec"})
+        value = jwe.encrypt_json(obj, KeySet([key1, key2]))
+        self.assertIn("recipients", value)
+        self.assertEqual(len(value["recipients"]), 2)
+
+    def test_multiple_recipients_with_direct_mode(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "dir"}, OctKey.generate_key())
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        self.assertRaises(
+            ConflictAlgorithmError,
+            jwe.encrypt_json,
+            obj,
+            None,
+        )
+
+    def test_with_aad(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i", aad=b"foo")
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        value = jwe.encrypt_json(obj, None)
+        obj1 = jwe.decrypt_json(value, self.rsa_key)
+        self.assertEqual(obj1.aad, b"foo")
+
+    def test_critical_headers_must_be_protected(self):
+        key = OctKey.generate_key(128)
+        obj = FlattenedJSONEncryption(
+            {"enc": "A128GCM", "crit": ["kid"]},
+            b"hello",
+            unprotected={"kid": "alice"},
+        )
+        obj.add_recipient({"alg": "A128KW"}, key)
+        self.assertRaises(UnsupportedHeaderError, jwe.encrypt_json, obj, None)
+
+        obj = FlattenedJSONEncryption({"enc": "A128GCM", "crit": ["kid"]}, b"hello")
+        obj.add_recipient({"alg": "A128KW", "kid": "alice"}, key)
+        self.assertRaises(UnsupportedHeaderError, jwe.encrypt_json, obj, None)
+
+        obj = FlattenedJSONEncryption({"enc": "A128GCM"}, b"hello")
+        obj.add_recipient({"alg": "A128KW", "crit": ["alg"]}, key)
+        self.assertRaises(UnsupportedHeaderError, jwe.encrypt_json, obj, None)
+
+    def test_recipient_critical_header_rejected_on_decrypt(self):
+        key = OctKey.generate_key(128)
+        obj = FlattenedJSONEncryption({"enc": "A128GCM"}, b"hello")
+        obj.add_recipient({"alg": "A128KW"}, key)
+        value = jwe.encrypt_json(obj, None)
+        value["header"]["crit"] = ["alg"]
+        self.assertRaises(UnsupportedHeaderError, jwe.decrypt_json, value, key)
+
+        obj = GeneralJSONEncryption({"enc": "A128GCM"}, b"hello")
+        obj.add_recipient({"alg": "A128KW"}, key)
+        value = jwe.encrypt_json(obj, None)
+        value["recipients"][0]["header"]["crit"] = ["alg"]
+        self.assertRaises(UnsupportedHeaderError, jwe.decrypt_json, value, key)
+
+    def test_aad_size_limit(self):
+        key = OctKey.generate_key(128)
+        limit = jwe.JWERegistry.max_aad_length
+        for model in (GeneralJSONEncryption, FlattenedJSONEncryption):
+            for size in (0, limit * 3 // 4, limit * 3 // 4 + 1):
+                with self.subTest(model=model.__name__, size=size):
+                    aad = b"a" * size
+                    obj = model({"enc": "A128GCM"}, b"hello", aad=aad)
+                    obj.add_recipient({"alg": "A128KW"}, key)
+                    value = jwe.encrypt_json(obj, None)
+                    if size == 0:
+                        self.assertNotIn("aad", value)
+                        result = jwe.decrypt_json(value, key)
+                        self.assertIsNone(result.aad)
+                        self.assertEqual(result.plaintext, b"hello")
+                    elif len(value["aad"]) <= limit:
+                        result = jwe.decrypt_json(value, key)
+                        self.assertEqual(result.aad, aad)
+                        self.assertEqual(result.plaintext, b"hello")
+                    else:
+                        with self.assertRaisesRegex(ExceededSizeError, "AAD size exceeds"):
+                            jwe.decrypt_json(value, key)
+                        registry = jwe.JWERegistry(max_aad_length=len(value["aad"]))
+                        result = jwe.decrypt_json(value, key, registry=registry)
+                        self.assertEqual(result.aad, aad)
+                        self.assertEqual(result.plaintext, b"hello")
+
+    def test_empty_aad_member_rejected(self):
+        key = OctKey.generate_key(128)
+        for model in (GeneralJSONEncryption, FlattenedJSONEncryption):
+            with self.subTest(model=model.__name__):
+                obj = model({"enc": "A128GCM"}, b"hello")
+                obj.add_recipient({"alg": "A128KW"}, key)
+                value = jwe.encrypt_json(obj, None)
+                value["aad"] = ""
+                with self.assertRaisesRegex(DecodeError, "AAD must be omitted when empty"):
+                    jwe.decrypt_json(value, key)
+
+    def test_oversized_aad_rejected_before_decoding(self):
+        key = OctKey.generate_key(128)
+        for model in (GeneralJSONEncryption, FlattenedJSONEncryption):
+            with self.subTest(model=model.__name__):
+                obj = model({"enc": "A128GCM"}, b"hello")
+                obj.add_recipient({"alg": "A128KW"}, key)
+                value = jwe.encrypt_json(obj, None)
+                value["aad"] = "!" * 5
+                registry = jwe.JWERegistry(max_aad_length=4)
+                with self.assertRaisesRegex(ExceededSizeError, "AAD size exceeds 4 bytes"):
+                    jwe.decrypt_json(value, key, registry=registry)
+
+    def test_decode_multiple_recipients(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        obj.add_recipient({"alg": "ECDH-ES+A128KW"}, self.ec_key)
+        value = jwe.encrypt_json(obj, None)
+        self.assertRaises(
+            InvalidKeyTypeError,
+            jwe.decrypt_json,
+            value,
+            self.rsa_key,
+        )
+        registry = jwe.JWERegistry(verify_all_recipients=False)
+        obj1 = jwe.decrypt_json(value, self.rsa_key, registry=registry)
+        self.assertEqual(obj1.plaintext, b"i")
+
+        key3 = OctKey.generate_key()
+        self.assertRaises(
+            DecodeError,
+            jwe.decrypt_json,
+            value,
+            key3,
+            registry=registry,
+        )
+
+    def test_general_json_without_recipients(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        value = jwe.encrypt_json(obj, None)
+        value["recipients"] = []
+        self.assertRaises(DecodeError, jwe.decrypt_json, value, self.rsa_key)
+
+    def test_general_json_without_encrypted_key(self):
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        obj.add_recipient({"alg": "RSA-OAEP"}, self.rsa_key)
+        value = jwe.encrypt_json(obj, None)
+        del value["recipients"][0]["encrypted_key"]
+        self.assertRaises(DecodeError, jwe.decrypt_json, value, self.rsa_key)
+
+    def test_general_json_recipients_exceeded_size_error(self):
+        key = OctKey.generate_key(128)
+        limit = jwe.JWERegistry.max_recipients
+        obj = GeneralJSONEncryption({"enc": "A128CBC-HS256"}, b"i")
+        for _ in range(limit + 1):
+            obj.add_recipient({"alg": "A128KW"}, key)
+
+        value = jwe.encrypt_json(obj, None)
+        self.assertRaises(ExceededSizeError, jwe.decrypt_json, value, key)
+
+        registry = jwe.JWERegistry(max_recipients=limit + 1)
+        obj1 = jwe.decrypt_json(value, key, registry=registry)
+        self.assertEqual(obj1.plaintext, b"i")
+
+    def test_verify_one_recipient_stops_after_success(self):
+        key = OctKey.generate_key(128)
+        alg = CountingKeyEncryption()
+        jwe.JWERegistry.register(alg)
+        try:
+            registry = jwe.JWERegistry(
+                algorithms=[alg.name, "A128GCM"],
+                verify_all_recipients=False,
+            )
+            obj = GeneralJSONEncryption({"enc": "A128GCM"}, b"i")
+            obj.add_recipient({"alg": alg.name}, key)
+            obj.add_recipient({"alg": alg.name}, key)
+            value = jwe.encrypt_json(obj, None, registry=registry)
+            alg.decrypt_count = 0
+            obj1 = jwe.decrypt_json(value, key, registry=registry)
+        finally:
+            del jwe.JWERegistry.algorithms["alg"][alg.name]
+
+        self.assertEqual(obj1.plaintext, b"i")
+        self.assertEqual(alg.decrypt_count, 1)
+
+    def test_flattened_encryption(self):
+        key = OctKey.generate_key(128)
+        protected = {"enc": "A128CBC-HS256"}
+        plaintext = b"hello world"
+        obj0 = FlattenedJSONEncryption(protected, plaintext)
+        obj0.add_recipient({"alg": "A128KW"})
+        value = jwe.encrypt_json(obj0, key)
+        obj1 = jwe.decrypt_json(value, key)
+        self.assertEqual(obj1.plaintext, plaintext)
+
+        obj2 = FlattenedJSONEncryption(protected, plaintext)
+        obj2.add_recipient({"alg": "A128KW"}, key)
+        value = jwe.encrypt_json(obj0, None)
+        obj3 = jwe.decrypt_json(value, key)
+        self.assertEqual(obj3.plaintext, plaintext)
+
+    def test_flattened_json_without_encrypted_key(self):
+        key = OctKey.generate_key(128)
+        obj = FlattenedJSONEncryption({"enc": "A128CBC-HS256"}, b"hello world")
+        obj.add_recipient({"alg": "A128KW"}, key)
+        value = jwe.encrypt_json(obj, None)
+        del value["encrypted_key"]
+        self.assertRaises(DecodeError, jwe.decrypt_json, value, key)

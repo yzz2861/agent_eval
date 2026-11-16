@@ -1,0 +1,305 @@
+import datetime
+import json
+import time
+import uuid
+from unittest import TestCase
+
+from joserfc import jwt
+from joserfc.errors import (
+    ExpiredTokenError,
+    InsecureClaimError,
+    InvalidClaimError,
+    MissingClaimError,
+)
+from joserfc.jwk import OctKey
+
+
+class UUIDEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, uuid.UUID):
+            return str(o)
+        return super().default(o)
+
+
+class TestJWTClaims(TestCase):
+    def test_check_sensitive_data(self):
+        jwt.check_sensitive_data({})
+        jwt.check_sensitive_data({"card": 123})
+
+        for key in ("password", "token", "secret", "secret_key", "api_key"):
+            claims = {key: "123"}
+            self.assertRaises(InsecureClaimError, jwt.check_sensitive_data, claims)
+
+        claims = {"card": "6011000000000000"}
+        self.assertRaises(InsecureClaimError, jwt.check_sensitive_data, claims)
+
+    def test_convert_time(self):
+        key = OctKey.import_key("secret")
+        now = datetime.datetime.now()
+        encoded_text = jwt.encode({"alg": "HS256"}, {"iat": now}, key)
+        decoded_data = jwt.decode(encoded_text, key)
+        self.assertIsInstance(decoded_data.claims["iat"], int)
+
+    def test_essential_claims(self):
+        claims_requests = jwt.JWTClaimsRegistry(sub={"essential": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"iss": "a"})
+
+        claims_requests = jwt.JWTClaimsRegistry(sub={"essential": True}, iss={"essential": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"sub": "a"})
+
+        claims_requests.validate({"sub": "a", "iss": "a", "name": "joserfc"})
+
+    def test_claim_iss(self):
+        claims_requests = jwt.JWTClaimsRegistry(iss={"essential": True})
+        claims_requests.validate({"iss": "a"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"iss": True})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"iss": ["a"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"iss": {"a": "b"}})
+
+        with self.assertRaises(InvalidClaimError) as cm:
+            claims_requests.validate({"iss": 1})
+        self.assertEqual(cm.exception.claim, "iss")
+        self.assertIn("'iss'", cm.exception.description)
+
+    def test_claim_sub(self):
+        claims_requests = jwt.JWTClaimsRegistry(sub={"essential": True})
+        claims_requests.validate({"sub": "a"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"sub": 1})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"sub": True})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"sub": ["a"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"sub": {"a": "b"}})
+
+    def test_claim_jti(self):
+        claims_requests = jwt.JWTClaimsRegistry()
+        claims_requests.validate({"jti": "expected"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"jti": ["expected"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"jti": 1})
+
+        for options in ({}, {"value": "expected"}, {"values": ["expected", "other"]}):
+            claims_requests = jwt.JWTClaimsRegistry(jti=options)
+            claims_requests.validate({})
+            claims_requests.validate({"jti": "expected"})
+            for value in (None, 1, True, ["other", "expected"], {"jti": "expected"}):
+                with self.subTest(options=options, value=value):
+                    with self.assertRaises(InvalidClaimError) as cm:
+                        claims_requests.validate({"jti": value})
+                    self.assertEqual(cm.exception.claim, "jti")
+                    self.assertIn("'jti'", cm.exception.description)
+
+        for options in ({"value": "expected"}, {"values": ["expected", "other"]}):
+            claims_requests = jwt.JWTClaimsRegistry(jti=options)
+            self.assertRaises(InvalidClaimError, claims_requests.validate, {"jti": "wrong"})
+
+        claims_requests = jwt.JWTClaimsRegistry(jti={"essential": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"jti": ""})
+        claims_requests = jwt.JWTClaimsRegistry(jti={"allow_blank": True})
+        claims_requests.validate({"jti": ""})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"jti": []})
+
+    def test_claim_aud(self):
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True})
+        claims_requests.validate({"aud": "a"})
+        claims_requests.validate({"aud": ["a"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": 1})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": True})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": {"a": "b"}})
+
+    def test_essential_empty_value(self):
+        claims_requests = jwt.JWTClaimsRegistry(sub={"essential": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"sub": None})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"sub": ""})
+        claims_requests = jwt.JWTClaimsRegistry(sub={"essential": True, "allow_blank": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"sub": None})
+        claims_requests.validate({"sub": ""})
+
+    def test_essential_false_value(self):
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True})
+        claims_requests.validate({"foo": False})
+        claims_requests.validate({"foo": 0})
+
+    def test_option_value(self):
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True, "value": "123"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"foo": "a"})
+        claims_requests.validate({"foo": "123"})
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True, "value": True})
+        claims_requests.validate({"foo": True})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"foo": False})
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True, "value": False})
+        claims_requests.validate({"foo": False})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"foo": True})
+
+    def test_option_value_with_list(self):
+        # a list "value" is the expected claim value itself
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True, "value": ["id1"]})
+        claims_requests.validate({"aud": ["id1"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": ["id2"]})
+
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True, "value": ["id1", "id2"]})
+        claims_requests.validate({"aud": ["id1", "id2"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": "id1"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": ["id1"]})
+
+        # a scalar "value" still matches any element of a list claim
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True, "value": "id1"})
+        claims_requests.validate({"foo": ["id1"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"foo": ["id2"]})
+
+    def test_option_values(self):
+        claims_requests = jwt.JWTClaimsRegistry(foo={"essential": True, "values": ["1", "2", True, False]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"foo": "a"})
+        claims_requests.validate({"foo": "1"})
+        claims_requests.validate({"foo": "2"})
+        claims_requests.validate({"foo": True})
+        claims_requests.validate({"foo": False})
+
+    def test_int_claims(self):
+        now = int(time.time())
+        claims_requests = jwt.JWTClaimsRegistry(now=now)
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"exp": "s"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"nbf": "s"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"iat": "s"})
+
+        claims_requests.validate({"exp": now + 100, "nbf": now - 100, "iat": now})
+        self.assertRaises(ExpiredTokenError, claims_requests.validate, {"exp": now - 100})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"nbf": now + 100})
+
+    def test_validate_aud(self):
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True, "value": "a"})
+
+        # missing aud
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"iss": "a"})
+
+        # invalid value
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": "b"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": ["b"]})
+
+        # valid value
+        claims_requests.validate({"aud": "a"})
+        claims_requests.validate({"aud": ["a"]})
+
+        # use option values
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True, "values": ["a", "b"]})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": "c"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"aud": ["c"]})
+
+        claims_requests.validate({"aud": "a"})
+        claims_requests.validate({"aud": "b"})
+        claims_requests.validate({"aud": ["a"]})
+        claims_requests.validate({"aud": ["b"]})
+        claims_requests.validate({"aud": ["a", "b"]})
+        claims_requests.validate({"aud": ["a", "c"]})
+
+        # do not validate
+        claims_requests = jwt.JWTClaimsRegistry()
+        claims_requests.validate({"aud": "a"})
+
+        claims_requests = jwt.JWTClaimsRegistry(aud={"essential": True})
+        claims_requests.validate({"aud": "a"})
+
+    def test_validate_exp(self):
+        now = int(time.time())
+        claims_requests = jwt.JWTClaimsRegistry(now=now)
+        claims_requests.validate({"exp": now + 1})
+        self.assertRaises(ExpiredTokenError, claims_requests.validate, {"exp": now})
+
+        claims_requests = jwt.JWTClaimsRegistry(now=now, leeway=500)
+        claims_requests.validate({"exp": now - 499})
+        self.assertRaises(ExpiredTokenError, claims_requests.validate, {"exp": now - 500})
+
+    def test_validate_iat(self):
+        claims_requests = jwt.JWTClaimsRegistry(leeway=500)
+        now = int(time.time())
+        claims_requests.validate({"iat": now})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"iat": now + 1000})
+
+    def test_validate_nbf(self):
+        claims_requests = jwt.JWTClaimsRegistry(leeway=500)
+        now = int(time.time())
+        claims_requests.validate({"nbf": now})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"nbf": now + 1000})
+
+    def test_validate_time_claims_must_be_finite(self):
+        # NumericDate is a JSON number, and NaN and Infinity are not. Every comparison with NaN
+        # is false, so "exp": NaN used to give a token that never expires.
+        claims_requests = jwt.JWTClaimsRegistry(now=1000)
+        for claim in ("exp", "nbf", "iat"):
+            for value in (float("nan"), float("inf"), float("-inf"), True, False):
+                with self.subTest(claim=claim, value=value):
+                    self.assertRaises(InvalidClaimError, claims_requests.validate, {claim: value})
+
+    def test_validate_time_claims_accept_large_integers(self):
+        # an integer too large for a float is still a number, and not an OverflowError
+        claims_requests = jwt.JWTClaimsRegistry(now=1000)
+        claims_requests.validate({"exp": 10**400})
+        self.assertRaises(ExpiredTokenError, claims_requests.validate, {"exp": -(10**400)})
+
+    def test_decode_then_validate_a_token_that_never_expires(self):
+        key = OctKey.import_key("secret")
+        # json writes NaN as is, and reads it back as a float
+        token = jwt.decode(jwt.encode({"alg": "HS256"}, {"exp": float("nan")}, key), key)
+        self.assertRaises(InvalidClaimError, jwt.JWTClaimsRegistry().validate, token.claims)
+
+    def test_claims_with_uuid_field(self):
+        value = uuid.uuid4()
+        claims = {"uuid": value}
+        key = OctKey.import_key("secret")
+        encoded_text = jwt.encode({"alg": "HS256"}, claims, key, encoder_cls=UUIDEncoder)
+        token = jwt.decode(encoded_text, key)
+        self.assertEqual(token.claims, {"uuid": str(value)})
+
+    def test_validate_list_inclusion(self):
+        # Case 1: use option value
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"essential": True, "value": "a"})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"iss": "a"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": "b"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": ["b"]})
+        claims_requests.validate({"custom_claim": "a"})
+        claims_requests.validate({"custom_claim": ["a"]})
+
+        # Case 2: use option values
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"essential": True, "values": ["a", "b"]})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"iss": "a"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": "c"})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": ["c"]})
+        claims_requests.validate({"custom_claim": "a"})
+        claims_requests.validate({"custom_claim": "b"})
+        claims_requests.validate({"custom_claim": ["a"]})
+        claims_requests.validate({"custom_claim": ["b"]})
+        claims_requests.validate({"custom_claim": ["a", "b"]})
+        claims_requests.validate({"custom_claim": ["c", "a"]})
+
+        # Case 3: do not validate
+        claims_requests = jwt.JWTClaimsRegistry()
+        claims_requests.validate({"custom_claim": "a"})
+
+        # Case 4: essential claim without value(s)
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"essential": True})
+        claims_requests.validate({"custom_claim": "a"})
+
+    def test_validate_allow_blank(self):
+        blank_values = ["", [], {}]
+
+        # Case 1: allow blank value
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"essential": True, "allow_blank": True})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"custom_claim": None})
+        for value in blank_values:
+            claims_requests.validate({"custom_claim": value})
+
+        # Case 2: allow blank value without essential
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"allow_blank": True})
+        claims_requests.validate({"custom_claim": None})
+        for value in blank_values:
+            claims_requests.validate({"custom_claim": value})
+
+        # Case 3: do not allow blank value
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"allow_blank": False})
+        self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": None})
+        for value in blank_values:
+            self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": value})
+
+        # Case 4: do not allow blank value on essential claim
+        claims_requests = jwt.JWTClaimsRegistry(custom_claim={"essential": True, "allow_blank": False})
+        self.assertRaises(MissingClaimError, claims_requests.validate, {"custom_claim": None})
+        for value in blank_values:
+            self.assertRaises(InvalidClaimError, claims_requests.validate, {"custom_claim": value})

@@ -1,0 +1,129 @@
+from unittest import TestCase
+
+from joserfc.errors import (
+    BadSignatureError,
+    DecodeError,
+    ExceededSizeError,
+    MissingAlgorithmError,
+    UnsupportedAlgorithmError,
+    UnsupportedHeaderError,
+)
+from joserfc.jwk import KeySet, OctKey, RSAKey
+from joserfc.jws import (
+    JWSRegistry,
+    deserialize_compact,
+    detach_content,
+    serialize_compact,
+)
+from joserfc.util import json_b64encode, urlsafe_b64encode
+
+
+class TestCompact(TestCase):
+    key = OctKey.import_key("secret")
+
+    def test_registry_is_none(self):
+        value = serialize_compact({"alg": "HS256"}, b"foo", self.key)
+        expected = "eyJhbGciOiJIUzI1NiJ9.Zm9v.0pehoi-RMZM1jl-4TP_C4Y6BJ-bcmsuzfDyQpkpJkh0"
+        self.assertEqual(value, expected)
+
+        obj = deserialize_compact(value, self.key)
+        self.assertEqual(obj.payload, b"foo")
+
+    def test_bad_signature_error(self):
+        key = OctKey.import_key("incorrect")
+        value = b"eyJhbGciOiJIUzI1NiJ9.Zm9v.0pehoi-RMZM1jl-4TP_C4Y6BJ-bcmsuzfDyQpkpJkh0"
+        self.assertRaises(BadSignatureError, deserialize_compact, value, key)
+
+    def test_reject_padded_signature(self):
+        value = serialize_compact({"alg": "HS256"}, b"foo", self.key)
+        self.assertRaises(BadSignatureError, deserialize_compact, value + "=", self.key)
+
+    def test_raise_unsupported_algorithm_error(self):
+        self.assertRaises(UnsupportedAlgorithmError, serialize_compact, {"alg": "HS512"}, b"foo", self.key)
+        self.assertRaises(UnsupportedAlgorithmError, serialize_compact, {"alg": "NOT"}, b"foo", self.key)
+
+    def test_invalid_length(self):
+        self.assertRaises(DecodeError, deserialize_compact, b"a.b.c.d", self.key)
+
+    def test_no_invalid_header(self):
+        # invalid base64
+        value = b"abc.Zm9v.0pehoi"
+        self.assertRaises(DecodeError, deserialize_compact, value, self.key)
+
+        # no alg value
+        value = b"eyJhIjoiYiJ9.Zm9v.0pehoi"
+        self.assertRaises(MissingAlgorithmError, deserialize_compact, value, self.key)
+
+    def test_invalid_payload(self):
+        value = b"eyJhbGciOiJIUzI1NiJ9.a$b.0pehoi"
+        self.assertRaises(DecodeError, deserialize_compact, value, self.key)
+
+    def test_header_exceeded_size_error(self):
+        exceeded_header = json_b64encode({f"a{i}": f"a{i}" for i in range(1000)})
+        other = urlsafe_b64encode(b"o")
+        fake_jws = exceeded_header + b"." + other + b"." + other
+        self.assertRaises(ExceededSizeError, deserialize_compact, fake_jws, self.key)
+
+    def test_payload_exceeded_size_error(self):
+        header = json_b64encode({"alg": "HS256"})
+        exceeded_payload = urlsafe_b64encode(("o" * (128000 + 1)).encode("utf8"))
+        fake_jws = header + b"." + exceeded_payload + b"." + urlsafe_b64encode(b"o")
+        self.assertRaises(ExceededSizeError, deserialize_compact, fake_jws, self.key)
+
+    def test_signature_exceeded_size_error(self):
+        header = json_b64encode({"alg": "HS256"})
+        exceeded_signature = urlsafe_b64encode(("o" * 1000).encode("utf8"))
+        fake_jws = header + b"." + urlsafe_b64encode(b"o") + b"." + exceeded_signature
+        self.assertRaises(ExceededSizeError, deserialize_compact, fake_jws, self.key)
+
+    def test_with_key_set(self):
+        keys = KeySet(
+            [
+                OctKey.import_key("a"),
+                OctKey.import_key("b"),
+                OctKey.import_key("c"),
+            ]
+        )
+        value = serialize_compact({"alg": "HS256"}, b"foo", keys)
+        obj = deserialize_compact(value, keys)
+        self.assertEqual(obj.payload, b"foo")
+
+        keys.keys.append(RSAKey.generate_key(auto_kid=True))
+        value = serialize_compact({"alg": "RS256"}, b"foo", keys)
+        obj = deserialize_compact(value, keys)
+        self.assertEqual(obj.payload, b"foo")
+
+    def test_strict_check_header(self):
+        header = {"alg": "HS256", "custom": "hi"}
+        self.assertRaises(UnsupportedHeaderError, serialize_compact, header, b"hi", self.key)
+
+        registry = JWSRegistry(strict_check_header=False)
+        serialize_compact(header, b"hi", self.key, registry=registry)
+
+    def test_non_canonical_signature_encoding(self):
+        text = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4ifQ.VI29GgHzuh2xfF0bkRYvZIsSuQnbTXSIvuRyt7RDrwo"[:-1] + "p"
+        self.assertRaises(BadSignatureError, deserialize_compact, text, OctKey.import_key("secret"))
+
+    def test_detached_content(self):
+        value = detach_content(serialize_compact({"alg": "HS256"}, b"foo", self.key))
+        expected = "eyJhbGciOiJIUzI1NiJ9..0pehoi-RMZM1jl-4TP_C4Y6BJ-bcmsuzfDyQpkpJkh0"
+        self.assertEqual(value, expected)
+        obj = deserialize_compact(value, self.key, payload=b"foo")
+        self.assertEqual(obj.payload, b"foo")
+
+    def test_hmac_rejects_empty_key(self):
+        # An empty / None HMAC key produces a deterministic digest that any
+        # attacker can reproduce, so signing and verifying must refuse the
+        # key outright. Otherwise a misconfigured `JWT_SECRET=""` (or similar)
+        # lets the attacker forge arbitrary HS256/HS384/HS512 tokens.
+        self.assertRaisesRegex(ValueError, "must not be empty", OctKey.import_key, "")
+        # Direct OctKey construction also blocked at the HMAC layer
+        # (defence-in-depth): bypass OctKey.import_key by setting raw_value
+        # post-hoc.
+        empty_key = OctKey.import_key("rfc")
+        empty_key._raw_value = b""
+        from joserfc._rfc7518.jws_algs import HMACAlgorithm
+
+        alg = HMACAlgorithm(256)
+        self.assertRaisesRegex(ValueError, "must not be empty", alg.sign, b"msg", empty_key)
+        self.assertRaisesRegex(ValueError, "must not be empty", alg.verify, b"msg", b"sig", empty_key)

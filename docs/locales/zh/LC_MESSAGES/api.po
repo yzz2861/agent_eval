@@ -1,0 +1,1377 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) Copyright &copy; 2023, Hsiaoming Yang
+# This file is distributed under the same license as the joserfc package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2023.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  joserfc\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-01 20:41+0900\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh\n"
+"Language-Team: zh <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../api/errors.rst:2
+msgid "Errors"
+msgstr "错误类型"
+
+#: ../../api/errors.rst:4
+msgid "All errors are based on ``joserfc.errors.JoseError``."
+msgstr "所有的错误类型都是基于``joserfc.errors.JoseError``。"
+
+#: joserfc.errors.BadSignatureError:1 of
+msgid ""
+"This error is designed for JWS. It is raised when signature does not "
+"match."
+msgstr "该错误是为 JWS 设计的，当签名不匹配时触发。"
+
+#: joserfc.errors.BadSignatureError.error:1
+#: joserfc.errors.ConflictAlgorithmError.error:1
+#: joserfc.errors.DecodeError.error:1 joserfc.errors.ExceededSizeError.error:1
+#: joserfc.errors.ExpiredTokenError.error:1
+#: joserfc.errors.InsecureClaimError.error:1
+#: joserfc.errors.InvalidClaimError.error:1
+#: joserfc.errors.InvalidEncryptedKeyError.error:1
+#: joserfc.errors.InvalidEncryptionAlgorithmError.error:1
+#: joserfc.errors.InvalidExchangeKeyError.error:1
+#: joserfc.errors.InvalidHeaderValueError.error:1
+#: joserfc.errors.InvalidKeyCurveError.error:1
+#: joserfc.errors.InvalidKeyIdError.error:1
+#: joserfc.errors.InvalidKeyLengthError.error:1
+#: joserfc.errors.InvalidKeyTypeError.error:1
+#: joserfc.errors.InvalidPayloadError.error:1 joserfc.errors.JoseError.error:1
+#: joserfc.errors.KeyParameterError.error:1
+#: joserfc.errors.MissingAlgorithmError.error:1
+#: joserfc.errors.MissingClaimError.error:1
+#: joserfc.errors.MissingCritHeaderError.error:1
+#: joserfc.errors.MissingEncryptionError.error:1
+#: joserfc.errors.MissingHeaderError.error:1
+#: joserfc.errors.MissingKeyError.error:1
+#: joserfc.errors.MissingKeyTypeError.error:1
+#: joserfc.errors.UnsupportedAlgorithmError.error:1
+#: joserfc.errors.UnsupportedHeaderError.error:1
+#: joserfc.errors.UnsupportedKeyAlgorithmError.error:1
+#: joserfc.errors.UnsupportedKeyOperationError.error:1
+#: joserfc.errors.UnsupportedKeyUseError.error:1 of
+msgid "short-string error code"
+msgstr "短字符串错误代码"
+
+#: joserfc.errors.ClaimError:1 of
+msgid "This a base error for JWT claims validation."
+msgstr ""
+
+#: joserfc.errors.ClaimError.description:1
+#: joserfc.errors.ExpiredTokenError.description:1
+#: joserfc.errors.InsecureClaimError.description:1
+#: joserfc.errors.InvalidClaimError.description:1
+#: joserfc.errors.InvalidEncryptedKeyError.description:1
+#: joserfc.errors.InvalidExchangeKeyError.description:1
+#: joserfc.errors.JoseError.description:1
+#: joserfc.errors.MissingAlgorithmError.description:1
+#: joserfc.errors.MissingClaimError.description:1
+#: joserfc.errors.MissingEncryptionError.description:1 of
+msgid "long-string to describe this error"
+msgstr "描述此错误的长字符串"
+
+#: joserfc.errors.DecodeError:1 of
+msgid ""
+"This error is designed for both JWS and JWE. It is raised when "
+"deserialization and decryption fails."
+msgstr "该错误是为 JWS/JWE 设计的，当反序列化或解密失败时触发。"
+
+#: joserfc.errors.ExceededSizeError:1 of
+msgid ""
+"This error is designed for validating the token's content size. It raised"
+" when the data exceeds the maximum allowed length."
+msgstr "该错误是为 DEF 压缩算法设计的，当压缩数据超过允许的最大长度时触发。"
+
+#: joserfc.errors.ExpiredTokenError:1 of
+msgid "This error is designed for JWT. It raised when the token is expired."
+msgstr "该错误是为 JWT 设计的，令牌过期时触发。"
+
+#: joserfc.errors.InsecureClaimError:1 of
+msgid ""
+"This error is designed for JWT. It raised when the claim contains "
+"sensitive information."
+msgstr "该错误是为 JWT 设计的，当声明（claim）包含敏感信息时会触发。"
+
+#: joserfc.errors.InvalidClaimError:1 of
+msgid ""
+"This error is designed for JWT. It raised when the claim contains invalid"
+" values or types."
+msgstr "该错误是为 JWT 设计的，当声明包含无效的值或类型时触发。"
+
+#: joserfc.errors.InvalidEncryptionAlgorithmError:1 of
+msgid ""
+"This error is designed for JWE. It is raised when \"enc\" value does not "
+"work together with \"alg\" value."
+msgstr "该错误是为 JWE 设计的，当 \"enc\" 值与 \"alg\" 值不兼容时触发。"
+
+#: joserfc.errors.InvalidExchangeKeyError:1 of
+msgid ""
+"This error is designed for EC and OKP keys. It is raised when exchanging "
+"derive key failed."
+msgstr "此错误用于 EC 和 OKP 密钥，在密钥派生交换失败时触发。"
+
+#: joserfc.errors.InvalidHeaderValueError:1 of
+msgid "Raised when the given header's value is invalid."
+msgstr "当给定的 header 值无效时触发该错误。"
+
+#: joserfc.errors.InvalidKeyCurveError:1 of
+msgid ""
+"This error is designed for JWS. It is raised when key's curve name does "
+"not match with the given algorithm."
+msgstr "此错误用于 JWS，当密钥（EC、OKP）的曲线名称与指定算法不匹配时触发。"
+
+#: joserfc.errors.InvalidKeyIdError:1 of
+msgid ""
+"This error is designed for Key Set. It is raised when a key can not be "
+"found with the given key ID."
+msgstr "此错误用于密钥集，当无法根据给定的密钥 ID 找到对应密钥时触发。"
+
+#: joserfc.errors.InvalidKeyLengthError:1 of
+msgid ""
+"This error is designed for JWE. It is raised when key's length does not "
+"align with the given algorithm."
+msgstr "此错误用于 JWE。当密钥长度与指定算法不匹配时触发。"
+
+#: joserfc.errors.InvalidPayloadError:1 of
+msgid ""
+"This error is designed for JWT. It raised when the payload is not a valid"
+" JSON object."
+msgstr "此错误用于 JWT。当载荷（payload）不是有效的 JSON 对象时触发。"
+
+#: joserfc.errors.JoseError:1 of
+msgid "Base Exception for all errors in joserfc."
+msgstr "joserfc 中所有错误的基类异常。"
+
+#: joserfc.errors.MissingAlgorithmError:1 of
+msgid "Raised when an algorithm (\"alg\") is missing."
+msgstr "当缺少算法（\"alg\"）时触发。"
+
+#: joserfc.errors.MissingClaimError:1 of
+msgid ""
+"This error is designed for JWT. It raised when the required claims are "
+"missing."
+msgstr "此错误是为 JWT 设计的，当缺少必要的声明时会触发。"
+
+#: joserfc.errors.MissingCritHeaderError:1 of
+msgid "This error happens when the critical header does not exist."
+msgstr "当关键（``crit``） header 值不存在时触发。"
+
+#: joserfc.errors.MissingEncryptionError:1 of
+msgid ""
+"This error is designed for JWE. It is raised when the 'enc' value in "
+"header is missing."
+msgstr "此错误是为 JWE 设计的，当 header 中缺少 'enc' 值时会触发。"
+
+#: joserfc.errors.MissingHeaderError:1 of
+msgid "This error happens when the required header does not exist."
+msgstr "当 header 中缺少必要数据时会触发此错误。"
+
+#: joserfc.errors.SecurityWarning:1 of
+msgid "Base class for warnings of security issues."
+msgstr ""
+
+#: joserfc.errors.UnsupportedAlgorithmError:1 of
+msgid ""
+"This error is designed for both JWS and JWE. It is raised when the given "
+"algorithm is not supported in the registry."
+msgstr "此错误适用于 JWS 和 JWE，当注册表中不支持给定算法时触发。"
+
+#: joserfc.errors.UnsupportedHeaderError:1 of
+msgid "Raised when an unsupported header is encountered."
+msgstr "当遇到不支持的 header 值时触发。"
+
+#: ../../api/index.rst:2
+msgid "API References"
+msgstr "API 参考"
+
+#: ../../api/index.rst:4
+msgid "Here covers the interfaces of JWS, JWE, JWK, and JWT."
+msgstr "此处涵盖 JWS、JWE、JWK 和 JWT 的接口。"
+
+#: ../../api/index.rst:10 ../../api/jws.rst:4
+msgid "JWS API"
+msgstr "JWS API"
+
+#: ../../api/index.rst:14
+msgid "Most :ref:`jwt` are encoded with JWS in compact serialization."
+msgstr "大多数 :ref:`jwt` 使用 JWS 进行紧凑序列化编码。"
+
+#: ../../api/index.rst:16 ../../api/jwe.rst:4
+msgid "JWE API"
+msgstr "JWE API"
+
+#: ../../api/index.rst:20
+msgid ""
+"JSON Web Encryption (JWE) represents encrypted content using JSON-based "
+"data structures."
+msgstr "JSON Web Encryption (JWE) 使用基于 JSON 的数据结构表示加密内容。"
+
+#: ../../api/index.rst:22 ../../api/jwk.rst:4
+msgid "JWK API"
+msgstr "JWK API"
+
+#: ../../api/index.rst:26
+msgid ""
+"Learn how to use ``OctKey``, ``RSAKey``, ``ECKey``, ``OKPKey``, and JSON "
+"Web Key Set."
+msgstr "了解如何使用 ``OctKey``、``RSAKey``、``ECKey``、``OKPKey`` 和 JSON Web 密钥集。"
+
+#: ../../api/index.rst:28 ../../api/jwt.rst:4
+msgid "JWT API"
+msgstr "JWT API"
+
+#: ../../api/index.rst:32
+msgid "JSON Web Token (JWT) is built on top of :ref:`jws` or :ref:`jwe`."
+msgstr "JSON Web Token (JWT) 构建于 :ref:`jws` 或 :ref:`jwe` 之上。"
+
+#: ../../api/jwe.rst:6
+msgid ""
+"This part of the documentation covers all the interfaces of "
+"``joserfc.jwe``."
+msgstr "文档的这一部分涵盖了 ``joserfc.jwe`` 的所有接口。"
+
+#: joserfc._rfc7516.models.CompactEncryption:1 of
+msgid ""
+"An object to represent the JWE Compact Serialization. It is usually "
+"returned by ``decrypt_compact`` method."
+msgstr "一个对象，用于表示 JWE 紧凑序列化。通常由 ``decrypt_compact`` 方法返回。"
+
+#: joserfc._rfc7516.models.CompactEncryption.attach_recipient:1 of
+msgid ""
+"Add a recipient to the JWE Compact Serialization. Please add a key that "
+"comply with the given \"alg\" value."
+msgstr "向 JWE 紧凑序列化添加一个接收者。请添加符合给定 \"alg\" 值的密钥。"
+
+#: ../../api/jwe.rst ../../api/jwk.rst ../../api/jws.rst ../../api/jwt.rst
+msgid "Parameters"
+msgstr "参数"
+
+#: joserfc._rfc7516.models.CompactEncryption.attach_recipient:4
+#: joserfc._rfc7516.models.FlattenedJSONEncryption.add_recipient:5
+#: joserfc._rfc7516.models.GeneralJSONEncryption.add_recipient:5 of
+msgid "an instance of a key, e.g. (OctKey, RSAKey, ECKey, and etc)"
+msgstr "一个密钥实例，例如 (OctKey, RSAKey, ECKey 等)"
+
+#: joserfc._rfc7516.models.CompactEncryption.attach_recipient:5 of
+msgid "extra header in dict"
+msgstr "字典格式的额外 header"
+
+#: joserfc._rfc7516.models.CompactEncryption.headers:1 of
+msgid "Returns the protected header values in dict."
+msgstr "返回受保护 header 的值，字典格式"
+
+#: joserfc.jwe.CompactEncryption.plaintext:1 of
+msgid "the plaintext in bytes"
+msgstr "字节形式的明文"
+
+#: joserfc.jwe.CompactEncryption.protected:1 of
+msgid "protected header in dict"
+msgstr "字典格式的受保护 header"
+
+#: joserfc._rfc7516.models.FlattenedJSONEncryption:1 of
+msgid ""
+"An object to represent the JWE Flattened JSON Serialization. It is used "
+"by ``encrypt_json``, and it is usually returned by ``decrypt_json`` "
+"method."
+msgstr "一个对象，用于表示 JWE 扁平 JSON 序列化。由 ``encrypt_json`` 使用，通常由 ``decrypt_json`` 方法返回。"
+
+#: joserfc._rfc7516.models.FlattenedJSONEncryption:4 of
+msgid "To construct an object of ``FlattenedJSONEncryption``:"
+msgstr "构造 ``FlattenedJSONEncryption`` 对象："
+
+#: joserfc._rfc7516.models.FlattenedJSONEncryption.add_recipient:1
+#: joserfc._rfc7516.models.GeneralJSONEncryption.add_recipient:1 of
+msgid ""
+"Add a recipient to the JWE JSON Serialization. Please add a key that "
+"comply with the \"alg\" to this recipient."
+msgstr "向 JWE JSON 序列化添加一个接收者。请添加符合 \"alg\" 的密钥。"
+
+#: joserfc._rfc7516.models.FlattenedJSONEncryption.add_recipient:4
+#: joserfc._rfc7516.models.GeneralJSONEncryption.add_recipient:4 of
+msgid "recipient's own (unprotected) header"
+msgstr "接收者自己的（未保护的）header"
+
+#: joserfc.jwe.FlattenedJSONEncryption.flattened:1
+#: joserfc.jwe.GeneralJSONEncryption.flattened:1 of
+msgid "represents if the object is in flatten syntax"
+msgstr "表示对象是否为扁平语法"
+
+#: joserfc._rfc7516.models.GeneralJSONEncryption:1 of
+msgid ""
+"An object to represent the JWE General JSON Serialization. It is used by "
+"``encrypt_json``, and it is usually returned by ``decrypt_json`` method."
+msgstr "一个对象，用于表示 JWE 通用 JSON 序列化。由 ``encrypt_json`` 使用，通常由 ``decrypt_json`` 方法返回。"
+
+#: joserfc._rfc7516.models.GeneralJSONEncryption:4 of
+msgid "To construct an object of ``GeneralJSONEncryption``:"
+msgstr "构造 ``GeneralJSONEncryption`` 对象："
+
+#: joserfc._rfc7516.registry.JWERegistry:1 of
+msgid ""
+"A registry for JSON Web Encryption to keep all the supported algorithms. "
+"An instance of ``JWERegistry`` is usually used together with methods in "
+"``joserfc.jwe``."
+msgstr "一个用于 JSON Web Encryption 的注册表，用于保存所有支持的算法。通常与 ``joserfc.jwe`` 中的方法一起使用。"
+
+#: joserfc._rfc7515.registry.JWSRegistry:5
+#: joserfc._rfc7516.registry.JWERegistry:5 of
+msgid "extra header parameters registry"
+msgstr "额外的 header 参数注册表"
+
+#: joserfc._rfc7515.registry.JWSRegistry:6
+#: joserfc._rfc7516.registry.JWERegistry:6 of
+msgid "allowed algorithms to be used"
+msgstr "允许使用的算法"
+
+#: joserfc._rfc7516.registry.JWERegistry:7 of
+msgid "validating all recipients in a JSON serialization"
+msgstr "验证 JSON 序列化中的所有接收者"
+
+#: joserfc._rfc7515.registry.JWSRegistry:7
+#: joserfc._rfc7516.registry.JWERegistry:8 of
+msgid "only allow header key in the registry to be used"
+msgstr "仅允许使用注册表中的 header 密钥"
+
+#: joserfc._rfc7515.registry.JWSRegistry.check_header:1
+#: joserfc._rfc7516.registry.JWERegistry.check_header:1 of
+msgid "Check and validate the fields in header part of a JWS object."
+msgstr "检查并验证 JWS 对象 header 部分的字段。"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_alg:1 of
+msgid "Get the allowed (\"alg\") algorithm instance of the given name."
+msgstr "获取给定名称的允许 (\"alg\") 算法实例。"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_alg:3 of
+msgid "value of the ``alg``, e.g. ``ECDH-ES``, ``A128KW``"
+msgstr "``alg`` 的值，例如 ``ECDH-ES``、``A128KW``"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_enc:1 of
+msgid "Get the allowed (\"enc\") algorithm instance of the given name."
+msgstr "获取给定名称的允许 (\"enc\") 算法实例。"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_enc:3 of
+msgid "value of the ``enc``, e.g. ``A128CBC-HS256``, ``A128GCM``"
+msgstr "``enc`` 的值，例如 ``A128CBC-HS256``、``A128GCM``"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_zip:1 of
+msgid "Get the allowed (\"zip\") algorithm instance of the given name."
+msgstr "获取给定名称的允许 (\"zip\") 算法实例。"
+
+#: joserfc._rfc7516.registry.JWERegistry.get_zip:3 of
+msgid "value of the ``zip``, e.g. ``DEF``"
+msgstr "``zip`` 的值，例如 ``DEF``"
+
+#: joserfc.jwe.JWERegistry.max_auth_tag_length:1 of
+msgid "max auth tag's size in bytes"
+msgstr ""
+
+#: joserfc.jwe.JWERegistry.max_ciphertext_length:1 of
+msgid "max ciphertext's size in bytes"
+msgstr ""
+
+#: joserfc.jwe.JWERegistry.max_encrypted_key_length:1 of
+msgid "max encrypted key's size in bytes"
+msgstr ""
+
+#: joserfc.jwe.JWERegistry.max_initialization_vector_length:1 of
+msgid "max initialization vector's size in bytes"
+msgstr ""
+
+#: joserfc.jwe.JWERegistry.max_protected_header_length:1 of
+msgid "max protected header content's size in bytes"
+msgstr "受保护的 header 内容的最大字节大小"
+
+#: joserfc.jwe.decrypt_compact:1 of
+msgid ""
+"Extract and validate the JWE Compact Serialization (in string, or bytes) "
+"with the given key. An JWE Compact Serialization looks like:"
+msgstr "使用给定密钥提取并验证 JWE 紧凑序列化（字符串或字节）。JWE 紧凑序列化如下所示："
+
+#: joserfc.jwe.decrypt_compact:4 joserfc.jws.deserialize_compact:4 of
+msgid "line breaks for display purposes only"
+msgstr "仅用于显示目的的换行"
+
+#: joserfc.jwe.decrypt_compact:14 of
+msgid "a string (or bytes) of the JWE Compact Serialization"
+msgstr "JWE 紧凑序列化的字符串（或字节）"
+
+#: joserfc.jwe.decrypt_compact:15 of
+msgid "a flexible private key to decrypt the serialization"
+msgstr "用于解密序列化的灵活型私钥"
+
+#: joserfc.jwe.decrypt_compact:16 joserfc.jwe.decrypt_json:6
+#: joserfc.jwe.encrypt_compact:13 joserfc.jwe.encrypt_json:22
+#: joserfc.jws.deserialize_compact:16 joserfc.jws.deserialize_json:5
+#: joserfc.jws.serialize_compact:14 joserfc.jws.validate_compact:6
+#: joserfc.jwt.decode:6 joserfc.jwt.encode:6 of
+msgid "a list of allowed algorithms"
+msgstr "允许的算法列表"
+
+#: joserfc.jwe.decrypt_compact:17 joserfc.jwe.decrypt_json:7
+#: joserfc.jwe.encrypt_compact:14 joserfc.jwe.encrypt_json:23 of
+msgid "a JWERegistry to use"
+msgstr "要使用的 JWERegistry"
+
+#: joserfc.jwe.decrypt_compact:18 joserfc.jwe.decrypt_json:8
+#: joserfc.jwe.encrypt_compact:15 joserfc.jwe.encrypt_json:24 of
+msgid "only required when using ECDH-1PU"
+msgstr "仅在使用 ECDH-1PU 时需要"
+
+#: ../../api/jwe.rst ../../api/jwk.rst ../../api/jws.rst
+msgid "Returns"
+msgstr "返回值"
+
+#: joserfc.jwe.decrypt_compact:19 of
+msgid "object of the ``CompactEncryption``"
+msgstr "``CompactEncryption`` 对象"
+
+#: joserfc.jwe.decrypt_json:1 of
+msgid ""
+"Decrypt the JWE JSON Serialization (in dict) to a "
+"``GeneralJSONEncryption`` or ``FlattenedJSONEncryption`` object."
+msgstr ""
+"解密 JWE JSON 序列化（字典形式）为 ``GeneralJSONEncryption`` 或 "
+"``FlattenedJSONEncryption`` 对象。"
+
+#: joserfc.jwe.decrypt_json:4 joserfc.jwe.encrypt_json:25 of
+msgid "JWE JSON Serialization in dict"
+msgstr "字典类型的 JWE JSON 序列化"
+
+#: joserfc.jwe.decrypt_json:5 of
+msgid "a flexible private key to decrypt the CEK"
+msgstr "用于解密 CEK 的灵活型私钥"
+
+#: joserfc.jwe.decrypt_json:9 joserfc.jwe.encrypt_json:20 of
+msgid "an instance of ``GeneralJSONEncryption`` or ``FlattenedJSONEncryption``"
+msgstr "``GeneralJSONEncryption`` 或 ``FlattenedJSONEncryption`` 的实例"
+
+#: joserfc.jwe.encrypt_compact:1 of
+msgid ""
+"Generate a JWE Compact Serialization. The JWE Compact Serialization "
+"represents encrypted content as a compact, URL-safe string.  This string "
+"is::"
+msgstr "生成 JWE 紧凑序列化。JWE 紧凑序列化将加密内容表示为紧凑的 URL 安全字符串。该字符串如下所示："
+
+#: joserfc.jwe.encrypt_compact:10 of
+msgid "protected header part of the JWE, in dict"
+msgstr "JWE 的受保护 header 部分，字典形式"
+
+#: joserfc.jwe.encrypt_compact:11 of
+msgid "the content (message) to be encrypted"
+msgstr "要加密的内容（消息）"
+
+#: joserfc.jwe.encrypt_compact:12 joserfc.jwe.encrypt_json:21 of
+msgid "a public key used to encrypt the CEK"
+msgstr "用于加密 CEK 的公钥"
+
+#: joserfc.jwe.encrypt_compact:16 of
+msgid "JWE Compact Serialization in bytes"
+msgstr "JWE 紧凑序列化的字节形式"
+
+#: joserfc.jwe.encrypt_json:1 of
+msgid ""
+"Generate a JWE JSON Serialization (in dict). The JWE JSON Serialization "
+"represents encrypted content as a JSON object. This representation is "
+"neither optimized for compactness nor URL safe."
+msgstr "生成 JWE JSON 序列化（字典形式）。JWE JSON 序列化将加密内容表示为 JSON 对象。此表示既不优化紧凑性，也不 URL 安全。"
+
+#: joserfc.jwe.encrypt_json:5 of
+msgid ""
+"When calling this method, developers MUST construct an instance of a "
+"``GeneralJSONEncryption`` or ``FlattenedJSONEncryption`` object. Here is "
+"an example::"
+msgstr ""
+"调用此方法时，开发人员必须构造 ``GeneralJSONEncryption`` 或 ``FlattenedJSONEncryption`` "
+"对象的实例。以下是一个示例："
+
+#: ../../api/jwk.rst:6
+msgid ""
+"This part of the documentation covers all the interfaces of "
+"``joserfc.jwk``."
+msgstr "文档的这一部分涵盖了 ``joserfc.jwk`` 的所有接口。"
+
+#: joserfc.jwk.ECKey.alg:1 joserfc.jwk.OKPKey.alg:1 joserfc.jwk.OctKey.alg:1
+#: joserfc.jwk.RSAKey.alg:1 of
+msgid "The \"alg\" value of the JSON Web Key."
+msgstr ""
+
+#: joserfc._rfc7517.models.BaseKey.as_dict:1 of
+msgid ""
+"Output this key to a JWK format (in dict). By default, it will return the"
+" ``dict_value`` of this key."
+msgstr ""
+
+#: joserfc._rfc7517.models.BaseKey.as_dict:4 of
+msgid "determine whether this method should output private key or not"
+msgstr "确定此方法是否应输出私钥"
+
+#: joserfc._rfc7517.models.BaseKey.as_dict:5 of
+msgid "other parameters added into this key"
+msgstr "添加到此密钥的其他参数"
+
+#: joserfc._rfc7517.models.BaseKey.as_dict of
+msgid "raise"
+msgstr "触发"
+
+#: joserfc._rfc7517.models.BaseKey.as_dict:6 of
+msgid "ValueError"
+msgstr "ValueError"
+
+#: joserfc._rfc7517.models.BaseKey.check_alg:1 of
+msgid "Check if this key supports the given \"alg\"."
+msgstr "检查此密钥是否支持给定的 \"alg\"。"
+
+#: joserfc._rfc7517.models.BaseKey.check_alg:3 of
+msgid "the algorithm this key is intended to be used, e.g. \"HS256\", \"ECDH-EC\""
+msgstr "此密钥预期使用的算法，例如 \"HS256\"、\"ECDH-EC\""
+
+#: ../../api/jwk.rst ../../api/jws.rst ../../api/jwt.rst
+msgid "Raises"
+msgstr "触发"
+
+#: joserfc._rfc7517.models.BaseKey.check_alg:4 of
+msgid "if this key is not designed for the given algorithm"
+msgstr "如果此密钥不能用于给定的算法"
+
+#: joserfc._rfc7517.models.BaseKey.check_key_op:1 of
+msgid "Check if the given key_op is supported by this key."
+msgstr "检查此密钥是否支持给定的 key_op。"
+
+#: joserfc._rfc7517.models.BaseKey.check_key_op:3 of
+msgid "key operation value, such as \"sign\", \"encrypt\"."
+msgstr "密钥操作的值，例如 \"sign\"、\"encrypt\"。"
+
+#: joserfc._rfc7517.models.BaseKey.check_key_op:4 of
+msgid "if the operation is not supported by this key."
+msgstr "如果此密钥不支持给定的 key_op。"
+
+#: joserfc._rfc7517.models.BaseKey.check_use:1 of
+msgid "Check if this key supports the given \"use\"."
+msgstr "检查此密钥是否支持给定的 \"use\"。"
+
+#: joserfc._rfc7517.models.BaseKey.check_use:3 of
+msgid "Values defined by this specification are:"
+msgstr ""
+
+#: joserfc._rfc7517.models.BaseKey.check_use:5 of
+msgid "\"sig\" (signature)"
+msgstr "\"sig\" (签名)"
+
+#: joserfc._rfc7517.models.BaseKey.check_use:6 of
+msgid "\"enc\" (encryption)"
+msgstr "\"enc\" (加密)"
+
+#: joserfc._rfc7517.models.BaseKey.check_use:8 of
+msgid ""
+"Other values MAY be used.  The \"use\" value is a case-sensitive string. "
+"Use of the \"use\" member is OPTIONAL, unless the application requires "
+"its presence."
+msgstr "可以使用其他值。\"use\" 值区分大小写。除非应用程序要求其存在，否则 \"use\" 成员是可选的。"
+
+#: joserfc._rfc7517.models.BaseKey.check_use:12 of
+msgid "this key is used for, e.g. \"sig\", \"enc\""
+msgstr "此密钥用于，例如 \"sig\"、\"enc\""
+
+#: joserfc._rfc7517.models.BaseKey.check_use:13 of
+msgid "if this key is not designed for the given use"
+msgstr "如果此密钥不支持给定的 \"use\""
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:1 of
+msgid ""
+"Generate an elliptic curve cryptographic key derived from a secret input "
+"using a key derivation function (KDF). This allows the creation of "
+"deterministic elliptic curve keys based on given input data, curve "
+"specification, and KDF options."
+msgstr ""
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:5
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:45 of
+msgid "The input secret used for key derivation"
+msgstr ""
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:6
+#: joserfc._rfc7518.ec_key.ECKey.generate_key:3 of
+msgid "ECKey curve name"
+msgstr "ECKey 曲线名称"
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:7
+#: joserfc._rfc7518.ec_key.ECKey.generate_key:4
+#: joserfc._rfc7518.oct_key.OctKey.generate_key:4
+#: joserfc._rfc7518.rsa_key.RSAKey.generate_key:4
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:47
+#: joserfc._rfc8037.okp_key.OKPKey.generate_key:4 of
+msgid "extra parameter in JWK"
+msgstr "JWK 中的额外参数"
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:8
+#: joserfc._rfc7518.ec_key.ECKey.generate_key:5
+#: joserfc._rfc7518.rsa_key.RSAKey.generate_key:5
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:48
+#: joserfc._rfc8037.okp_key.OKPKey.generate_key:5 of
+msgid "generate a private key or public key"
+msgstr "生成私钥或公钥"
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:9
+#: joserfc._rfc7518.ec_key.ECKey.generate_key:6
+#: joserfc._rfc7518.oct_key.OctKey.generate_key:6
+#: joserfc._rfc7518.rsa_key.RSAKey.generate_key:6
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:49
+#: joserfc._rfc8037.okp_key.OKPKey.generate_key:6 of
+msgid "add ``kid`` automatically"
+msgstr "自动添加 ``kid``"
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:10
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:50 of
+msgid "Key derivation function name"
+msgstr ""
+
+#: joserfc._rfc7518.ec_key.ECKey.derive_key:11
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:51 of
+msgid "Additional options for the KDF"
+msgstr ""
+
+#: joserfc.jwk.ECKey.dict_value:1 joserfc.jwk.OKPKey.dict_value:1
+#: joserfc.jwk.OctKey.dict_value:1 joserfc.jwk.RSAKey.dict_value:1 of
+msgid "Property of the Key in Dict (JSON)."
+msgstr "字典形式（JSON）的密钥的属性值。"
+
+#: joserfc._rfc7517.models.BaseKey.ensure_kid:1 of
+msgid ""
+"Ensure this key has a ``kid``. If ``kid`` is not provided by default, it "
+"will generate the kid with ``.thumbprint`` method, which is defined by "
+"RFC7638."
+msgstr ""
+"确保此密钥具有 ``kid``。如果默认未提供 ``kid``，将使用 ``.thumbprint`` 方法生成 kid，该方法由 RFC7638"
+" 定义。"
+
+#: joserfc._rfc7518.ec_key.ECKey.generate_key:1 of
+msgid "Generate a ``ECKey`` with the given \"crv\" value."
+msgstr "生成具有给定 \"crv\" 值的 ``ECKey``。"
+
+#: joserfc.jwk.ECKey.kid:1 joserfc.jwk.OKPKey.kid:1 joserfc.jwk.OctKey.kid:1
+#: joserfc.jwk.RSAKey.kid:1 of
+msgid "The \"kid\" value of the JSON Web Key."
+msgstr ""
+
+#: joserfc._rfc7517.models.BaseKey.thumbprint:1 of
+msgid ""
+"Call this method will generate the thumbprint with algorithm defined in "
+"RFC7638."
+msgstr ""
+
+#: joserfc._rfc7517.models.BaseKey.thumbprint_uri:1 of
+msgid "Call this method will generate the thumbprint URI defined in RFC9278."
+msgstr ""
+
+#: joserfc.jwk.ECKey.value_registry:1 of
+msgid ""
+"Registry definition for EC Key https://www.rfc-"
+"editor.org/rfc/rfc7518#section-6.2"
+msgstr "EC 密钥注册表定义 https://www.rfc-editor.org/rfc/rfc7518#section-6.2"
+
+#: joserfc._keys.JWKRegistry:1 of
+msgid ""
+"A registry for JWK to record ``joserfc`` supported key types. Normally, "
+"you would use explicit key types like ``OctKey``, ``RSAKey``; This "
+"registry provides a way to dynamically import and generate keys. For "
+"instance:"
+msgstr ""
+"JWK 的注册表，用于记录 ``joserfc`` 支持的密钥类型。通常，您会使用显式密钥类型，如 "
+"``OctKey``、``RSAKey``；此注册表提供了一种动态导入和生成密钥的方法。例如："
+
+#: joserfc._keys.JWKRegistry.generate_key:1 of
+msgid ""
+"A class method for generating key according to the given key type. When "
+"``key_type`` is \"oct\" and \"RSA\", the second parameter SHOULD be a key"
+" size in bits. When ``key_type`` is \"EC\" and \"OKP\", the second "
+"parameter SHOULD be a \"crv\" string."
+msgstr ""
+"根据给定的密钥类型生成密钥的类方法。当 ``key_type`` 为 \"oct\" 和 \"RSA\" 时，第二个参数应为位大小。当 "
+"``key_type`` 为 \"EC\" 和 \"OKP\" 时，第二个参数应为 \"crv\" 字符串。"
+
+#: joserfc._keys.JWKRegistry.import_key:1 of
+msgid ""
+"A class method for importing a key from bytes, string, and dict. When "
+"``value`` is a dict, this method can tell the key type automatically, "
+"otherwise, developers SHOULD pass the ``key_type`` themselves."
+msgstr ""
+"从字节、字符串和字典导入密钥的类方法。当 ``value`` 为字典时，此方法可以自动识别密钥类型，否则，开发人员应自行传递 "
+"``key_type``。"
+
+#: joserfc._keys.JWKRegistry.import_key:5 joserfc.jwk.import_key:5 of
+msgid "the key data in bytes, string, or dict."
+msgstr "字节、字符串或字典形式的密钥数据。"
+
+#: joserfc._keys.JWKRegistry.import_key:6 joserfc.jwk.import_key:6 of
+msgid "an optional key type in string."
+msgstr "可选的密钥类型字符串。"
+
+#: joserfc._keys.JWKRegistry.import_key:7 joserfc.jwk.import_key:7 of
+msgid "extra key parameters"
+msgstr "额外的密钥参数"
+
+#: joserfc._keys.JWKRegistry.import_key:8 joserfc.jwk.import_key:8 of
+msgid "OctKey, RSAKey, ECKey, or OKPKey"
+msgstr "OctKey、RSAKey、ECKey 或 OKPKey"
+
+#: joserfc.jwk.KeyParameters.fromkeys:1
+#: joserfc.jwk.KeySetSerialization.fromkeys:1 of
+msgid "Create a new dictionary with keys from iterable and values set to value."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.get:1 joserfc.jwk.KeyParameters.setdefault:3
+#: joserfc.jwk.KeySetSerialization.get:1
+#: joserfc.jwk.KeySetSerialization.setdefault:3 of
+msgid "Return the value for key if key is in the dictionary, else default."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.pop:1 joserfc.jwk.KeySetSerialization.pop:1 of
+msgid ""
+"If the key is not found, return the default if given; otherwise, raise a "
+"KeyError."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.popitem:1
+#: joserfc.jwk.KeySetSerialization.popitem:1 of
+msgid "Remove and return a (key, value) pair as a 2-tuple."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.popitem:3
+#: joserfc.jwk.KeySetSerialization.popitem:3 of
+msgid ""
+"Pairs are returned in LIFO (last-in, first-out) order. Raises KeyError if"
+" the dict is empty."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.setdefault:1
+#: joserfc.jwk.KeySetSerialization.setdefault:1 of
+msgid "Insert key with a value of default if key is not in the dictionary."
+msgstr ""
+
+#: joserfc.jwk.KeyParameters.update:1 joserfc.jwk.KeySetSerialization.update:1
+#: of
+msgid ""
+"If E is present and has a .keys() method, then does:  for k in E.keys(): "
+"D[k] = E[k] If E is present and lacks a .keys() method, then does:  for "
+"k, v in E: D[k] = v In either case, this is followed by: for k in F:  "
+"D[k] = F[k]"
+msgstr ""
+
+#: joserfc._rfc8037.okp_key.OKPKey:1 of
+msgid "Key class of the ``OKP`` key type."
+msgstr "``OKP`` 密钥类型的密钥类。"
+
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:1 of
+msgid ""
+"Derives a key from a given input secret using a specified key derivation "
+"function (KDF) and elliptic curve algorithm."
+msgstr ""
+
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:4 of
+msgid ""
+"To derive a key using **HKDF**, the ``kdf_options`` may contain the "
+"``algorithm``, ``salt`` and ``info`` values:"
+msgstr ""
+
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:25 of
+msgid ""
+"To derive a key using **PBKDF2**, the ``kdf_options`` may contain the "
+"``algorithm``, ``salt`` and ``iterations`` values:"
+msgstr ""
+
+#: joserfc._rfc8037.okp_key.OKPKey.derive_key:46
+#: joserfc._rfc8037.okp_key.OKPKey.generate_key:3 of
+msgid "OKPKey curve name"
+msgstr "OKPKey 曲线名称"
+
+#: joserfc._rfc8037.okp_key.OKPKey.generate_key:1 of
+msgid "Generate a ``OKPKey`` with the given \"crv\" value."
+msgstr "生成具有给定 \"crv\" 值的 ``OKPKey``。"
+
+#: joserfc.jwk.OKPKey.value_registry:1 of
+msgid ""
+"Registry definition for OKP Key https://www.rfc-"
+"editor.org/rfc/rfc8037#section-2"
+msgstr "OKP 密钥注册表定义 https://www.rfc-editor.org/rfc/rfc8037#section-2"
+
+#: joserfc._rfc7518.oct_key.OctKey:1 of
+msgid "OctKey is a symmetric key, defined by RFC7518 Section 6.4."
+msgstr "OctKey 是对称密钥，由 RFC7518 第 6.4 节定义。"
+
+#: joserfc._rfc7518.oct_key.OctKey.generate_key:1 of
+msgid "Generate a ``OctKey`` with the given bit size (not bytes)."
+msgstr "生成具有给定位大小（不是字节）的 ``OctKey``。"
+
+#: joserfc._rfc7518.oct_key.OctKey.generate_key:3
+#: joserfc._rfc7518.rsa_key.RSAKey.generate_key:3 of
+msgid "size in bit"
+msgstr "位大小"
+
+#: joserfc._rfc7518.oct_key.OctKey.generate_key:5 of
+msgid "must be True"
+msgstr "必须为 True"
+
+#: joserfc.jwk.OctKey.is_private:1 of
+msgid "A symmetric key will always be private."
+msgstr "对称密钥始终是私有的。"
+
+#: joserfc.jwk.OctKey.private_key:1 of
+msgid "Returns the ``raw_value`` as the private key."
+msgstr ""
+
+#: joserfc.jwk.OctKey.public_key:1 of
+msgid "Returns the ``raw_value`` as the public key."
+msgstr ""
+
+#: joserfc.jwk.OctKey.raw_value:1 of
+msgid "The raw key in bytes."
+msgstr "原始密钥，字节形式。"
+
+#: joserfc.jwk.OctKey.value_registry:1 of
+msgid "https://www.rfc-editor.org/rfc/rfc7518#section-6.4"
+msgstr "https://www.rfc-editor.org/rfc/rfc7518#section-6.4"
+
+#: joserfc._rfc7518.rsa_key.RSAKey.generate_key:1 of
+msgid "Generate a ``RSAKey`` with the given bit size (not bytes)."
+msgstr "生成具有给定位大小（不是字节）的 ``RSAKey``。"
+
+#: joserfc.jwk.RSAKey.value_registry:1 of
+msgid ""
+"Registry definition for RSA Key https://www.rfc-"
+"editor.org/rfc/rfc7518#section-6.3"
+msgstr "RSA 密钥注册表定义 https://www.rfc-editor.org/rfc/rfc7518#section-6.3"
+
+#: joserfc.jwk.generate_key:1 of
+msgid ""
+"Generating key according to the given key type. When ``key_type`` is "
+"\"oct\" and \"RSA\", the second parameter SHOULD be a key size in bits. "
+"When ``key_type`` is \"EC\" and \"OKP\", the second parameter SHOULD be a"
+" \"crv\" string."
+msgstr ""
+"根据给定的密钥类型生成密钥。当 ``key_type`` 为 \"oct\" 或 \"RSA\" 时，第二个参数应为以位为单位的密钥长度。当 "
+"``key_type`` 为 \"EC\" 或 \"OKP\" 时，第二个参数应为 \"crv\" 字符串。"
+
+#: joserfc.jwk.guess_key:1 of
+msgid "Guess key from a various sources."
+msgstr "从各种来源猜测密钥。"
+
+#: joserfc.jwk.guess_key:3 of
+msgid "a very flexible key"
+msgstr "非常灵活的密钥"
+
+#: joserfc.jwk.guess_key:4 of
+msgid "a protocol that has ``headers`` and ``set_kid`` methods"
+msgstr "具有 ``headers`` 和 ``set_kid`` 方法的协议"
+
+#: joserfc.jwk.guess_key:5 of
+msgid "pick a random key from key set"
+msgstr "从密钥集中随机选择一个密钥"
+
+#: joserfc.jwk.guess_key:6 of
+msgid "optional \"use\" value"
+msgstr "可选的 \"use\" 值"
+
+#: joserfc.jwk.import_key:1 of
+msgid ""
+"Importing a key from bytes, string, and dict. When ``value`` is a dict, "
+"this method can tell the key type automatically, otherwise, developers "
+"SHOULD pass the ``key_type`` themselves."
+msgstr "从字节、字符串或字典导入密钥。当 ``value`` 是字典时，该方法可以自动识别密钥类型，否则开发者应自行传入 ``key_type``。"
+
+#: joserfc._rfc7638.calculate_thumbprint:1 of
+msgid "Calculate the thumbprint value of a Key, per RFC 7638."
+msgstr "根据 RFC 7638 计算密钥的指纹值。"
+
+#: joserfc._rfc9278.calculate_thumbprint_uri:1 of
+msgid "Calculate JWK thumbprint URI, defined by RFC9278."
+msgstr "根据 RFC9278 计算 JWK 指纹值的 URI。"
+
+#: ../../api/jws.rst:6
+msgid ""
+"This part of the documentation covers all the interfaces of "
+"``joserfc.jws``."
+msgstr "文档的这一部分涵盖了 ``joserfc.jws`` 的所有接口。"
+
+#: joserfc._rfc7515.model.CompactSignature:1 of
+msgid ""
+"JSON Web Signature object for compact mode. This object is used to "
+"represent the JWS instance."
+msgstr "用于紧凑模式的 JSON Web Signature 对象。此对象用于表示 JWS 实例。"
+
+#: joserfc._rfc7515.model.CompactSignature.headers:1 of
+msgid "Returns protected header values in dict."
+msgstr "返回字典形式的受保护的 header 值。"
+
+#: joserfc.jws.CompactSignature.payload:1
+#: joserfc.jws.FlattenedJSONSignature.payload:1
+#: joserfc.jws.GeneralJSONSignature.payload:1 of
+msgid "payload content in bytes"
+msgstr "字节形式的载荷内容"
+
+#: joserfc.jws.CompactSignature.protected:1
+#: joserfc.jws.HeaderMember.protected:1 of
+msgid "protected header"
+msgstr "受保护的 header"
+
+#: joserfc._rfc7515.model.FlattenedJSONSignature:1 of
+msgid "JSON Signature object that represents a flattened JSON serialization."
+msgstr "表示扁平 JSON 序列化的 JSON Signature 对象。"
+
+#: joserfc.jws.FlattenedJSONSignature.flattened:1 of
+msgid "mark it as flattened"
+msgstr "标记为扁平"
+
+#: joserfc._rfc7515.model.FlattenedJSONSignature.headers:1 of
+msgid "Header values in dict."
+msgstr "字典形式的 header 值。"
+
+#: joserfc.jws.FlattenedJSONSignature.member:1 of
+msgid "the only header member"
+msgstr "唯一的 header 成员"
+
+#: joserfc.jws.FlattenedJSONSignature.members:1 of
+msgid ""
+"A list of header members. For flattened JSON serialization, there will be"
+" only one header member."
+msgstr ""
+
+#: joserfc._rfc7515.model.GeneralJSONSignature:1 of
+msgid "JSON Signature object that represents a general JSON serialization."
+msgstr "表示通用 JSON 序列化的 JSON Signature 对象。"
+
+#: joserfc.jws.GeneralJSONSignature.flattened:1 of
+msgid "mark it as not flattened (general)"
+msgstr "标记为非扁平（通用）"
+
+#: joserfc.jws.GeneralJSONSignature.members:1 of
+msgid "a list of header members"
+msgstr "header 成员列表"
+
+#: joserfc._rfc7515.model.HeaderMember:1 of
+msgid ""
+"A header member of the JSON signature. It is combined with protected "
+"header, and unprotected header."
+msgstr "JSON 签名的 header 成员。它由受保护和未保护的 header 组成。"
+
+#: joserfc.jws.HeaderMember.header:1 of
+msgid "unprotected header"
+msgstr "未保护的 header"
+
+#: joserfc._rfc7515.registry.JWSRegistry:1 of
+msgid ""
+"A registry for JSON Web Signature to keep all the supported algorithms. "
+"An instance of ``JWSRegistry`` is usually used together with methods in "
+"``joserfc.jws``."
+msgstr "用于 JSON Web Signature 的注册表，用于保存所有支持的算法。通常与 ``joserfc.jws`` 中的方法一起使用。"
+
+#: joserfc.jws.JWSRegistry.Strategy.RECOMMENDED:1 of
+msgid "find the recommended algorithm"
+msgstr ""
+
+#: joserfc.jws.JWSRegistry.Strategy.SECURITY:1 of
+msgid "find the most secure algorithm"
+msgstr ""
+
+#: joserfc._rfc7515.registry.JWSRegistry.filter_algorithms:1 of
+msgid "Filter JWS algorithms based on the given algorithm names."
+msgstr ""
+
+#: joserfc._rfc7515.registry.JWSRegistry.filter_algorithms:3 of
+msgid "a key instance or a KeySet"
+msgstr ""
+
+#: joserfc._rfc7515.registry.JWSRegistry.filter_algorithms:4 of
+msgid "list of algorithm names"
+msgstr "算法名称列表"
+
+#: joserfc._rfc7515.registry.JWSRegistry.get_alg:1 of
+msgid "Get the allowed algorithm instance of the given name."
+msgstr "获取给定名称的允许算法实例。"
+
+#: joserfc._rfc7515.registry.JWSRegistry.get_alg:3 of
+msgid "value of the ``alg``, e.g. ``HS256``, ``RS256``"
+msgstr "``alg`` 的值，例如 ``HS256``、``RS256``"
+
+#: joserfc._rfc7515.registry.JWSRegistry.guess_algorithm:1 of
+msgid "Guess the JWS algorithm for a given key."
+msgstr "为给定密钥推测 JWS 算法。"
+
+#: joserfc._rfc7515.registry.JWSRegistry.guess_algorithm:3 of
+msgid "key instance or a KeySet"
+msgstr ""
+
+#: joserfc._rfc7515.registry.JWSRegistry.guess_algorithm:4 of
+msgid "the strategy for guessing the JWS algorithm"
+msgstr ""
+
+#: joserfc.jws.JWSRegistry.max_header_length:1 of
+msgid "max header content's size in bytes"
+msgstr "header 内容的最大字节大小"
+
+#: joserfc.jws.JWSRegistry.max_payload_length:1 of
+msgid "max payload content's size in bytes"
+msgstr "payload 内容的最大字节大小"
+
+#: joserfc.jws.JWSRegistry.max_signature_length:1 of
+msgid "max signature's size in bytes"
+msgstr "签名的最大字节大小"
+
+#: joserfc._rfc7515.registry.JWSRegistry.register:1 of
+msgid "Register a given JWS algorithm instance to the registry."
+msgstr "将给定的 JWS 算法实例注册到注册表。"
+
+#: joserfc.jws.deserialize_compact:1 of
+msgid ""
+"Extract and validate the JWS Compact Serialization (in string, or bytes) "
+"with the given key. An JWE Compact Serialization looks like:"
+msgstr "使用给定密钥提取并验证 JWS 紧凑序列化（字符串或字节）。JWE 紧凑序列化如下所示："
+
+#: joserfc.jws.deserialize_compact:14 of
+msgid "a string (or bytes) of the JWS Compact Serialization"
+msgstr "JWS 紧凑序列化的字符串（或字节）"
+
+#: joserfc.jws.deserialize_compact:15 joserfc.jws.deserialize_json:4
+#: joserfc.jws.validate_compact:5 of
+msgid "a flexible public key to verify the signature"
+msgstr "用于验证签名的灵活公钥"
+
+#: joserfc.jws.deserialize_compact:17 joserfc.jws.deserialize_json:6
+#: joserfc.jws.serialize_compact:15 joserfc.jws.validate_compact:7 of
+msgid "a JWSRegistry to use"
+msgstr "要使用的 JWSRegistry"
+
+#: joserfc._rfc7797.compact.extract_rfc7515_compact:4
+#: joserfc.jws.deserialize_compact:18 of
+msgid "optional payload, required with detached content"
+msgstr ""
+
+#: joserfc.jws.deserialize_compact:19 joserfc.jws.deserialize_json:8
+#: joserfc.jwt.decode:9 of
+msgid "when signature verification fails"
+msgstr ""
+
+#: joserfc.jws.deserialize_compact:20 of
+msgid "object of the CompactSignature"
+msgstr "CompactSignature 对象"
+
+#: joserfc.jws.deserialize_json:1 of
+msgid "Extract and validate the JWS (in string) with the given key."
+msgstr "使用给定密钥提取并验证 JWS（字符串形式）。"
+
+#: joserfc.jws.deserialize_json:3 of
+msgid "a dict of the JSON signature"
+msgstr "字典形式的 JSON Signature"
+
+#: joserfc.jws.deserialize_json:7 of
+msgid "object of GeneralJSONSignature or FlattenedJSONSignature"
+msgstr ""
+
+#: joserfc.jws.detach_content:1 of
+msgid ""
+"In some contexts, it is useful to integrity-protect content that is not "
+"itself contained in a JWS. This method is an implementation of "
+"https://www.rfc-editor.org/rfc/rfc7515#appendix-F"
+msgstr ""
+"在某些情况下，保护不包含在 JWS 中的内容的完整性是有用的。此方法是 https://www.rfc-"
+"editor.org/rfc/rfc7515#appendix-F 的实现"
+
+#: joserfc.jws.detach_content:5 of
+msgid "It is used to detach the content of the compact and JSON serialization."
+msgstr "用于分离紧凑和 JSON 序列化内容。"
+
+#: joserfc.jws.detach_content:16 of
+msgid "You can also detach the JSON serialization:"
+msgstr "您还可以分离 JSON 序列化："
+
+#: joserfc._rfc7797.compact.extract_rfc7515_compact:1 of
+msgid "Extract the JWS Compact Serialization from bytes to object."
+msgstr "从字节中提取 JWS 紧凑序列化为对象。"
+
+#: joserfc._rfc7797.compact.extract_rfc7515_compact:3 of
+msgid "JWS in bytes"
+msgstr "字节形式的 JWS"
+
+#: joserfc._rfc7797.compact.extract_rfc7515_compact:5 of
+msgid "optional JWSRegistry instance"
+msgstr "可选的 JWSRegistry 实例"
+
+#: joserfc._rfc7797.compact.extract_rfc7515_compact:6 of
+msgid "when decoding fails"
+msgstr ""
+
+#: joserfc.jws.serialize_compact:1 of
+msgid ""
+"Generate a JWS Compact Serialization. The JWS Compact Serialization "
+"represents digitally signed or MACed content as a compact, URL-safe "
+"string, per Section 7.1."
+msgstr "生成 JWS 紧凑序列化。JWS 紧凑序列化将数字签名或 MAC 内容表示为紧凑的 URL 安全字符串，参见第 7.1 节。"
+
+#: joserfc.jws.serialize_compact:11 of
+msgid "protected header part of the JWS, in dict"
+msgstr "JWS 的受保护 header 部分，字典形式"
+
+#: joserfc.jws.serialize_compact:12 of
+msgid "payload data of the JWS, in bytes"
+msgstr "JWS 的有效载荷数据，字节形式"
+
+#: joserfc.jws.serialize_compact:13 of
+msgid "a flexible private key to sign the signature"
+msgstr "用于签名的灵活私钥"
+
+#: joserfc.jws.serialize_compact:16 of
+msgid "JWS in str"
+msgstr "字符串形式的 JWS"
+
+#: joserfc.jws.serialize_json:1 of
+msgid ""
+"Generate a JWS JSON Serialization (in dict). The JWS JSON Serialization "
+"represents digitally signed or MACed content as a JSON object. This "
+"representation is neither optimized for compactness nor URL-safe."
+msgstr ""
+"生成 JWS JSON 序列化（字典形式）。JWS JSON 序列化将数字签名或 MAC 内容表示为 JSON 对象。此表示既不优化紧凑性，也不 "
+"URL 安全。"
+
+#: joserfc.jws.serialize_json:5 of
+msgid "A general JWS JSON Serialization contains:"
+msgstr "通用 JWS JSON 序列化包含："
+
+#: joserfc.jws.serialize_json:7 of
+msgid "payload"
+msgstr "有效载荷"
+
+#: joserfc.jws.serialize_json:8 of
+msgid ""
+"The \"payload\" member MUST be present and contain the value "
+"BASE64URL(JWS Payload)."
+msgstr "“有效载荷”成员必须存在，并包含值 BASE64URL(JWS Payload)。"
+
+#: joserfc.jws.serialize_json:11 of
+msgid "signatures"
+msgstr "签名"
+
+#: joserfc.jws.serialize_json:12 of
+msgid ""
+"The \"signatures\" member value MUST be an array of JSON objects. Each "
+"object represents a signature or MAC over the JWS Payload and the JWS "
+"Protected Header."
+msgstr "“签名”成员值必须是 JSON 对象数组。每个对象表示 JWS 有效载荷和 JWS 受保护 header 的签名或 MAC。"
+
+#: joserfc.jws.serialize_json:16 of
+msgid "A flatten JWS JSON Serialization looks like:"
+msgstr "扁平 JWS JSON 序列化如下所示："
+
+#: joserfc.jws.validate_compact:1 of
+msgid ""
+"Validate the JWS Compact Serialization with the given key. This method is"
+" usually used together with ``extract_compact``."
+msgstr "使用给定密钥验证 JWS 紧凑序列化。此方法通常与 ``extract_compact`` 一起使用。"
+
+#: joserfc.jws.validate_compact:4 of
+msgid "object of the JWS Compact Serialization"
+msgstr "JWS 紧凑序列化的对象"
+
+#: ../../api/jwt.rst:6
+msgid ""
+"This part of the documentation covers all the interfaces of "
+"``joserfc.jwt``."
+msgstr "文档的这一部分涵盖了 ``joserfc.jwt`` 的所有接口。"
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry:1 of
+msgid "Requesting \"claims\" for JWT with the given conditions."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.check_value:1 of
+msgid "Validates a given claim value based on predefined options."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.check_value:3 of
+msgid "The name of the claim to validate."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.check_value:4 of
+msgid "The value of the claim to be validated."
+msgstr "要验证的声明值。"
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.check_value:5 of
+msgid "If the value does not meet the claim's validation requirements."
+msgstr ""
+
+#: joserfc.jwt.BaseClaimsRegistry.essential_keys:1 of
+msgid "Returns the essential claim names."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.validate:1 of
+msgid "Validates the provided claims against specified requirements and checks."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.validate:3 of
+msgid "A dictionary containing claims to validate."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.validate:4 of
+msgid "Raised if any claim fails validation."
+msgstr ""
+
+#: joserfc._rfc7519.claims.BaseClaimsRegistry.validate:5 of
+msgid "Raised if one or more essential keys are missing."
+msgstr ""
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry:1 of
+msgid "A claims registry for validating JWT claims."
+msgstr ""
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry:3 of
+msgid "timestamp of \"now\" time"
+msgstr ""
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry:4 of
+msgid "leeway time in seconds"
+msgstr ""
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry:5 of
+msgid "claims options"
+msgstr ""
+
+#: joserfc.jwt.JWTClaimsRegistry.now:1 of
+msgid "Returns the current timestamp."
+msgstr ""
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry.validate_exp:1 of
+msgid ""
+"The \"exp\" (expiration time) claim identifies the expiration time on or "
+"after which the JWT MUST NOT be accepted for processing.  The processing "
+"of the \"exp\" claim requires that the current date/time MUST be before "
+"the expiration date/time listed in the \"exp\" claim. Implementers MAY "
+"provide for some small leeway, usually no more than a few minutes, to "
+"account for clock skew.  Its value MUST be a number containing a "
+"NumericDate value.  Use of this claim is OPTIONAL."
+msgstr ""
+"“exp”（到期时间）声明标识 JWT "
+"必须在或之后的到期时间。处理“exp”声明要求当前日期/时间必须早于“exp”声明中列出的到期日期/时间。实现者可以提供一些小的余地，通常不超过几分钟，以考虑时钟偏差。其值必须是包含"
+" NumericDate 值的数字。使用此声明是可选的。"
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry.validate_iat:1 of
+msgid ""
+"The \"iat\" (issued at) claim identifies the time at which the JWT was "
+"issued.  This claim can be used to determine the age of the JWT.  Its "
+"value MUST be a number containing a NumericDate value.  Use of this claim"
+" is OPTIONAL."
+msgstr ""
+"“iat”（签发时间）声明标识 JWT 的签发时间。此声明可用于确定 JWT 的年龄。其值必须是包含 NumericDate "
+"值的数字。使用此声明是可选的。"
+
+#: joserfc._rfc7519.claims.JWTClaimsRegistry.validate_nbf:1 of
+msgid ""
+"The \"nbf\" (not before) claim identifies the time before which the JWT "
+"MUST NOT be accepted for processing.  The processing of the \"nbf\" claim"
+" requires that the current date/time MUST be after or equal to the not-"
+"before date/time listed in the \"nbf\" claim.  Implementers MAY provide "
+"for some small leeway, usually no more than a few minutes, to account for"
+" clock skew.  Its value MUST be a number containing a NumericDate value."
+"  Use of this claim is OPTIONAL."
+msgstr ""
+"“nbf”（不早于）声明标识 JWT "
+"必须在之前的时间。处理“nbf”声明要求当前日期/时间必须晚于或等于“nbf”声明中列出的不早于日期/时间。实现者可以提供一些小的余地，通常不超过几分钟，以考虑时钟偏差。其值必须是包含"
+" NumericDate 值的数字。使用此声明是可选的。"
+
+#: joserfc.jwt.Token:1 of
+msgid "The extracted token object, which contains ``header`` and ``claims``."
+msgstr "提取的 Token 对象，包含 ``header`` 和 ``claims``。"
+
+#: joserfc.jwt.Token:3 of
+msgid "the header part of the JWT"
+msgstr "JWT 的 header 部分"
+
+#: joserfc.jwt.Token:4 of
+msgid "the payload part of the JWT"
+msgstr "JWT 的有效载荷 (payload) 部分"
+
+#: joserfc.jwt.Token.claims:1 of
+msgid "payload claims in dict"
+msgstr "字典形式的有效载荷 (payload) 声明 (claims)"
+
+#: joserfc.jwt.Token.header:1 of
+msgid "header in dict"
+msgstr "字典形式的 header"
+
+#: joserfc._rfc7519.security.check_sensitive_data:1 of
+msgid ""
+"Checks for sensitive data within a dictionary of claims and raises an "
+"error if any sensitive names or values are detected."
+msgstr ""
+
+#: joserfc._rfc7519.security.check_sensitive_data:4 of
+msgid "JWT claims to check for sensitive data"
+msgstr ""
+
+#: joserfc._rfc7519.security.check_sensitive_data:5 of
+msgid "if any sensitive names or values are detected"
+msgstr ""
+
+#: joserfc.jwt.decode:1 of
+msgid ""
+"Decode the JSON Web Token string with the given key, and validate it with"
+" the claims requests."
+msgstr "使用给定的密钥解码 JSON Web Token 字符串，并使用声明请求进行验证。"
+
+#: joserfc.jwt.decode:4 of
+msgid "text of the JWT"
+msgstr "JWT 的文本"
+
+#: joserfc.jwt.decode:5 of
+msgid "key used to verify the signature"
+msgstr "用于验证签名的密钥"
+
+#: joserfc.jwt.decode:7 joserfc.jwt.encode:7 of
+msgid "a ``JWSRegistry`` or ``JWERegistry`` to use"
+msgstr "要使用的 ``JWSRegistry`` 或 ``JWERegistry``"
+
+#: joserfc.jwt.decode:8 of
+msgid "A JSONDecoder subclass to use"
+msgstr ""
+
+#: joserfc.jwt.decode:10 of
+msgid "when payload is not a valid JSON object"
+msgstr "当载荷（payload）不是有效的 JSON 对象"
+
+#: joserfc.jwt.encode:1 of
+msgid "Encode a JSON Web Token with the given header, and claims."
+msgstr "使用给定的 header 和声明 (claims) 编码 JSON Web Token。"
+
+#: joserfc.jwt.encode:3 of
+msgid "A dict of the JWT header"
+msgstr "字典形式的 JWT header 部分"
+
+#: joserfc.jwt.encode:4 of
+msgid "A dict of the JWT claims to be encoded"
+msgstr "用来编码的字典形式的 JWT claims 部分"
+
+#: joserfc.jwt.encode:5 of
+msgid "key used to sign the signature"
+msgstr "用于签名的密钥"
+
+#: joserfc.jwt.encode:8 of
+msgid "A JSONEncoder subclass to use"
+msgstr "要使用的 JSONEncoder 子类"
+
+#: joserfc.jwt.encode:9 of
+msgid "default value of the ``typ`` header parameter"
+msgstr ""
+
+#~ msgid ""
+#~ "This error is designed for JWT. It"
+#~ " raised when the token is not "
+#~ "valid yet."
+#~ msgstr "此错误是为 JWT 设计的，当 Token 不是有效的 JSON 对象时触发。"
+

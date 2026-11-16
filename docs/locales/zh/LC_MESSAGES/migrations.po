@@ -1,0 +1,528 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) Copyright &copy; 2023, Hsiaoming Yang
+# This file is distributed under the same license as the joserfc package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2023.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  joserfc\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-03-01 20:41+0900\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh\n"
+"Language-Team: zh <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../migrations/authlib.rst:2
+msgid "Migrating from Authlib"
+msgstr "从 Authlib 迁移到 joserfc"
+
+#: ../../migrations/authlib.rst:4
+msgid ""
+"``joserfc`` is derived from Authlib and shares similar implementations of"
+" algorithms. However, it is important to note that the APIs are different"
+" between the two libraries. When migrating your code from Authlib to "
+"``joserfc``, you will need to update your code to accommodate the new API"
+" structure and functionality."
+msgstr ""
+
+#: ../../migrations/authlib.rst:11 ../../migrations/python-jose.rst:85
+msgid "JWT"
+msgstr "JWT"
+
+#: ../../migrations/authlib.rst:13
+msgid ""
+"Migrating JWT (JSON Web Token) operations from Authlib to ``joserfc`` "
+"involves some considerations regarding security design and the allowed "
+"algorithms."
+msgstr ""
+
+#: ../../migrations/authlib.rst:17 ../../migrations/pyjwt.rst:11
+msgid "jwt.encode"
+msgstr "jwt.encode"
+
+#: ../../migrations/authlib.rst:19
+msgid ""
+"The interface for JWT operations in both ``authlib.jose`` and ``joserfc``"
+" is quite similar. In both libraries, you can encode a JWT using the "
+"``jwt.encode(header, payload, key)`` method."
+msgstr ""
+
+#: ../../migrations/authlib.rst:22 ../../migrations/authlib.rst:81
+#: ../../migrations/authlib.rst:97
+msgid "Authlib"
+msgstr "Authlib"
+
+#: ../../migrations/authlib.rst:30 ../../migrations/authlib.rst:86
+#: ../../migrations/authlib.rst:109 ../../migrations/index.rst:23
+#: ../../migrations/pyjwt.rst:23 ../../migrations/pyjwt.rst:45
+#: ../../migrations/pyjwt.rst:64 ../../migrations/pyjwt.rst:96
+#: ../../migrations/pyjwt.rst:136 ../../migrations/pyjwt.rst:155
+#: ../../migrations/python-jose.rst:31 ../../migrations/python-jose.rst:72
+#: ../../migrations/python-jose.rst:101 ../../migrations/python-jose.rst:128
+#: ../../migrations/python-jose.rst:143 ../../migrations/python-jose.rst:161
+msgid "joserfc"
+msgstr "joserfc"
+
+#: ../../migrations/authlib.rst:40 ../../migrations/pyjwt.rst:34
+msgid "jwt.decode"
+msgstr "jwt.decode"
+
+#: ../../migrations/authlib.rst:42
+msgid ""
+"The ``jwt.decode`` method in Authlib and ``joserfc`` behaves differently "
+"when it comes to claims validation."
+msgstr ""
+
+#: ../../migrations/authlib.rst:45
+msgid ""
+"In Authlib, the ``jwt.decode`` method combines the decoding of the JWT "
+"and the validation of its claims into a single step."
+msgstr ""
+
+#: ../../migrations/authlib.rst:56
+msgid ""
+"In ``joserfc``, the ``jwt.decode`` process is split into two steps: "
+"decoding the token and then separately validating its claims. This "
+"approach provides more flexibility and allows for granular control over "
+"the validation process."
+msgstr ""
+
+#: ../../migrations/authlib.rst:72
+msgid ""
+"You can learn more about :ref:`claims validation <claims>` on the "
+":ref:`jwt` guide."
+msgstr ""
+
+#: ../../migrations/authlib.rst:75 ../../migrations/python-jose.rst:155
+msgid "JWK"
+msgstr ""
+
+#: ../../migrations/authlib.rst:77
+msgid ""
+"When using methods such as ``.as_dict``, ``.as_bytes``, ``.as_pem``, and "
+"others, ``joserfc`` uses the parameter name ``private``, whereas "
+"``authlib.jose`` uses ``is_private``:"
+msgstr ""
+
+#: ../../migrations/authlib.rst:92 ../../migrations/python-jose.rst:14
+msgid "JWS"
+msgstr "JWS"
+
+#: ../../migrations/authlib.rst:94
+msgid ""
+"When migrating JWS (JSON Web Signature) operations from Authlib to "
+"``joserfc``, follow these steps:"
+msgstr ""
+
+#: ../../migrations/authlib.rst:121
+msgid ""
+"Above is a simple example of using the ``HS256`` algorithm for JWS. If "
+"you would like to explore further and learn more about JWS, we recommend "
+"referring to the comprehensive :ref:`jws` guide."
+msgstr ""
+
+#: ../../migrations/authlib.rst:126 ../../migrations/python-jose.rst:55
+msgid "JWE"
+msgstr "JWE"
+
+#: ../../migrations/authlib.rst:128
+msgid ""
+"The method names for JWE serialization and deserialization are different "
+"between Authlib and ``joserfc``."
+msgstr ""
+
+#: ../../migrations/authlib.rst:131
+msgid "In Authlib, the methods for JWE serialization and deserialization are:"
+msgstr ""
+
+#: ../../migrations/authlib.rst:133
+msgid "``.serialize_compact(header, payload, key)``"
+msgstr "``.serialize_compact(header, payload, key)``"
+
+#: ../../migrations/authlib.rst:134
+msgid "``.deserialize_compact(token, key)``"
+msgstr "``.deserialize_compact(token, key)``"
+
+#: ../../migrations/authlib.rst:144
+msgid ""
+"In ``joserfc``, the equivalent methods for JWE serialization and "
+"deserialization are:"
+msgstr ""
+
+#: ../../migrations/authlib.rst:146
+msgid "``.encrypt_compact(header, payload, key)``"
+msgstr "``.encrypt_compact(header, payload, key)``"
+
+#: ../../migrations/authlib.rst:147
+msgid "``.decrypt_compact(token, key)``"
+msgstr "``.decrypt_compact(token, key)``"
+
+#: ../../migrations/authlib.rst:156
+msgid ""
+"If you would like to explore further and learn more about JWS, we "
+"recommend referring to the comprehensive :ref:`jwe` guide."
+msgstr ""
+
+#: ../../migrations/index.rst:2
+msgid "Migrations"
+msgstr "迁移"
+
+#: ../../migrations/index.rst:4
+msgid ""
+"Here are some migration guides to help you transition from other "
+"libraries to ``joserfc``:"
+msgstr ""
+
+#: ../../migrations/index.rst:15
+msgid "Comparison"
+msgstr "对比"
+
+#: ../../migrations/index.rst:17
+msgid ""
+"joserfc is the most feature-complete Python library for the JOSE "
+"specifications, providing full coverage of all relevant RFCs."
+msgstr ""
+
+#: ../../migrations/index.rst:20
+msgid ""
+"The following highlights the key differences between joserfc and other "
+"Python libraries:"
+msgstr ""
+
+#: ../../migrations/index.rst:23
+msgid "Features"
+msgstr ""
+
+#: ../../migrations/index.rst:23
+msgid "authlib.jose"
+msgstr "authlib.jose"
+
+#: ../../migrations/index.rst:23
+msgid "pyjwt"
+msgstr "pyjwt"
+
+#: ../../migrations/index.rst:23 ../../migrations/python-jose.rst:22
+#: ../../migrations/python-jose.rst:63 ../../migrations/python-jose.rst:92
+msgid "python-jose"
+msgstr "python-jose"
+
+#: ../../migrations/index.rst:23
+msgid "jwcrypto"
+msgstr "jwcrypto"
+
+#: ../../migrations/index.rst:25
+msgid "Type Hints"
+msgstr ""
+
+#: ../../migrations/index.rst:25 ../../migrations/index.rst:26
+#: ../../migrations/index.rst:27 ../../migrations/index.rst:28
+#: ../../migrations/index.rst:29 ../../migrations/index.rst:30
+#: ../../migrations/index.rst:31 ../../migrations/index.rst:32
+#: ../../migrations/index.rst:33 ../../migrations/index.rst:34
+#: ../../migrations/index.rst:35 ../../migrations/index.rst:36
+#: ../../migrations/index.rst:37 ../../migrations/index.rst:38
+#: ../../migrations/index.rst:39
+msgid ":bdg-success:`Yes`"
+msgstr ":bdg-success:`是`"
+
+#: ../../migrations/index.rst:25 ../../migrations/index.rst:27
+#: ../../migrations/index.rst:28 ../../migrations/index.rst:29
+#: ../../migrations/index.rst:30 ../../migrations/index.rst:31
+#: ../../migrations/index.rst:33 ../../migrations/index.rst:34
+#: ../../migrations/index.rst:35 ../../migrations/index.rst:36
+#: ../../migrations/index.rst:37 ../../migrations/index.rst:38
+#: ../../migrations/index.rst:39
+msgid ":bdg-danger:`No`"
+msgstr ":bdg-danger:`否`"
+
+#: ../../migrations/index.rst:26
+msgid "Compact JWS"
+msgstr ""
+
+#: ../../migrations/index.rst:27
+msgid "JSON JWS"
+msgstr ""
+
+#: ../../migrations/index.rst:28
+msgid "Compact JWE"
+msgstr ""
+
+#: ../../migrations/index.rst:29
+msgid "JSON JWE"
+msgstr ""
+
+#: ../../migrations/index.rst:30
+msgid "Key generation"
+msgstr ""
+
+#: ../../migrations/index.rst:30 ../../migrations/index.rst:31
+#, fuzzy
+msgid ":bdg-danger:`Yes`"
+msgstr ":bdg-danger:`否`"
+
+#: ../../migrations/index.rst:31
+msgid "Key importing"
+msgstr ""
+
+#: ../../migrations/index.rst:32
+msgid "JWT on JWS"
+msgstr ""
+
+#: ../../migrations/index.rst:33
+msgid "JWT on JWE"
+msgstr ""
+
+#: ../../migrations/index.rst:34
+msgid "RFC7638"
+msgstr ""
+
+#: ../../migrations/index.rst:35
+msgid "RFC7797"
+msgstr ""
+
+#: ../../migrations/index.rst:36
+msgid "RFC8037"
+msgstr ""
+
+#: ../../migrations/index.rst:37
+msgid "RFC8812"
+msgstr ""
+
+#: ../../migrations/index.rst:38
+msgid "RFC9278"
+msgstr ""
+
+#: ../../migrations/index.rst:39
+msgid "RFC9864"
+msgstr ""
+
+#: ../../migrations/index.rst:39
+msgid "Not released"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:2
+msgid "Migrating from PyJWT"
+msgstr "从 PyJWT 迁移到 joserfc"
+
+#: ../../migrations/pyjwt.rst:4
+msgid ""
+"When migrating from PyJWT to ``joserfc``, there are a few key differences"
+" to be aware of. ``joserfc`` provides implementations for JWS (JSON Web "
+"Signature), JWE (JSON Web Encryption), JWK (JSON Web Key), and JWT (JSON "
+"Web Token), whereas PyJWT focuses primarily on JWS and JWT. Additionally,"
+" joserfc supports both JWT on JWS and JWT on JWE, offering more "
+"flexibility for token handling."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:13
+msgid ""
+"Both PyJWT and joserfc use the ``.encode`` method to generate a JWT, but "
+"the parameter structure differs between the two libraries."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:16 ../../migrations/pyjwt.rst:39
+#: ../../migrations/pyjwt.rst:84 ../../migrations/pyjwt.rst:130
+#: ../../migrations/pyjwt.rst:149
+msgid "PyJWT"
+msgstr "PyJWT"
+
+#: ../../migrations/pyjwt.rst:36
+msgid ""
+"Similarly, both PyJWT and joserfc use the ``.decode`` method to verify "
+"and decode a JWT, but the parameter structure differs."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:57 ../../migrations/python-jose.rst:121
+msgid "``get_unverified_header``"
+msgstr "``get_unverified_header``"
+
+#: ../../migrations/pyjwt.rst:59
+msgid ""
+"PyJWT module provides a method called ``get_unverified_header``, which "
+"allows extracting the header from a JWT without verifying its signature."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:62 ../../migrations/python-jose.rst:126
+msgid "In ``joserfc``, we can get the unverified header with:"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:76
+msgid "Non-plain string key"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:78
+msgid ""
+"When using a non-plain string key (equivalent to an \"oct\" key) in "
+"joserfc, such as RSA, EC, or OKP keys, the library provides built-in "
+"implementations to handle these key types. This eliminates the need for "
+"manual key handling, which is required in PyJWT."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:82
+msgid "Let's take an example using an RSA key:"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:112
+msgid "Claims validation"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:114
+msgid ""
+"Both PyJWT and ``joserfc`` provide mechanisms for claims validation, "
+"although they differ in their approach."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:117
+msgid ""
+"In PyJWT, claims validation is performed within the ``.decode`` method "
+"itself. When decoding a token, you can specify options such as "
+"``verify_exp`` to validate the expiration time, ``verify_aud`` to "
+"validate the audience, and other options for additional claim "
+"validations. Claims validation is an integral part of the decoding "
+"process."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:122
+msgid ""
+"On the other hand, ``joserfc`` follows a different approach by separating"
+" the decoding and claims validation steps. The .decode method in joserfc "
+"is focused solely on decoding the token and extracting the header and "
+"payload information. Claims validation is performed separately using "
+"claims validators."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:128
+msgid "Verify \"exp\""
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:147
+msgid "Required claims"
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:168
+msgid ""
+"The ``JWTClaimsRegistry`` accepts each claim as an `Individual Claims "
+"Requests`_ JSON object. You can learn more from :ref:`claims`."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:174
+#, fuzzy
+msgid "PyJWKClient"
+msgstr "PyJWT"
+
+#: ../../migrations/pyjwt.rst:176
+msgid ""
+"Unlike ``PyJWT``, ``joserfc`` does not provide a built-in HTTP client for"
+" fetching JWK Sets (jwks) from a URL. You are free to use any HTTP "
+"library you prefer to retrieve the JWK Set."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:179
+msgid "Here is an example of using the **requests** library to fetch a JWK Set."
+msgstr ""
+
+#: ../../migrations/pyjwt.rst:196
+msgid "Here is a real-world example demonstrating how to fetch :ref:`azure`."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:2
+msgid "Migrating from python-jose"
+msgstr "从 python-jose 迁移到 joserfc"
+
+#: ../../migrations/python-jose.rst:4
+msgid ""
+"``python-jose`` supports all JOSE specifications, similar to ``joserfc``."
+" However, there are significant differences in code structure, method "
+"names, and parameter usage. Additionally, ``joserfc`` offers built-in "
+"Python type hints, enhancing code readability and type safety."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:9
+msgid ""
+"Another key difference is that ``python-jose`` only supports compact "
+"serialization and deserialization, whereas ``joserfc`` supports both "
+"compact and JSON serialization formats, offering greater flexibility in "
+"handling JOSE data."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:16
+msgid ""
+"In ``python-jose``, the methods used for serialization and "
+"deserialization are ``jws.sign`` and ``jws.verify``, respectively."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:19
+msgid ""
+"On the other hand, ``joserfc`` uses ``jws.serialize_compact`` for "
+"serialization and ``jws.deserialize_compact`` for deserialization."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:46
+msgid ""
+"``joserfc`` is designed to be highly explicit, requiring the use of "
+"specific key types, payload formats, and other components. For example, "
+"in the previous example, we explicitly use an OctKey instead of a simple "
+"string. Additionally, since JWS in joserfc only supports encoding strings"
+" and bytes, you cannot pass a dictionary directly as the payload. "
+"Instead, the payload must first be converted to a JSON string using "
+"json.dumps. This explicit approach ensures better type safety and clarity"
+" in your code."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:57
+msgid ""
+"In ``python-jose``, the methods used for encryption and decryption are "
+"``jwe.encrypt`` and ``jwe.decrypt``. However, since ``joserfc`` supports "
+"both compact and JSON serialization formats, it provides distinct "
+"methods: ``jwe.encrypt_compact`` and ``jwe.decrypt_compact`` for compact "
+"serialization, ensuring clear differentiation between the formats and "
+"greater flexibility in handling JWE operations."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:87
+msgid ""
+"The ``jwt`` module in ``python-jose`` supports only JWS (JSON Web "
+"Signature) mode, whereas ``joserfc`` provides support for both JWS and "
+"JWE (JSON Web Encryption) modes. Although both libraries utilize the "
+"``encode`` and ``decode`` methods, their parameters differ significantly "
+"in terms of structure and flexibility."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:116
+msgid ""
+"``python-jose`` will automatically convert and validate string values for"
+" JWT claims (e.g. `exp`, `iat` and `nbf`) whereas ``joserfc`` will raise "
+"an exception when using the `JWTClaimsRegistry`."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:123
+msgid ""
+"The ``jwt`` module in python-jose provides a method called "
+"``get_unverified_header``, which allows extracting the header from a JWT "
+"without verifying its signature."
+msgstr ""
+
+#: ../../migrations/python-jose.rst:139
+msgid "``get_unverified_claims``"
+msgstr "``get_unverified_claims``"
+
+#: ../../migrations/python-jose.rst:141
+msgid ""
+"You can also use the ``jws.extract_compact`` method to extract the JWT's "
+"claims:"
+msgstr ""
+
+#: ../../migrations/python-jose.rst:157
+msgid ""
+"In ``python-jose``, you can use ``jwk.construct`` to create a key "
+"instance from a JWK-formatted dictionary. In contrast, ``joserfc`` "
+"provides the ``jwk.import_key`` method to achieve the same result."
+msgstr ""
+

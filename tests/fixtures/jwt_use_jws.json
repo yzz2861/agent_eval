@@ -1,0 +1,56 @@
+{
+  "payload": {"sub": "1"},
+  "tests": [
+    {
+      "name": "HS256",
+      "secret": "secret",
+      "header": {
+        "alg": "HS256"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.FasJnVFa0htLRI3VajVhbweHTHfeKTXV0y6emUBiFGs"
+    },
+    {
+      "name": "HS384",
+      "secret": "secret",
+      "header": {
+        "alg": "HS384"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzM4NCJ9.eyJzdWIiOiIxIn0.mfLVeDcIXazg0WuEOk--Vw999c8FIZNcU-e9VyRtQlnxMTICnYqPnsSTzeLY3MN-"
+    },
+    {
+      "name": "HS512",
+      "secret": "secret",
+      "header": {
+        "alg": "HS512"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJzdWIiOiIxIn0.01A1wo_fH3C2SDh2QuAfUOnAoQEP6_ucHynbYYKcRMLvku2CenBgoRcz84U5vHLdA4OeBy-VlhTK_3RNediiMA"
+    },
+    {
+      "name": "RS256",
+      "private_key": "rsa-openssl-private.pem",
+      "public_key": "rsa-openssl-public.pem",
+      "header": {
+        "alg": "RS256"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.dhwB8TIXR93jWcCIcz6ZNwYaImFp1Uy7O13s10ssLh-_XEdABjqdEcgqb-yvGD7xHgKtklBvMr6cFTKjNIMultOwbKgWXqyeW0DTiIr_lVcWeeYxGKNNV0d6Rt6yPF8TBApkVKlYtE84knKu7zkAa2OZf-XmRNDlIGzgJgZq7jaDCBpiv9G_2KZthgJg7Qq1unDIV_RbpnI1187niaGh3wsgtAXKpA_e91Kh_6WKdHOOnpgKWvmH_xc4fIuqiveYuXMQKGj1ditaK64aq4tAYEef_66O1ro9_g2Kh4UAc4TGuxy1nsZglZxZqis_uww43AsY4brMagCNQSjvxHGqQ5n6wcRTEPMrBhWEujOUoy2kH93Wn1B5lf9nk_aXrRb68X3aLirgeDFtw0HA8woe6hvNhw6c30z9UMqyLoP5ct3T6tZ7MFg4OIHukTh4W523MuToJjNaXm0kk8JY1ieOjsErPfCJ9v4L2oSto1vUkry7NJugJx8BT9falUCfweTmb2XuKIuD5PN9p0bdPELHpjXzUngUOTmGJYZXzm0YT4FncXE6AbWwJWIY1h9Zh8Zm8e04bU7Ft0-Chzs_Hsy7VBCaleI-R-0QetMgfc4fl2amHB5q1XSvZ_tYQEi1mqkJYOTtGOkk7yFXScrI6bvRpHqPTmSg0acv82tDBdR8b2Y"
+    },
+    {
+      "name": "RS384",
+      "private_key": "rsa-openssl-private.pem",
+      "public_key": "rsa-openssl-public.pem",
+      "header": {
+        "alg": "RS384"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzM4NCJ9.eyJzdWIiOiIxIn0.huxdnHc_FvydvHb4_VfUsYlGjSCiGeS_B2DCqcvfLjD1me1iVHNR66NzpLgbaspuNCT-eOgmm9vEQsjx9-fHlu91v_xNY-b0ckKFNj-5KVFY3wrQRJ8ysZAgZCieimSOPL9d96lvmIlI4m21OLjMo91kFHG-mVWmSbv5Q2X058Rl-4IeLP2AeYvvT9hdtC6lPw0dvnvAm-UANxsDWvob2zQyeM45JC4mgGn5WvZUc1UxedwGs2KZrtl-eLXhzlzX5zgbc8ioGN_J91uKN9MwpcOjtyfq3NT6W1GvbVwqvP8Bvs04jxDf8GTU2KH7Kznm0SDE2UFNFKsiKpHBO18WRC9ILZBKe2wYO1D8TVfXHl3WdI6pyvmFLhxB7a6cWiNY_qBTwT_sSUt827ju5lbdhstWiMNDQFmsWNxp6tdHjn1F9m71eANV1DdCIXHI2v_UCzkZ4ioURQlb7qJHcZGPhX9XFfjG-aWHP3Xaof8A_18oH-yyj_bBfbHxUe_Z35hTMcd41hudoyxSVDgj0-TEDQI6XhCji1x77Nnbnsh6A7xZzbIv8dEg2fi-eJqowCvpwQuPIa42BHKphxaxRK1mg4XYWhJ72Ime_SpqxPsyJlYx-EHyS7UERshsteApy_35QxGQTkKj3LAyT42VtuoqeilMsvfXhsrACavo6e4SjaY"
+    },
+    {
+      "name": "RS512",
+      "private_key": "rsa-openssl-private.pem",
+      "public_key": "rsa-openssl-public.pem",
+      "header": {
+        "alg": "RS512"
+      },
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOiIxIn0.UodywByDhHFbne53THtyjohTbGG0TWakCAEabRf1a3dBm-KswkyenwCEowFkdU90nKCQ-2XexfrwfoD3rdzirErHeIIYXj6bwl0yNvJjwcMbXlJnrgmnntHOGpkl96s-hjqKLQ5xKu5UC_zn80nlrGj7xfyOrYS31jQasM1iR2rv6AqWBhc836_9q0wK7kxJZBnVlH35vFm6r1ADaSQWTRCFMab1E2InfxQXEXPuecVNJCsyNJEZxKzbmaNPE8VtyqTOz-Oa0RYtDzJJsfWIo0V_asEs4-Vt_4XhLxKk26ZLJhv1tVCBZ0BttI5ZRooxwjGkvjtMKRaSjOhhMNODeJMiV4zy5lFRoKpLw1ff-e06pSfzqDHEYtS4fyw9wkCYonkKdQQWsY-Mh7P1XIGyaha-S8jNifW5O82bzHuNGaTZLJQkuqftdLZDKCkkkkSjFcuajfCvSOZkc3dZ6i6H_LvVpobmUSuaDz7WvwZ6MQNtz5zs2jZuI6JzT99oT6pjhroTSLY-pxam5TqU7YIdxj98FQzOj0Vh0mSdqMDA_axsrlytuT_estI-ivSSTX5jnxd5MspzaOdbUrNSu3kQ4AFYPTpWOAoAOus4719z0K25QnCC-eAxFJskbkcD6abNfOioX59rt4wZzbD-RzgCXlrsp5V5g9fbZZtDC1sgzFg"
+    }
+  ]
+}
