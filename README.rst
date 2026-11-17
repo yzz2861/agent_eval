@@ -85,6 +85,21 @@ Counter-based OTPs
     hotp.verify('316439', 1401) # => True
     hotp.verify('316439', 1402) # => False
 
+To tolerate counter drift while preventing replay, use a persisted state and a
+look-ahead window:
+
+.. code:: python
+
+    state = pyotp.HOTPState()
+
+    # Checks counters 1401 through 1403 and records the matched counter.
+    hotp.verify('...', 1401, look_ahead=2, state=state)
+
+    # Persist state.to_dict() or state.to_json(), then restore it later with
+    # pyotp.HOTPState.from_dict() or pyotp.HOTPState.from_json().
+    stored = state.to_dict()
+    state = pyotp.HOTPState.from_dict(stored)
+
 Generating a Secret Key
 ~~~~~~~~~~~~~~~~~~~~~~~
 A helper function is provided to generate a 32-character base32 secret, compatible with Google Authenticator and other

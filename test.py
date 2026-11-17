@@ -3,8 +3,10 @@
 import base64
 import datetime
 import hashlib
+import json
 import os
 import sys
+import threading
 import unittest
 from urllib.parse import parse_qsl, urlparse
 from warnings import warn
@@ -114,6 +116,106 @@ class HOTPExampleValuesFromTheRFC(unittest.TestCase):
         self.assertEqual(hotp.at(2), "363354")
         self.assertEqual(hotp.at(3), "936780")
         self.assertEqual(hotp.at(4), "654019")
+
+
+class HOTPStatefulVerificationTest(unittest.TestCase):
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def test_look_ahead_window(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        state = pyotp.HOTPState()
+
+        self.assertTrue(hotp.verify(hotp.at(5), 3, look_ahead=2, state=state))
+        self.assertEqual(state.last_counter, 5)
+        self.assertFalse(hotp.verify(hotp.at(7), 3, look_ahead=2, state=state))
+        self.assertTrue(hotp.verify(hotp.at(7), 5, look_ahead=2, state=state))
+        self.assertEqual(state.last_counter, 7)
+
+    def test_configured_look_ahead_on_instance(self):
+        state = pyotp.HOTPState()
+        hotp = pyotp.HOTP(self.SECRET, look_ahead=2, state=state)
+
+        self.assertTrue(hotp.verify(hotp.at(2), 0))
+        self.assertEqual(state.last_counter, 2)
+        self.assertFalse(hotp.verify(hotp.at(4), 0))
+        self.assertTrue(hotp.verify(hotp.at(4), 2))
+
+    def test_old_code_replay_is_rejected(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        state = pyotp.HOTPState()
+        code = hotp.at(4)
+
+        self.assertTrue(hotp.verify(code, 4, state=state))
+        self.assertFalse(hotp.verify(code, 4, state=state))
+        self.assertFalse(hotp.verify(code, 4, look_ahead=2, state=state))
+        self.assertFalse(hotp.verify(hotp.at(3), 3, state=state))
+        self.assertEqual(state.last_counter, 4)
+        self.assertTrue(hotp.verify(hotp.at(5), 5, state=state))
+        self.assertEqual(state.last_counter, 5)
+
+    def test_old_counter_outside_window_does_not_reset_state(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        state = pyotp.HOTPState(last_counter=8)
+
+        self.assertFalse(hotp.verify(hotp.at(7), 5, look_ahead=2, state=state))
+        self.assertEqual(state.last_counter, 8)
+        self.assertTrue(hotp.verify(hotp.at(10), 8, look_ahead=2, state=state))
+        self.assertEqual(state.last_counter, 10)
+
+    def test_concurrent_verification_updates_state_atomically(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        code = hotp.at(7)
+        state = pyotp.HOTPState()
+        thread_count = 16
+        barrier = threading.Barrier(thread_count)
+        results = []
+        results_lock = threading.Lock()
+
+        def verify_code():
+            verifier = pyotp.HOTP(self.SECRET, state=state)
+            barrier.wait()
+            result = verifier.verify(code, 5, look_ahead=3)
+            with results_lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=verify_code) for _ in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(state.last_counter, 7)
+        self.assertFalse(hotp.verify(code, 7, state=state))
+
+    def test_state_serialization(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        state = pyotp.HOTPState()
+        self.assertTrue(hotp.verify(hotp.at(6), 4, look_ahead=2, state=state))
+
+        restored = pyotp.HOTPState.from_dict(state.to_dict())
+        self.assertEqual(restored, state)
+        self.assertEqual(restored.last_counter, 6)
+
+        restored_json = pyotp.HOTPState.from_json(state.to_json())
+        self.assertEqual(restored_json.to_dict(), {"last_counter": 6})
+        self.assertEqual(json.loads(restored_json.to_json()), {"last_counter": 6})
+
+        restored_hotp = pyotp.HOTP(self.SECRET, state=restored_json)
+        self.assertFalse(restored_hotp.verify(hotp.at(6), 4, look_ahead=2))
+        self.assertTrue(restored_hotp.verify(hotp.at(7), 6, look_ahead=1))
+        self.assertEqual(restored_json.last_counter, 7)
+
+    def test_invalid_window_and_counter(self):
+        hotp = pyotp.HOTP(self.SECRET)
+        state = pyotp.HOTPState()
+        with self.assertRaises(ValueError):
+            pyotp.HOTP(self.SECRET, look_ahead=-1)
+        with self.assertRaises(ValueError):
+            hotp.verify(hotp.at(0), 0, look_ahead=-1, state=state)
+        with self.assertRaises(ValueError):
+            hotp.verify(hotp.at(0), -1, state=state)
 
 
 class TOTPExampleValuesFromTheRFC(unittest.TestCase):

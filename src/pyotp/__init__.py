@@ -6,6 +6,8 @@ from urllib.parse import parse_qsl, unquote, urlparse
 from . import contrib  # noqa:F401
 from .compat import random
 from .hotp import HOTP as HOTP
+from .hotp import HOTPState as HOTPState
+from .hotp import HOTPVerificationState as HOTPVerificationState
 from .otp import OTP as OTP
 from .totp import TOTP as TOTP
 
