@@ -210,6 +210,134 @@ class TestAllowDuplicateKeys:
             loads(unhexlify("a20501e502"), allow_duplicate_keys=False, immutable=immutable)
 
 
+class TestStrict:
+    def test_default(self) -> None:
+        decoder = CBORDecoder(BytesIO())
+        assert not decoder.strict
+
+    def test_enabled(self) -> None:
+        decoder = CBORDecoder(BytesIO(), strict=True)
+        assert decoder.strict
+
+    @pytest.mark.parametrize(
+        "payload, expected",
+        [
+            pytest.param("1817", 23, id="uint-1-byte"),
+            pytest.param("1900ff", 255, id="uint-2-bytes"),
+            pytest.param("1a0000ffff", 65535, id="uint-4-bytes"),
+            pytest.param("1b00000000ffffffff", 4294967295, id="uint-8-bytes"),
+            pytest.param("3817", -24, id="negint-1-byte"),
+            pytest.param("3900ff", -256, id="negint-2-bytes"),
+            pytest.param("580161", b"a", id="bytestring-length"),
+            pytest.param("780161", "a", id="textstring-length"),
+            pytest.param("980100", [0], id="array-length"),
+            pytest.param("b8010000", {0: 0}, id="map-length"),
+            pytest.param("d900024100", 0, id="tag-2-bytes"),
+        ],
+    )
+    def test_non_shortest_form_accepted_by_default(
+        self, payload: str, expected: object
+    ) -> None:
+        assert loads(unhexlify(payload)) == expected
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param("1817", id="uint-1-byte"),
+            pytest.param("1900ff", id="uint-2-bytes"),
+            pytest.param("1a0000ffff", id="uint-4-bytes"),
+            pytest.param("1b00000000ffffffff", id="uint-8-bytes"),
+            pytest.param("3817", id="negint-1-byte"),
+            pytest.param("3900ff", id="negint-2-bytes"),
+            pytest.param("580161", id="bytestring-length"),
+            pytest.param("780161", id="textstring-length"),
+            pytest.param("980100", id="array-length"),
+            pytest.param("b8010000", id="map-length"),
+            pytest.param("d900024100", id="tag-2-bytes"),
+        ],
+    )
+    def test_non_shortest_form_rejected(self, payload: str) -> None:
+        with pytest.raises(CBORDecodeError, match="non-shortest-form encoding"):
+            loads(unhexlify(payload), strict=True)
+
+    def test_indefinite_length_rejected(self) -> None:
+        assert loads(unhexlify("9f0002ff")) == [0, 2]
+        with pytest.raises(CBORDecodeError, match="indefinite-length items are not allowed"):
+            loads(unhexlify("9f0002ff"), strict=True)
+
+    def test_duplicate_keys_accepted_by_default(self) -> None:
+        # {"a": 1, "a": 2}
+        payload = unhexlify("a2616101616102")
+        assert loads(payload) == {"a": 2}
+
+    @pytest.mark.parametrize("immutable", [False, True])
+    def test_duplicate_keys_rejected(self, immutable: bool) -> None:
+        # {"a": 1, "a": 2}
+        payload = unhexlify("a2616101616102")
+        with pytest.raises(CBORDecodeError, match="not in canonical order"):
+            loads(payload, strict=True, immutable=immutable)
+
+    @pytest.mark.parametrize("immutable", [False, True])
+    def test_duplicate_keys_different_types_rejected(self, immutable: bool) -> None:
+        # {1: 1, 1.0: 2}: the keys compare equal, so this is a duplicate even though the
+        # encodings differ
+        payload = unhexlify("a20101fb3ff000000000000002")
+        with pytest.raises(CBORDecodeError, match="Duplicate map key"):
+            loads(payload, strict=True, immutable=immutable)
+
+    def test_unordered_map_keys_accepted_by_default(self) -> None:
+        # {"b": 1, "a": 2}
+        payload = unhexlify("a2616201616102")
+        assert loads(payload) == {"b": 1, "a": 2}
+
+    @pytest.mark.parametrize("immutable", [False, True])
+    def test_unordered_map_keys_rejected(self, immutable: bool) -> None:
+        # {"b": 1, "a": 2}
+        payload = unhexlify("a2616201616102")
+        with pytest.raises(CBORDecodeError, match="not in canonical order"):
+            loads(payload, strict=True, immutable=immutable)
+
+    def test_map_keys_ordered_by_length_first(self) -> None:
+        # {"z": 1, "aa": 2}: "z" (2 encoded bytes) sorts before "aa" (3 encoded bytes)
+        payload = unhexlify("a2617a0162616102")
+        assert loads(payload, strict=True) == {"z": 1, "aa": 2}
+        # {"aa": 1, "z": 2} is not in canonical order, even though it is bytewise sorted
+        payload = unhexlify("a262616101617a02")
+        with pytest.raises(CBORDecodeError, match="not in canonical order"):
+            loads(payload, strict=True)
+
+    @pytest.mark.parametrize("immutable", [False, True])
+    def test_nested_unordered_map_keys_rejected(self, immutable: bool) -> None:
+        # {"a": {"b": 1, "a": 2}}
+        payload = unhexlify("a16161a2616201616102")
+        with pytest.raises(CBORDecodeError, match="not in canonical order"):
+            loads(payload, strict=True, immutable=immutable)
+
+    def test_canonical_encoder_output_accepted(self) -> None:
+        value = {"b": 1, "a": 2, "aa": [1, 2, 3], "z": {"y": 1, "b": None}, 3: b"x"}
+        payload = dumps(value, canonical=True)
+        assert loads(payload, strict=True) == value
+        # The immutable variant re-encodes to the same canonical bytes
+        assert dumps(loads(payload, strict=True, immutable=True), canonical=True) == payload
+
+    def test_strict_decoder_class(self) -> None:
+        decoder = CBORDecoder(BytesIO(unhexlify("1817")), strict=True)
+        with pytest.raises(CBORDecodeError, match="non-shortest-form encoding"):
+            decoder.decode()
+
+    def test_strict_load(self) -> None:
+        with pytest.raises(CBORDecodeError, match="non-shortest-form encoding"):
+            load(BytesIO(unhexlify("1817")), strict=True)
+
+    def test_error_contains_byte_offset(self) -> None:
+        with pytest.raises(CBORDecodeError, match=r"at byte offset 2"):
+            loads(unhexlify("1817"), strict=True)
+
+    def test_eof_error_contains_byte_offset(self) -> None:
+        with pytest.raises(CBORDecodeEOF, match=r"at byte offset 1"):
+            loads(b"\x19")
+
+
 class TestStrictHashableTypes:
     def test_default(self) -> None:
         decoder = CBORDecoder(BytesIO())
@@ -1331,11 +1459,11 @@ class TestStringReference:
         assert decoded == ["first", "first", "second", "first", "second"]
 
     def test_ref_outside_of_namespace(self) -> None:
-        with pytest.raises(CBORDecodeError, match="string reference outside of namespace$"):
+        with pytest.raises(CBORDecodeError, match="string reference outside of namespace"):
             loads(unhexlify("85656669727374d81900667365636f6e64d81900d81901"))
 
     def test_invalid_string_ref(self) -> None:
-        with pytest.raises(CBORDecodeError, match="string reference 3 not found$"):
+        with pytest.raises(CBORDecodeError, match="string reference 3 not found"):
             loads(unhexlify("d9010086656669727374d81900667365636f6e64d81900d81901d81903"))
 
     def test_string_ref_long_text_string(self) -> None:

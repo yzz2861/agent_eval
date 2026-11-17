@@ -52,6 +52,9 @@ enum DecoderResult<'a> {
         // True only for an indefinite-length array or map, the sole frames a break stop code may
         // terminate. Every other frame rejects the break marker if it arrives as a data item.
         bool,
+        // True only for maps decoded in strict (canonical) mode, whose keys must be tracked to
+        // verify that they are unique and sorted in canonical order
+        bool,
     ),
     ContinueFrame(bool),
     CompleteFrame(Bound<'a, PyAny>),
@@ -82,6 +85,13 @@ impl<'a> Display for DisplayName<'a> {
 type DecoderCallback<'py> =
     dyn 'py + FnMut(Bound<'py, PyAny>, bool) -> PyResult<DecoderResult<'py>>;
 
+/// Tracks the raw encoded bytes of the previously decoded map key so that strict (canonical)
+/// mode can verify that keys are unique and sorted in canonical order.
+struct KeyOrderState {
+    expecting_key: bool,
+    previous_key: Option<Vec<u8>>,
+}
+
 struct StackFrame<'py> {
     immutable: bool,
     decoder_callback: Option<Box<DecoderCallback<'py>>>,
@@ -89,6 +99,7 @@ struct StackFrame<'py> {
     typename: DisplayName<'py>,
     contains_string_namespace: bool,
     accepts_break: bool,
+    key_order_state: Option<KeyOrderState>,
     // Depth of the deepest value delivered to this frame so far
     max_child_depth: usize,
 }
@@ -224,6 +235,13 @@ fn require_bignum_bytes(value: Bound<'_, PyAny>) -> PyResult<Bound<'_, PyBytes>>
 ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
 ///     anything other than a text string or a byte string (this prevents attackers from crafting
 ///     maps or sets with colliding hashes as a denial-of-service attack)
+/// :param strict:
+///     if :data:`True`, require the input to be in canonical form (RFC 8949 section 4.2):
+///     raise a :exc:`CBORDecodeError` when encountering non-shortest-form integers or lengths,
+///     indefinite-length items, duplicate map keys, or map keys that are not sorted in
+///     canonical order (by encoded length first, then bytewise lexicographically). This
+///     prevents attackers from using alternate encodings of the same semantic value to bypass
+///     byte-level checksums or signatures
 ///
 /// .. _CBOR: https://cbor.io/
 #[pyclass(module = "cbor2")]
@@ -243,12 +261,20 @@ pub struct CBORDecoder {
     allow_duplicate_keys: bool,
     #[pyo3(get)]
     strict_hashable_types: bool,
+    #[pyo3(get)]
+    strict: bool,
 
     read_method: Option<Py<PyAny>>,
     buffer: Option<Py<PyBytes>>,
     read_position: usize,
     available_bytes: usize,
     fp_is_seekable: bool,
+    // Absolute number of bytes consumed from the input so far (used to report the byte offset
+    // in decoding errors)
+    position: usize,
+    // Stack of buffers capturing the raw encoded bytes of map keys currently being decoded
+    // (only used in strict mode to verify canonical map key ordering)
+    key_captures: Vec<Vec<u8>>,
 }
 
 impl CBORDecoder {
@@ -265,6 +291,7 @@ impl CBORDecoder {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        strict: bool,
     ) -> PyResult<Self> {
         let available_bytes = if let Some(buffer) = buffer.as_ref() {
             buffer.len()?
@@ -282,12 +309,15 @@ impl CBORDecoder {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            strict,
             semantic_decoders: semantic_decoders.map(|d| d.clone().unbind()),
             read_method: None,
             buffer: buffer.map(Bound::unbind),
             read_position: 0,
             available_bytes,
             fp_is_seekable: false,
+            position: 0,
+            key_captures: Vec::new(),
         };
         if let Some(fp) = fp {
             this.set_fp(fp)?
@@ -333,7 +363,9 @@ impl CBORDecoder {
             self.read_position = N;
             self.available_bytes = amount_read - N;
             self.buffer = Some(new_bytes.unbind());
-            Ok(self.buffer.as_ref().unwrap().as_bytes(py)[..N].try_into()?)
+            let bytes: [u8; N] = self.buffer.as_ref().unwrap().as_bytes(py)[..N].try_into()?;
+            self.note_consumed(&bytes);
+            Ok(bytes)
         } else if self.available_bytes < N {
             // Combine the remnants of the partial buffer with new data read from the file
             let needed_bytes = N - self.available_bytes;
@@ -347,9 +379,11 @@ impl CBORDecoder {
             self.buffer = Some(new_bytes.unbind());
             self.available_bytes = amount_read - needed_bytes;
             self.read_position = needed_bytes;
-            Ok(concatenated_buffer
+            let bytes: [u8; N] = concatenated_buffer
                 .try_into()
-                .expect("buffer size mismatch"))
+                .expect("buffer size mismatch");
+            self.note_consumed(&bytes);
+            Ok(bytes)
         } else {
             // Return a slice from the existing bytes object
             let slice: [u8; N] = self.buffer.as_ref().unwrap().bind(py).as_bytes()
@@ -357,8 +391,38 @@ impl CBORDecoder {
                 .try_into()?;
             self.available_bytes -= N;
             self.read_position += N;
+            self.note_consumed(&slice);
             Ok(slice)
         }
+    }
+
+    /// Account for bytes consumed from the input: advance the absolute stream position and
+    /// append the bytes to any active map key captures (strict mode canonical ordering check).
+    fn note_consumed(&mut self, bytes: &[u8]) {
+        self.position += bytes.len();
+        for capture in self.key_captures.iter_mut() {
+            capture.extend_from_slice(bytes);
+        }
+    }
+
+    /// Append the current byte offset to a decoding error, preserving the exception type
+    /// (:exc:`CBORDecodeEOF` or :exc:`CBORDecodeError`) and its cause. Other exception types
+    /// are passed through unchanged.
+    fn add_byte_offset(&self, py: Python<'_>, err: PyErr) -> PyErr {
+        if !err.is_instance_of::<CBORDecodeError>(py) {
+            return err;
+        }
+        let message = err
+            .value(py)
+            .str()
+            .ok()
+            .and_then(|message| message.to_str().ok().map(str::to_owned))
+            .unwrap_or_default();
+        let message = format!("{message} (at byte offset {})", self.position);
+        // Update the exception's args in place so that its type, cause and traceback are
+        // preserved; str() of the exception reflects the new args
+        let _ = err.value(py).setattr(intern!(py, "args"), (message,));
+        err
     }
 
     fn read_major_and_subtype(&mut self, py: Python<'_>) -> PyResult<(u8, u8)> {
@@ -403,11 +467,32 @@ impl CBORDecoder {
     fn decode_length(&mut self, py: Python<'_>, subtype: u8) -> PyResult<Option<u64>> {
         let length = match subtype {
             ..24 => Some(subtype as u64),
-            24 => Some(self.read_exact::<1>(py)?[0] as u64),
-            25 => Some(u16::from_be_bytes(self.read_exact(py)?) as u64),
-            26 => Some(u32::from_be_bytes(self.read_exact(py)?) as u64),
-            27 => Some(u64::from_be_bytes(self.read_exact(py)?)),
+            24 => {
+                let value = self.read_exact::<1>(py)?[0] as u64;
+                self.check_shortest_form(value, 24)?;
+                Some(value)
+            }
+            25 => {
+                let value = u16::from_be_bytes(self.read_exact(py)?) as u64;
+                self.check_shortest_form(value, 256)?;
+                Some(value)
+            }
+            26 => {
+                let value = u32::from_be_bytes(self.read_exact(py)?) as u64;
+                self.check_shortest_form(value, 65536)?;
+                Some(value)
+            }
+            27 => {
+                let value = u64::from_be_bytes(self.read_exact(py)?);
+                self.check_shortest_form(value, 4294967296)?;
+                Some(value)
+            }
             31 => {
+                if self.strict {
+                    return Err(CBORDecodeError::new_err(
+                        "indefinite-length items are not allowed in strict (canonical) mode",
+                    ));
+                }
                 if !self.allow_indefinite {
                     return Err(CBORDecodeError::new_err(
                         "encountered indefinite length but it has been disabled",
@@ -422,6 +507,17 @@ impl CBORDecoder {
             }
         };
         Ok(length)
+    }
+
+    /// In strict (canonical) mode, verify that an integer or length was encoded in its
+    /// shortest form, i.e. that it could not have been encoded with fewer bytes.
+    fn check_shortest_form(&self, value: u64, minimum: u64) -> PyResult<()> {
+        if self.strict && value < minimum {
+            return Err(CBORDecodeError::new_err(format!(
+                "non-shortest-form encoding of value {value} (canonical encoding required)"
+            )));
+        }
+        Ok(())
     }
 
     fn decode_uint<'py>(&mut self, py: Python<'py>, subtype: u8) -> PyResult<DecoderResult<'py>> {
@@ -639,6 +735,7 @@ impl CBORDecoder {
                 None,
                 DisplayName::String("array"),
                 optional_length.is_none(),
+                false,
             ))
         } else {
             let mut list = PyList::empty(py);
@@ -677,6 +774,7 @@ impl CBORDecoder {
                 Some(container),
                 DisplayName::String("array"),
                 optional_length.is_none(),
+                false,
             ))
         }
     }
@@ -719,8 +817,11 @@ impl CBORDecoder {
         }
 
         let object_hook = self.object_hook.as_ref().map(|hook| hook.clone_ref(py));
-        let allow_duplicate_keys = self.allow_duplicate_keys;
+        // Strict (canonical) mode forbids duplicate map keys regardless of the configured
+        // allow_duplicate_keys setting
+        let allow_duplicate_keys = self.allow_duplicate_keys && !self.strict;
         let strict_hashable_types = self.strict_hashable_types;
+        let track_key_order = self.strict;
         let length_or_none = self.decode_length_as_usize(py, subtype)?;
 
         // Return immediately if this is an empty dict
@@ -820,6 +921,7 @@ impl CBORDecoder {
                 None,
                 DisplayName::String("map"),
                 length_or_none.is_none(),
+                track_key_order,
             ))
         } else {
             fn check_duplicate(key: &Bound<PyAny>, dict: &Bound<PyDict>) -> PyResult<()> {
@@ -901,6 +1003,7 @@ impl CBORDecoder {
                 Some(container),
                 DisplayName::String("map"),
                 length_or_none.is_none(),
+                track_key_order,
             ))
         }
     }
@@ -953,6 +1056,7 @@ impl CBORDecoder {
                                 DisplayName::PythonName(name.clone())
                             },
                             false,
+                            false,
                         ))
                     } else {
                         let callback =
@@ -964,6 +1068,7 @@ impl CBORDecoder {
                             immutable,
                             None,
                             DisplayName::SemanticTag(tagnum),
+                            false,
                             false,
                         ))
                     };
@@ -1029,6 +1134,7 @@ impl CBORDecoder {
                     Some(container),
                     DisplayName::SemanticTag(tagnum),
                     false,
+                    false,
                 ));
             }
         };
@@ -1037,6 +1143,7 @@ impl CBORDecoder {
             true,
             None,
             DisplayName::String(typename),
+            false,
             false,
         ))
     }
@@ -1491,6 +1598,7 @@ impl CBORDecoder {
             container,
             DisplayName::String("set"),
             false,
+            false,
         ))
     }
 }
@@ -1510,6 +1618,7 @@ impl CBORDecoder {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        strict = false,
     ))]
     pub fn new(
         py: Python<'_>,
@@ -1523,6 +1632,7 @@ impl CBORDecoder {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        strict: bool,
     ) -> PyResult<Self> {
         Self::new_internal(
             py,
@@ -1537,6 +1647,7 @@ impl CBORDecoder {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            strict,
         )
     }
 
@@ -1558,6 +1669,8 @@ impl CBORDecoder {
             self.available_bytes = 0;
             self.read_position = 0;
             self.buffer = None;
+            self.position = 0;
+            self.key_captures.clear();
             Ok(())
         } else {
             raise_exc_from(
@@ -1656,6 +1769,7 @@ impl CBORDecoder {
             self.available_bytes = amount_read - amount;
             let new_buffer = new_bytes.as_bytes()[..amount].to_vec();
             self.buffer = Some(new_bytes.unbind());
+            self.note_consumed(&new_buffer);
             Ok(new_buffer)
         } else if self.available_bytes < amount {
             // Combine the remnants of the partial buffer with new data read from the file
@@ -1667,6 +1781,7 @@ impl CBORDecoder {
             self.buffer = Some(new_bytes.unbind());
             self.available_bytes = amount_read - needed_bytes;
             self.read_position = needed_bytes;
+            self.note_consumed(&concatenated_buffer);
             Ok(concatenated_buffer)
         } else {
             // Return a slice from the existing bytes object
@@ -1675,6 +1790,7 @@ impl CBORDecoder {
                 .to_vec();
             self.available_bytes -= amount;
             self.read_position += amount;
+            self.note_consumed(&vec);
             Ok(vec)
         }
     }
@@ -1687,7 +1803,20 @@ impl CBORDecoder {
     /// :raises CBORDecodeError: if there is any problem decoding the stream
     #[pyo3(signature = (*, immutable = false))]
     pub fn decode<'py>(&mut self, py: Python<'py>, immutable: bool) -> PyResult<Bound<'py, PyAny>> {
+        self.decode_impl(py, immutable)
+            .map_err(|err| self.add_byte_offset(py, err))
+    }
+}
+
+impl CBORDecoder {
+    fn decode_impl<'py>(
+        &mut self,
+        py: Python<'py>,
+        immutable: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let mut frames: Vec<StackFrame> = Vec::new();
+        // Clear any captures left over from a previous decode() call that failed mid-key
+        self.key_captures.clear();
 
         fn add_frame<'a>(
             frames: &mut Vec<StackFrame<'a>>,
@@ -1746,6 +1875,29 @@ impl CBORDecoder {
                     ));
                 }
 
+                // In strict (canonical) mode, verify that each map key sorts strictly after
+                // the previous one in canonical order (encoded length first, then bytewise
+                // lexicographically), which also rejects duplicate keys
+                if let Some(state) = frame.key_order_state.as_mut() {
+                    if state.expecting_key {
+                        let key_bytes = self.key_captures.pop().unwrap_or_default();
+                        let out_of_order = state.previous_key.as_ref().is_some_and(|previous| {
+                            (key_bytes.len(), key_bytes.as_slice())
+                                <= (previous.len(), previous.as_slice())
+                        });
+                        if out_of_order {
+                            return Err(CBORDecodeError::new_err(
+                                "map keys are not in canonical order (keys must be unique and \
+                                sorted by encoded length, then bytewise lexicographically)",
+                            ));
+                        }
+                        state.previous_key = Some(key_bytes);
+                        state.expecting_key = false;
+                    } else {
+                        state.expecting_key = true;
+                    }
+                }
+
                 if let Some(decoder_callback) = frame.decoder_callback.as_mut() {
                     decoder_callback(previous_value, frame.immutable)
                         .map_err(|e| wrap_exception(py, e, &frame.typename))
@@ -1761,6 +1913,15 @@ impl CBORDecoder {
                     panic!("no decoder callback, shareable index or string namespace");
                 }
             } else {
+                // If the next item is a map key in strict (canonical) mode, start capturing
+                // its raw encoded bytes for the canonical ordering check
+                if let Some(state) = frames
+                    .last()
+                    .and_then(|frame| frame.key_order_state.as_ref())
+                    && state.expecting_key
+                {
+                    self.key_captures.push(Vec::new());
+                }
                 let (major_type, subtype) = self.read_major_and_subtype(py)?;
                 match major_type {
                     0 => self.decode_uint(py, subtype),
@@ -1798,6 +1959,7 @@ impl CBORDecoder {
                     container,
                     typename,
                     accepts_break,
+                    track_key_order,
                 )) => {
                     // A container replaces the shareable marker frame and is registered right
                     // away so cyclic references can resolve to it
@@ -1824,6 +1986,14 @@ impl CBORDecoder {
                             typename,
                             contains_string_namespace: false,
                             accepts_break,
+                            key_order_state: if track_key_order {
+                                Some(KeyOrderState {
+                                    expecting_key: true,
+                                    previous_key: None,
+                                })
+                            } else {
+                                None
+                            },
                             max_child_depth: 0,
                         },
                     )?;
@@ -1866,6 +2036,7 @@ impl CBORDecoder {
                             typename: DisplayName::String("string namespace"),
                             contains_string_namespace: true,
                             accepts_break: false,
+                            key_order_state: None,
                             max_child_depth: 0,
                         },
                     )?;
@@ -1920,6 +2091,7 @@ impl CBORDecoder {
                             typename: DisplayName::String("shareable value"),
                             contains_string_namespace: false,
                             accepts_break: false,
+                            key_order_state: None,
                             max_child_depth: 0,
                         },
                     )?;

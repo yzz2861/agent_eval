@@ -5,6 +5,17 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added the ``strict`` parameter to :class:`CBORDecoder`, :func:`load` and :func:`loads` which,
+  when enabled, requires the input to be in canonical form (RFC 8949 section 4.2):
+  non-shortest-form integers and lengths, indefinite-length items, duplicate map keys and map
+  keys not sorted in canonical order are rejected with a :exc:`CBORDecodeError`. This prevents
+  attackers from using alternate encodings of the same semantic value to bypass byte-level
+  checksums or signatures
+- Decoding errors now include the byte offset in the input stream at which the error was
+  detected
+
 **6.3.0** (2026-11-13)
 
 - Added the ``--format=json`` CLI option to encode JSON files or standard input as binary CBOR

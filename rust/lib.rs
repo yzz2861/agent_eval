@@ -96,6 +96,11 @@ mod _cbor2 {
     ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
     ///     anything other than a text string or a byte string (this prevents attackers from
     ///     crafting maps or sets with colliding hashes as a denial-of-service attack)
+    /// :param strict:
+    ///     if :data:`True`, require the input to be in canonical form (RFC 8949 section 4.2):
+    ///     raise a :exc:`CBORDecodeError` when encountering non-shortest-form integers or
+    ///     lengths, indefinite-length items, duplicate map keys, or map keys that are not
+    ///     sorted in canonical order
     /// :param immutable:
     ///     if :data:`True`, return immutable objects (e.g. :class:`frozenset` and :class:`tuple`)
     ///     instead of mutable objects (e.g. :class:`list` and :class:`dict`)
@@ -116,6 +121,7 @@ mod _cbor2 {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        strict = false,
         immutable = false,
     ))]
     fn load<'py>(
@@ -130,6 +136,7 @@ mod _cbor2 {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        strict: bool,
         immutable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let mut decoder = CBORDecoder::new(
@@ -144,6 +151,7 @@ mod _cbor2 {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            strict,
         )?;
         decoder.decode(py, immutable)
     }
@@ -183,6 +191,11 @@ mod _cbor2 {
     ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
     ///     anything other than a text string or a byte string (this prevents attackers from
     ///     crafting maps or sets with colliding hashes as a denial-of-service attack)
+    /// :param strict:
+    ///     if :data:`True`, require the input to be in canonical form (RFC 8949 section 4.2):
+    ///     raise a :exc:`CBORDecodeError` when encountering non-shortest-form integers or
+    ///     lengths, indefinite-length items, duplicate map keys, or map keys that are not
+    ///     sorted in canonical order
     /// :param immutable:
     ///     if :data:`True`, return immutable objects (e.g. :class:`frozenset` and :class:`tuple`)
     ///     instead of mutable objects (e.g. :class:`list` and :class:`dict`)
@@ -202,6 +215,7 @@ mod _cbor2 {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        strict = false,
         immutable = false,
     ))]
     fn loads<'py>(
@@ -215,6 +229,7 @@ mod _cbor2 {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        strict: bool,
         immutable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = if let Ok(bytes) = data.cast::<PyBytes>() {
@@ -243,6 +258,7 @@ mod _cbor2 {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            strict,
         )?;
         decoder.decode(py, immutable)
     }

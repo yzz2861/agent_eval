@@ -131,6 +131,7 @@ class CBORDecoder:
         allow_indefinite: bool = ...,
         allow_duplicate_keys: bool = ...,
         strict_hashable_types: bool = ...,
+        strict: bool = ...,
     ) -> Self: ...
 
     # Properties
@@ -144,6 +145,8 @@ class CBORDecoder:
     def allow_duplicate_keys(self) -> bool: ...
     @property
     def strict_hashable_types(self) -> bool: ...
+    @property
+    def strict(self) -> bool: ...
     def decode(self, *, immutable: bool = ...) -> Any: ...
     def read(self, amount: int, /) -> bytes: ...
 
@@ -224,6 +227,7 @@ def load(
     allow_indefinite: bool = ...,
     allow_duplicate_keys: bool = ...,
     strict_hashable_types: bool = ...,
+    strict: bool = ...,
     immutable: bool = ...,
 ) -> Any: ...
 def loads(
@@ -238,6 +242,7 @@ def loads(
     allow_indefinite: bool = ...,
     allow_duplicate_keys: bool = ...,
     strict_hashable_types: bool = ...,
+    strict: bool = ...,
     immutable: bool = ...,
 ) -> Any: ...
 def shareable_encoder(
