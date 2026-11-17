@@ -1938,6 +1938,56 @@ class TestXAdES(unittest.TestCase, LoadExampleKeys):
             else:
                 XAdESVerifier().verify(doc, **kwargs)
 
+    def _load_timestamped_signature(self, name):
+        with open(os.path.join(os.path.dirname(__file__), "xades", name), "rb") as fh:
+            doc = etree.parse(fh)
+        cert = doc.find(".//{http://www.w3.org/2000/09/xmldsig#}X509Certificate").text
+        expect_config = xades_sha1_ok
+        verification_time = get_cert_midpoint_verification_time(cert)
+        if verification_time is not None:
+            expect_config = replace(expect_config, verification_time=verification_time)
+        kwargs = {"x509_cert": cert, "expect_references": 2, "expect_config": expect_config}
+        return doc, kwargs
+
+    def test_xades_signature_timestamp_verification(self):
+        for name in ("xades-extended-t.xml", "xades-lta-valid.xml", "xades-with-multiple-signaturetimestamps.xml"):
+            doc, kwargs = self._load_timestamped_signature(name)
+            XAdESVerifier().verify(doc, **kwargs)
+
+    def test_xades_signature_timestamp_tampered(self):
+        doc, kwargs = self._load_timestamped_signature("xades-extended-t.xml")
+        ets_node = doc.find(".//xades:SignatureTimeStamp/xades:EncapsulatedTimeStamp", namespaces)
+        token = bytearray(b64decode(ets_node.text))
+        token[-1] ^= 0xFF  # Corrupt the CMS signature at the end of the token
+        ets_node.text = b64encode(bytes(token)).decode()
+        with self.assertRaises(InvalidSignature):
+            XAdESVerifier().verify(doc, **kwargs)
+
+    def test_xades_signature_timestamp_replayed(self):
+        # A timestamp token replayed from another signature does not cover this SignatureValue
+        doc, kwargs = self._load_timestamped_signature("xades-lta-valid.xml")
+        donor_doc, _ = self._load_timestamped_signature("xades-extended-t.xml")
+        donor_token = donor_doc.find(".//xades:SignatureTimeStamp/xades:EncapsulatedTimeStamp", namespaces).text
+        doc.find(".//xades:SignatureTimeStamp/xades:EncapsulatedTimeStamp", namespaces).text = donor_token
+        with self.assertRaises(InvalidDigest):
+            XAdESVerifier().verify(doc, **kwargs)
+
+    def test_xades_signature_timestamp_stripped(self):
+        # Emptying the encapsulated token is rejected
+        doc, kwargs = self._load_timestamped_signature("xades-extended-t.xml")
+        doc.find(".//xades:SignatureTimeStamp/xades:EncapsulatedTimeStamp", namespaces).text = ""
+        with self.assertRaisesRegex(InvalidInput, "may have been stripped"):
+            XAdESVerifier().verify(doc, **kwargs)
+
+        # Removing the timestamp property altogether is rejected when a timestamp is required
+        doc, kwargs = self._load_timestamped_signature("xades-extended-t.xml")
+        unsigned_properties = doc.find(".//xades:UnsignedProperties", namespaces)
+        unsigned_properties.getparent().remove(unsigned_properties)
+        XAdESVerifier().verify(doc, **kwargs)
+        kwargs["expect_config"] = replace(kwargs["expect_config"], require_timestamp=True)
+        with self.assertRaisesRegex(InvalidInput, "Expected to find a xades:SignatureTimeStamp"):
+            XAdESVerifier().verify(doc, **kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

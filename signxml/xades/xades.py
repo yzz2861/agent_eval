@@ -34,9 +34,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from lxml.etree import SubElement, _Element
 
 from .. import SignatureConfiguration, VerifyResult, XMLSignatureProcessor, XMLSigner, XMLVerifier
-from ..algorithms import DigestAlgorithm, digest_algorithm_implementations
+from ..algorithms import CanonicalizationMethod, DigestAlgorithm, digest_algorithm_implementations
 from ..exceptions import InvalidDigest, InvalidInput
 from ..util import SigningSettings, add_pem_header, ds_tag, ensure_str, namespaces, xades_tag
+from ._timestamps import verify_timestamp_token
 
 if TYPE_CHECKING:
     from typing import Callable, Concatenate, ParamSpec
@@ -64,6 +65,14 @@ class XAdESSignatureConfiguration(SignatureConfiguration):
     By default, XAdES signatures carry 3 references (the original data reference, the KeyInfo (X.509 certificate)
     reference, and the signed properties reference). Signatures can carry more references if more data or extensions
     are present. Specify the expected number of references here.
+    """
+
+    require_timestamp: bool = False
+    """
+    If ``True``, the signature is required to carry a **SignatureTimeStamp** element containing a valid RFC 3161
+    timestamp token over the **ds:SignatureValue** element. Timestamp tokens that are present in the signature are
+    always verified; this setting additionally rejects signatures from which the timestamp has been stripped
+    entirely.
     """
 
 
@@ -322,10 +331,38 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
 
     expect_signature_policy: XAdESSignaturePolicy | None
 
-    # TODO: document/support SignatureTimeStamp / timestamp attestation
-    # SignatureTimeStamp is required by certain profiles but is an unsigned property
     def _verify_signing_time(self, verify_result: VerifyResult):
         pass
+
+    def _verify_timestamps(self, verify_result: VerifyResult):
+        signature_timestamp_nodes = self._findall(
+            verify_result.signature_xml,
+            "ds:Object/xades:QualifyingProperties/xades:UnsignedProperties"
+            "/xades:UnsignedSignatureProperties/xades:SignatureTimeStamp",
+        )
+        if not signature_timestamp_nodes:
+            if isinstance(self.config, XAdESSignatureConfiguration) and self.config.require_timestamp:
+                raise InvalidInput("Expected to find a xades:SignatureTimeStamp element in the signature")
+            return
+        signature_value = self._find(verify_result.signature_xml, "ds:SignatureValue")
+        for signature_timestamp in signature_timestamp_nodes:
+            c14n_method_node = signature_timestamp.find("ds:CanonicalizationMethod", namespaces=namespaces)
+            if c14n_method_node is not None:
+                c14n_alg = CanonicalizationMethod(c14n_method_node.get("Algorithm"))
+            else:
+                c14n_alg = CanonicalizationMethod.CANONICAL_XML_1_0
+            ets_node = signature_timestamp.find("xades:EncapsulatedTimeStamp", namespaces=namespaces)
+            if ets_node is None or not (ets_node.text and ets_node.text.strip()):
+                raise InvalidInput(
+                    "Expected to find an encapsulated timestamp token in xades:SignatureTimeStamp; "
+                    "the timestamp may have been stripped"
+                )
+            try:
+                token = b64decode(ets_node.text)
+            except ValueError:
+                raise InvalidInput("Unable to base64-decode the encapsulated timestamp token")
+            signature_value_c14n = self._c14n(signature_value, algorithm=c14n_alg)
+            verify_timestamp_token(token, signature_value_c14n)
 
     def _get_cert_public_key(self, cert: x509.Certificate) -> bytes:
         return cert.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
@@ -440,6 +477,11 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
         is a wrapper around :meth:`signxml.XMLVerifier.verify`; see its documentation for more details and arguments it
         supports.
 
+        Any **SignatureTimeStamp** unsigned properties present in the signature are verified offline: the
+        encapsulated RFC 3161 timestamp token must carry a message imprint covering the **ds:SignatureValue**
+        element, a valid CMS signature, and a valid TSA certificate chain. To require a timestamp to be present,
+        set ``require_timestamp`` in the :class:`XAdESSignatureConfiguration` passed via **expect_config**.
+
         :param expect_signature_policy:
             If you need to assert that the verified XAdES signature carries specific data in the
             **SignaturePolicyIdentifier** element, use this parameter to pass a :class:`XAdESSignaturePolicy` object
@@ -460,12 +502,14 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
             if verify_result.signed_xml is None:
                 continue
             if verify_result.signed_xml.tag == xades_tag("SignedProperties"):
+                signed_properties = self._verify_signed_properties(verify_result)
+                self._verify_timestamps(verify_result)
                 verify_results[i] = XAdESVerifyResult(
                     signed_data=verify_result.signed_data,
                     signed_xml=verify_result.signed_xml,
                     signature_xml=verify_result.signature_xml,
                     signature_key=verify_result.signature_key,
-                    signed_properties=self._verify_signed_properties(verify_result),
+                    signed_properties=signed_properties,
                 )
                 break
         else:
