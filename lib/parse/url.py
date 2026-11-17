@@ -16,7 +16,9 @@
 #
 #  Author: Mauro Soria
 
-from urllib.parse import urljoin, urlsplit, urlunsplit
+import re
+
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from lib.core.settings import STANDARD_PORTS
 from lib.utils.common import lstrip_once
@@ -65,6 +67,64 @@ def clean_path(path: str, keep_queries: bool = False, keep_fragment: bool = Fals
         path = path.split("?")[0]
 
     return path
+
+
+_PERCENT_ENCODED_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _normalize_percent_encoding(path: str) -> str:
+    """Normalize percent-encoded triplets without merging distinct resources.
+
+    Encodings of unreserved characters are decoded (e.g. ``%61`` -> ``a``),
+    while reserved characters keep their encoding with uppercase hex digits
+    (e.g. ``%2f`` -> ``%2F``). This collapses ``%61dmin``/``admin`` and
+    ``%7euser``/``~user`` but never turns an encoded slash into a real one.
+    """
+
+    def decode_triplet(match: re.Match) -> str:
+        character = unquote(match.group(0))
+        if (character.isascii() and character.isalnum()) or character in "-._~":
+            return character
+        return match.group(0).upper()
+
+    return _PERCENT_ENCODED_RE.sub(decode_triplet, path)
+
+
+def canonical_path(path: str, *, keep_trailing_slash: bool = False) -> str:
+    """Return a canonical key for discovery/deduplication of request paths.
+
+    Queries and fragments are dropped, percent-encoding is normalized, the
+    path is case-folded and a single trailing slash is removed by default.
+    The returned value is only a comparison key: request paths themselves are
+    not rewritten, so case- or encoding-sensitive servers keep working.
+    """
+    path = clean_path(path).lower()
+    path = _normalize_percent_encoding(path)
+
+    if not keep_trailing_slash and len(path) > 1:
+        path = path.rstrip("/")
+        if not path:
+            path = "/"
+
+    return path
+
+
+def canonical_url(url: str, *, keep_trailing_slash: bool = False) -> str:
+    """Return a canonical key for an absolute URL or origin-relative path."""
+    origin = _origin(url)
+    if origin is None:
+        return canonical_path(
+            parse_path(url), keep_trailing_slash=keep_trailing_slash
+        )
+
+    scheme, hostname, port = origin
+    origin_key = f"{scheme}://{hostname}"
+    if port is not None and port != STANDARD_PORTS.get(scheme):
+        origin_key += f":{port}"
+
+    return origin_key + "/" + canonical_path(
+        parse_path(url), keep_trailing_slash=keep_trailing_slash
+    ).lstrip("/")
 
 
 def parse_path(value: str) -> str:

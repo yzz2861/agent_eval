@@ -15,7 +15,8 @@ from ..core.task_spec import TaskSpec
 class RunCheckpoint:
     """Cumulative values whose lifetime extends beyond the current target.
 
-    passed_urls contains scheduled directory URLs, not completed target IDs.
+    passed_urls contains canonical scheduled directory URLs, not completed
+    target IDs.
     The resume-presentation flag retains its existing run-wide lifetime.
     """
 

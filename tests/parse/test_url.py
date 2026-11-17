@@ -21,6 +21,8 @@ from unittest import TestCase
 from lib.core.settings import DUMMY_URL
 from lib.parse.url import (
     append_query_string,
+    canonical_path,
+    canonical_url,
     clean_path,
     ensure_trailing_path_slash,
     parse_path,
@@ -109,3 +111,93 @@ class TestURLParsers(TestCase):
         self.assertEqual(same_origin_path(base_url, "admin/"), "admin/")
         self.assertEqual(same_origin_path(base_url, "/admin/"), "admin/")
         self.assertIsNone(same_origin_path(base_url, "//other.example/admin/"))
+
+
+class TestCanonicalPath(TestCase):
+    def test_percent_encoding_variants_collapse(self):
+        # Encoded unreserved characters decode to their literal form.
+        self.assertEqual(canonical_path("%61dmin"), "admin")
+        self.assertEqual(canonical_path("%61%64%6din"), "admin")
+        self.assertEqual(
+            canonical_path("%7euser/profile"),
+            canonical_path("~user/profile"),
+        )
+        # Mixed-case hex triplets normalize to uppercase hex digits.
+        self.assertEqual(canonical_path("a%2fb"), canonical_path("a%2Fb"))
+        self.assertEqual(canonical_path("q%3fx"), canonical_path("q%3Fx"))
+
+    def test_encoded_separators_keep_distinct_resources(self):
+        # An encoded slash must never become a path separator.
+        self.assertNotEqual(canonical_path("a%2Fb"), canonical_path("a/b"))
+        self.assertNotEqual(canonical_path("q%3Fa"), canonical_path("q/a"))
+
+    def test_case_folding_keeps_reserved_hex_triplets_uppercase(self):
+        self.assertEqual(canonical_path("Admin%2f"), "admin%2F")
+        self.assertEqual(canonical_path("caf%c3%a9"), "caf%C3%A9")
+
+    def test_trailing_slash_variants_collapse(self):
+        self.assertEqual(canonical_path("admin/"), canonical_path("admin"))
+        self.assertEqual(
+            canonical_path("nested/deep/"),
+            canonical_path("nested/deep"),
+        )
+        # Multiple trailing slashes collapse as well.
+        self.assertEqual(canonical_path("admin//"), canonical_path("admin"))
+        # Root stays root.
+        self.assertEqual(canonical_path("/"), "/")
+
+    def test_case_variants_collapse(self):
+        self.assertEqual(canonical_path("Admin/Users"), canonical_path("admin/users"))
+        self.assertEqual(
+            canonical_path("API/v1/EntrIES"),
+            canonical_path("api/v1/entries"),
+        )
+
+    def test_queries_and_fragments_are_ignored(self):
+        self.assertEqual(canonical_path("admin?a=1#frag"), "admin")
+        self.assertEqual(
+            canonical_path("Admin/?x=2", keep_trailing_slash=True),
+            "admin/",
+        )
+
+    def test_keep_trailing_slash_preserves_directory_semantics(self):
+        self.assertEqual(
+            canonical_path("Admin/", keep_trailing_slash=True),
+            "admin/",
+        )
+        self.assertEqual(
+            canonical_path("admin", keep_trailing_slash=True),
+            "admin",
+        )
+
+
+class TestCanonicalURL(TestCase):
+    def test_origin_is_case_insensitive_and_default_ports_vanish(self):
+        self.assertEqual(
+            canonical_url("https://EXAMPLE.TEST:443/Admin/"),
+            canonical_url("https://example.test/admin"),
+        )
+        self.assertEqual(
+            canonical_url("http://Example.Test:80/a/"),
+            canonical_url("http://example.test/a"),
+        )
+
+    def test_non_default_ports_remain_distinct(self):
+        self.assertNotEqual(
+            canonical_url("https://example.test:8443/admin"),
+            canonical_url("https://example.test/admin"),
+        )
+
+    def test_path_variants_share_one_canonical_key(self):
+        variants = (
+            "https://example.test/Admin/",
+            "https://example.test/admin",
+            "https://example.test/%61dmin/",
+            "https://example.test/ADMIN//",
+        )
+        keys = {canonical_url(value) for value in variants}
+        self.assertEqual(keys, {"https://example.test/admin"})
+
+    def test_origin_relative_input_is_treated_as_a_path(self):
+        self.assertEqual(canonical_url("/Admin/"), "admin")
+        self.assertEqual(canonical_url("/Admin/"), canonical_path("admin"))

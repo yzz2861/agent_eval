@@ -28,8 +28,9 @@ class ScanRunState:
     def __init__(self, targets: Iterable[str] = ()) -> None:
         self._position = _TaskPosition(tuple(TaskSpec(target) for target in targets))
         # These values retain their historical run-wide scope. In particular,
-        # passed_urls records scheduled directory URLs, not successful targets;
-        # duplicate targets must not reset it or the completed-job/error totals.
+        # passed_urls records the canonical keys of scheduled directory URLs,
+        # not successful targets; duplicate targets must not reset it or the
+        # completed-job/error totals.
         self.passed_urls: set[str] = set()
         self.jobs_processed = 0
         self.errors = 0

@@ -79,6 +79,8 @@ from lib.core.settings import (
 from lib.core.wordlist_template import generate_backup_paths
 from lib.parse.rawrequest import parse_raw
 from lib.parse.url import (
+    canonical_path,
+    canonical_url,
     clean_path,
     ensure_trailing_path_slash,
     same_origin_path,
@@ -1191,24 +1193,32 @@ class Controller:
         if self._is_excluded_subdir(path):
             return
 
-        url = self.target_progress.url + path
+        canonical_key = canonical_url(self.target_progress.url + path)
         depth_limit = self.config.discovery.recursion_depth
 
         if (
             path.count("/") - self.target_progress.base_path.count("/") > depth_limit > 0
-            or url in self.run_state.passed_urls
+            or canonical_key in self.run_state.passed_urls
         ):
             return
 
         self.target_progress.directories.append(path)
-        self.run_state.passed_urls.add(url)
+        self.run_state.passed_urls.add(canonical_key)
 
     def _is_excluded_subdir(self, path: str) -> bool:
-        resource_path = path.split("?", 1)[0].lstrip("/")
-        return any(
-            resource_path.startswith(subdir) or f"/{subdir}" in resource_path
-            for subdir in self.config.discovery.exclude_subdirs
-        )
+        segments = [segment for segment in canonical_path(path).split("/") if segment]
+        for subdir in self.config.discovery.exclude_subdirs:
+            excluded = [
+                segment
+                for segment in canonical_path(subdir).split("/")
+                if segment
+            ]
+            if not excluded:
+                continue
+            for index in range(len(segments) - len(excluded) + 1):
+                if segments[index:index + len(excluded)] == excluded:
+                    return True
+        return False
 
     @locked
     def recur(self, path: str) -> list[str]:
@@ -1234,7 +1244,15 @@ class Controller:
         return self.target_progress.directories[dirs_count:]
 
     def recur_for_redirect(self, path: str, redirect_path: str) -> list[str]:
-        if redirect_path == path + "/":
-            return self.recur(redirect_path)
+        # Compare resources, not their spelling: a 301/302 to the same
+        # resource with a trailing slash, different percent-encoding or case
+        # must still trigger recursion, while a redirect to another resource
+        # must not. Only a directory-style redirect (trailing slash) recurs.
+        target = clean_path(redirect_path)
+        if (
+            target.endswith("/")
+            and canonical_path(target) == canonical_path(path)
+        ):
+            return self.recur(target)
 
         return []

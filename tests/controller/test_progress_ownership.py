@@ -73,7 +73,7 @@ class TestProgressOwnership(TestCase):
                     ("http://first.test/", "base/"), ("http://first.test/", "base/"),
                     ("http://second.test/", "other/"),
                 ])
-                self.assertEqual(controller.run_state.passed_urls, {"http://first.test/base/", "http://second.test/other/"})
+                self.assertEqual(controller.run_state.passed_urls, {"http://first.test/base", "http://second.test/other"})
                 self.assertEqual(controller.run_state.jobs_processed, 5)
                 self.assertEqual(controller.run_state.errors, 7)
                 self.assertEqual(controller.run_state.consecutive_errors, 2)
