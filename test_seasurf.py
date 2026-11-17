@@ -3,8 +3,10 @@ from __future__ import with_statement
 import mock
 import unittest
 
+from urllib.parse import urlsplit
+
 from flask import Flask, render_template_string, request
-from flask_seasurf import SeaSurf, REASON_NO_REQUEST
+from flask_seasurf import SeaSurf, REASON_NO_REQUEST, _same_origin
 from werkzeug.exceptions import Forbidden
 from werkzeug.http import parse_cookie
 
@@ -817,6 +819,7 @@ class SeaSurfTestCaseGenerateNewToken(BaseTestCase):
                           'CSRF cookie should have been set to the new token')
 
 
+# placeholder marker for insertion (test)
 def suite():
     suite = unittest.TestSuite()
 

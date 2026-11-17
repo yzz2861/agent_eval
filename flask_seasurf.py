@@ -54,20 +54,49 @@ REASON_BAD_TOKEN = u'CSRF token missing or incorrect.'
 REASON_NO_REQUEST = u'CSRF validation can only happen within a request context.'
 
 
+def _origin_tuple(url):
+    '''
+    Parse a URL and return a normalized origin tuple of
+    ``(scheme, hostname, port)``.
+
+    The scheme and hostname are lower-cased so that origin comparisons are
+    case-insensitive, while an explicit default port is retained so that
+    requests targeting a non-default port cannot match the default origin.
+
+    :param url: The URL to extract the origin from.
+    '''
+    parsed = urlparse.urlsplit(url)
+    return parsed.scheme.lower(), parsed.hostname, parsed.port
+
+
 def _same_origin(url1, url2):
     '''
-    Determine if two URLs share the same origin.
+    Determine if two URLs share the same origin, i.e. their scheme, hostname
+    and port all match. Schemes and hostnames are compared case-insensitively
+    while ports (including explicit default ports) must match exactly.
 
     :param url1: The first URL to compare.
     :param url2: The second URL to compare.
     '''
     try:
-        p1, p2 = urlparse.urlparse(url1), urlparse.urlparse(url2)
-        origin1 = p1.scheme, p1.hostname, p1.port
-        origin2 = p2.scheme, p2.hostname, p2.port
-        return origin1 == origin2
+        return _origin_tuple(url1) == _origin_tuple(url2)
     except ValueError:
         return False
+
+
+def _path_under_prefix(path, prefix):
+    '''
+    Determine if ``path`` is equal to ``prefix`` or located beneath it.
+    A prefix of ``/foo`` matches ``/foo`` and ``/foo/bar`` but not ``/foobar``.
+
+    :param path: The request path to check.
+    :param prefix: The path prefix the path must be located under.
+    '''
+    if not prefix:
+        return True
+    if path == prefix:
+        return True
+    return path.startswith(prefix if prefix.endswith('/') else prefix + '/')
 
 
 class SeaSurf(object):
@@ -149,6 +178,8 @@ class SeaSurf(object):
         self._csrf_domain = app.config.get('CSRF_COOKIE_DOMAIN')
         self._csrf_samesite = app.config.get('CSRF_COOKIE_SAMESITE', 'Lax')
         self._check_referer = app.config.get('CSRF_CHECK_REFERER', True)
+        self._trusted_origins = app.config.get('CSRF_TRUSTED_ORIGINS', [])
+        self._proxy_prefix = app.config.get('CSRF_PROXY_PREFIX', None)
         self._type = app.config.get('SEASURF_INCLUDE_OR_EXEMPT_VIEWS',
                                     'exempt')
 
@@ -300,26 +331,7 @@ class SeaSurf(object):
         server_csrf_token = session.get(self._csrf_name, None)
 
         if request.is_secure and self._check_referer:
-            referer = request.headers.get('Referer')
-            if referer is None:
-                error = (REASON_NO_REFERER, request.path)
-                error = u'Forbidden ({0}): {1}'.format(*error)
-                current_app.logger.warning(error)
-                raise Forbidden(description=REASON_NO_REFERER)
-
-            # By setting the Access-Control-Allow-Origin header, browsers
-            # will let you send cross-domain AJAX requests so if there is
-            # an Origin header, the browser has already decided that it
-            # trusts this domain otherwise it would have blocked the
-            # request before it got here.
-            allowed_referer = request.headers.get('Origin') or request.url_root
-            if not _same_origin(referer, allowed_referer):
-                error = REASON_BAD_REFERER.format(referer, allowed_referer)
-                description = error
-                error = (error, request.path)
-                error = u'Forbidden ({0}): {1}'.format(*error)
-                current_app.logger.warning(error)
-                raise Forbidden(description=description)
+            self._validate_referer()
 
         request_csrf_token = request.form.get(self._csrf_name, '')
         if not request_csrf_token:
@@ -343,6 +355,98 @@ class SeaSurf(object):
             error = u'Forbidden ({0}): {1}'.format(*error)
             current_app.logger.warning(error)
             raise Forbidden(description=REASON_BAD_TOKEN)
+
+    def _validate_referer(self):
+        '''
+        Enforce a strict Referer policy for secure (HTTPS) requests.
+
+        A request without a Referer header, or whose Referer is not
+        same-origin with the application (or one of the configured trusted
+        origins / proxy prefixes), is rejected with a :class:`Forbidden`
+        error. This method is only invoked for secure requests, so plain
+        HTTP requests keep their historical behavior.
+        '''
+        referer = request.headers.get('Referer')
+        if not referer:
+            error = (REASON_NO_REFERER, request.path)
+            error = u'Forbidden ({0}): {1}'.format(*error)
+            current_app.logger.warning(error)
+            raise Forbidden(description=REASON_NO_REFERER)
+
+        if not self._is_trusted_referer(referer):
+            allowed_origins = self._allowed_referer_origins()
+            error = REASON_BAD_REFERER.format(referer, allowed_origins)
+            description = error
+            error = (error, request.path)
+            error = u'Forbidden ({0}): {1}'.format(*error)
+            current_app.logger.warning(error)
+            raise Forbidden(description=description)
+
+    def _allowed_referer_origins(self):
+        '''
+        Build the list of origins that a valid Referer may originate from.
+
+        The application's own origin is always allowed, followed by any
+        origins explicitly trusted through ``CSRF_TRUSTED_ORIGINS``. When an
+        ``Origin`` header is present it is included as well for backwards
+        compatibility, since the browser has already validated it before
+        allowing a cross-domain AJAX request to reach the application.
+        '''
+        allowed_origins = [request.url_root]
+
+        origin_header = request.headers.get('Origin')
+        if origin_header:
+            allowed_origins.append(origin_header)
+
+        allowed_origins.extend(self._trusted_origins)
+        return allowed_origins
+
+    def _is_trusted_referer(self, referer):
+        '''
+        Determine whether the given Referer is acceptable for the current
+        request. The Referer must share an origin with the application, an
+        ``Origin`` header or a configured trusted origin, or match the
+        configured proxy prefix.
+
+        :param referer: The Referer header value sent by the client.
+        '''
+        if self._referer_matches_proxy_prefix(referer):
+            return True
+
+        return any(_same_origin(referer, allowed)
+                   for allowed in self._allowed_referer_origins())
+
+    def _referer_matches_proxy_prefix(self, referer):
+        '''
+        Check the Referer against a reverse-proxy prefix configured via
+        ``CSRF_PROXY_PREFIX``.
+
+        The prefix may be an absolute URL (for example
+        ``https://external.example.com/app``), in which case both the origin
+        and the path prefix must match, or a bare path (for example
+        ``/app``), in which case only the path prefix is checked against the
+        application's own origin.
+
+        :param referer: The Referer header value sent by the client.
+        '''
+        if not self._proxy_prefix:
+            return False
+
+        prefix = self._proxy_prefix
+        if '://' not in prefix:
+            if not _same_origin(referer, request.url_root):
+                return False
+            prefix_origin = request.url_root
+            prefix_path = prefix
+        else:
+            prefix_origin = prefix
+            prefix_path = urlparse.urlsplit(prefix).path or ''
+
+        if not _same_origin(referer, prefix_origin):
+            return False
+
+        referer_path = urlparse.urlsplit(referer).path or '/'
+        return _path_under_prefix(referer_path, prefix_path)
 
     def generate_new_token(self):
         '''
