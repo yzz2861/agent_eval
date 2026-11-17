@@ -1074,11 +1074,13 @@ class TestJWS(unittest.TestCase):
         s.add_signature(A6_example['key2'], None,
                         A6_example['protected2'],
                         A6_example['header2'])
-        s.verify(A6_example['key1'])
-        s.verify(A6_example['key2'])
+        # A single key can only verify one of the two signatures, so the
+        # legacy "at least one" policy is used for these single-key checks
+        s.verify(A6_example['key1'], verify_all=False)
+        s.verify(A6_example['key2'], verify_all=False)
         sig = s.serialize()
-        s.deserialize(sig, A6_example['key1'])
-        s.deserialize(A6_serialized, A6_example['key2'])
+        s.deserialize(sig, A6_example['key1'], verify_all=False)
+        s.deserialize(A6_serialized, A6_example['key2'], verify_all=False)
         self.assertEqual(A6_example['jose_header'], s.jose_header)
 
     def test_A7(self):
@@ -1272,6 +1274,109 @@ class TestJWS(unittest.TestCase):
         s3 = jws.JWS()
         with self.assertRaises(JWKeyNotFound):
             s3.deserialize(serialized, ks_swapped)
+
+    def test_json_jws_requires_all_signatures_by_default(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        payload = b'JSON JWS all signatures must verify'
+
+        s = jws.JWS(payload=payload)
+        s.add_signature(key, protected={'alg': 'HS256', 'kid': 'one'})
+        s.add_signature(key, protected={'alg': 'HS256', 'kid': 'two'})
+
+        serialized = s.serialize()
+
+        # All signatures valid: default (strict) verification succeeds
+        good = jws.JWS()
+        good.deserialize(serialized, key)
+        self.assertTrue(good.is_valid)
+        self.assertEqual(good.payload, payload)
+
+        # Tamper with one of the signatures: the object must be rejected
+        tampered = json_decode(serialized)
+        raw_sig = bytearray(base64url_decode(
+            tampered['signatures'][0]['signature']))
+        raw_sig[0] ^= 0x01
+        tampered['signatures'][0]['signature'] = \
+            base64url_encode(bytes(raw_sig))
+        tampered_token = json_encode(tampered)
+
+        strict = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            strict.deserialize(tampered_token, key)
+        self.assertFalse(strict.is_valid)
+
+        # Legacy policy: one good signature is still accepted
+        lenient = jws.JWS()
+        lenient.deserialize(tampered_token, key, verify_all=False)
+        self.assertTrue(lenient.is_valid)
+        self.assertEqual(lenient.payload, payload)
+
+        # Explicit strict flag matches the default behavior
+        explicit = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            explicit.deserialize(tampered_token, key, verify_all=True)
+        self.assertFalse(explicit.is_valid)
+
+    def test_json_jws_rejects_duplicate_header_fields(self):
+        key = jws.JWK.generate(kty='oct', size=256)
+        payload = b'JSON JWS duplicate header fields'
+
+        # Building an object with duplicated fields is rejected
+        s = jws.JWS(payload=payload)
+        with self.assertRaises(jws.InvalidJWSObject):
+            s.add_signature(key,
+                            protected={'alg': 'HS256', 'kid': 'dup'},
+                            header={'kid': 'dup'})
+
+        # General JSON Serialization with a duplicated 'kid' field
+        protected = base64url_encode(json_encode({'alg': 'HS256'}))
+        sig = jws.JWS(payload=payload)
+        sig.add_signature(key, protected={'alg': 'HS256'})
+        signature = json_decode(sig.serialize())['signature']
+        general = json_encode({
+            'payload': base64url_encode(payload),
+            'signatures': [{
+                'protected': protected,
+                'header': {'alg': 'HS256'},
+                'signature': signature}]})
+
+        strict = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            strict.deserialize(general, key)
+        self.assertFalse(strict.is_valid)
+
+        # A duplicated field must never be silently ignored, even when
+        # the legacy (at least one signature) policy is requested
+        lenient = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            lenient.deserialize(general, key, verify_all=False)
+
+        # Flattened JSON Serialization is checked as well
+        flattened = json_encode({
+            'payload': base64url_encode(payload),
+            'protected': protected,
+            'header': {'alg': 'HS256'},
+            'signature': signature})
+        flat = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            flat.deserialize(flattened, key)
+        self.assertFalse(flat.is_valid)
+
+    def test_json_jws_rejects_empty_signatures_array(self):
+        token = json_encode({
+            'payload': base64url_encode(b'no signatures'),
+            'signatures': []})
+
+        # Rejected at deserialization time, no key is needed to tell
+        with self.assertRaises(jws.InvalidJWSObject):
+            jws.JWS().deserialize(token)
+
+        # The same condition is also enforced on direct verification
+        s = jws.JWS()
+        s.objects = {'payload': b'no signatures', 'signatures': []}
+        with self.assertRaises(jws.InvalidJWSSignature):
+            s.verify(jwk.JWK.generate(kty='oct', size=256))
+        self.assertFalse(s.is_valid)
 
 
 E_A1_plaintext = \

@@ -317,7 +317,8 @@ class JWS:
                                           ' Detached Payload provided')
         return op
 
-    def verify(self, key, alg=None, detached_payload=None):
+    def verify(self, key, alg=None, detached_payload=None,
+               verify_all=True):
         """Verifies a JWS token.
 
         :param key: A (:class:`jwcrypto.jwk.JWK`) verification or
@@ -327,6 +328,11 @@ class JWS:
             is known as it is provided with the JOSE Headers of the token.
         :param detached_payload: A detached payload to verify the signature
             against. Only valid for tokens that are not carrying a payload.
+        :param verify_all: When True (the default) all the signatures carried
+            by a JSON Serialization object must verify, and at least one
+            signature must be present. When False the legacy behavior is used
+            and the object is considered valid if at least one signature
+            verifies.
 
         :raises InvalidJWSSignature: if the verification fails.
         :raises InvalidJWSOperation: if a detached_payload is provided but
@@ -353,7 +359,10 @@ class JWS:
                 self.verifylog.append('Failed: [%s]' % repr(e))
 
         elif 'signatures' in obj:
+            if len(obj['signatures']) == 0:
+                raise InvalidJWSSignature('No signatures available')
             payload = self._get_obj_payload(obj, detached_payload)
+            verified = 0
             for o in obj['signatures']:
                 try:
                     self._verify(alg, key,
@@ -361,12 +370,17 @@ class JWS:
                                  o['signature'],
                                  o.get('protected', None),
                                  o.get('header', None))
-                    # Ok if at least one verifies
-                    obj['valid'] = True
+                    verified += 1
+                    # Ok if at least one verifies, unless the caller
+                    # requested that all signatures must verify
+                    if not verify_all:
+                        obj['valid'] = True
                 except Exception as e:  # pylint: disable=broad-except
                     if isinstance(e, JWKeyNotFound):
                         missingkey = True
                     self.verifylog.append('Failed: [%s]' % repr(e))
+            if verify_all and verified == len(obj['signatures']):
+                obj['valid'] = True
         else:
             raise InvalidJWSSignature('No signatures available')
 
@@ -402,7 +416,7 @@ class JWS:
         else:
             raise InvalidJWSObject('conflicting b64 values')
 
-    def deserialize(self, raw_jws, key=None, alg=None):
+    def deserialize(self, raw_jws, key=None, alg=None, verify_all=True):
         """Deserialize a JWS token.
 
         NOTE: Destroys any current status and tries to import the raw
@@ -418,6 +432,9 @@ class JWS:
          'kid' header (optional).
         :param alg: The signing algorithm (optional). Usually the algorithm
          is known as it is provided with the JOSE Headers of the token.
+        :param verify_all: If True (default) all signatures in a JSON
+         serialized JWS must verify successfully; if False verification
+         succeeds when at least one signature verifies.
 
         :raises InvalidJWSObject: if the raw object is an invalid JWS token.
         :raises InvalidJWSSignature: if the verification fails.
@@ -463,8 +480,13 @@ class JWS:
         except Exception as e:  # pylint: disable=broad-except
             raise InvalidJWSObject('Invalid format') from e
 
+        if o.get('signatures') == []:
+            raise InvalidJWSObject(
+                'A JSON JWS "signatures" array must contain at least one '
+                'signature')
+
         if key:
-            self.verify(key, alg)
+            self.verify(key, alg, verify_all=verify_all)
 
     def add_signature(self, key, alg=None, protected=None, header=None):
         """Adds a new signature to the object.

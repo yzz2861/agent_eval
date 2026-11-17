@@ -404,13 +404,16 @@ class Cookbook08JWSTests(unittest.TestCase):
         # random nonces every time a signature is generated.
         rsa_key = jwk.JWK(**RSA_Public_Key_3_3)
         ec_key = jwk.JWK(**EC_Public_Key_3_1)
-        s.deserialize(sig, rsa_key)
-        s.deserialize(sig, ec_key)
-        s.deserialize(sig, sym_key)
+        s.deserialize(sig, rsa_key, verify_all=False)
+        s.deserialize(sig, ec_key, verify_all=False)
+        s.deserialize(sig, sym_key, verify_all=False)
         # Just deserialize each example form
-        s.deserialize(json_encode(JWS_general_4_8_5), rsa_key)
-        s.deserialize(json_encode(JWS_general_4_8_5), ec_key)
-        s.deserialize(json_encode(JWS_general_4_8_5), sym_key)
+        s.deserialize(json_encode(JWS_general_4_8_5), rsa_key,
+                      verify_all=False)
+        s.deserialize(json_encode(JWS_general_4_8_5), ec_key,
+                      verify_all=False)
+        s.deserialize(json_encode(JWS_general_4_8_5), sym_key,
+                      verify_all=False)
 
 
 # 5.0
