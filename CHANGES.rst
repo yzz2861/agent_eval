@@ -5,6 +5,10 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Support identified key rotation by passing a dict of key ids to keys as
+    ``secret_key``. The key id is embedded in signed values so verification
+    can look up the exact key, and ``Signer.get_key_id`` can report which key
+    signed a value. Values without a key id remain valid.
 
 
 Version 2.2.0

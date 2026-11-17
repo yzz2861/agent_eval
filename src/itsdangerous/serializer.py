@@ -7,7 +7,9 @@ import typing as t
 from .encoding import want_bytes
 from .exc import BadPayload
 from .exc import BadSignature
+from .signer import _make_key_id_map
 from .signer import _make_keys_list
+from .signer import _TSecretKey
 from .signer import Signer
 
 if t.TYPE_CHECKING:
@@ -53,6 +55,9 @@ class Serializer(t.Generic[_TSerialized]):
 
     :param secret_key: The secret key to sign and verify with. Can be a
         list of keys, oldest to newest, to support key rotation.
+        Can also be a dict mapping a key id to each key, in which case
+        the key id is embedded in the signed value so that verification
+        and auditing can tell which key signed a value.
     :param salt: Extra key to combine with ``secret_key`` to distinguish
         signatures in different contexts.
     :param serializer: An object that provides ``dumps`` and ``loads``
@@ -74,6 +79,10 @@ class Serializer(t.Generic[_TSerialized]):
     .. versionchanged:: 2.0
         Added support for key rotation by passing a list to
         ``secret_key``.
+
+    .. versionchanged:: 2.3
+        Added support for identified key rotation by passing a dict of
+        key ids to ``secret_key``.
 
     .. versionchanged:: 2.0
         Removed the default SHA-512 fallback signer from
@@ -107,7 +116,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self: Serializer[str],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None = b"itsdangerous",
         serializer: None | _PDataSerializer[str] = None,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -123,7 +132,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self: Serializer[bytes],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None,
         serializer: _PDataSerializer[bytes],
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -139,7 +148,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self: Serializer[bytes],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None = b"itsdangerous",
         *,
         serializer: _PDataSerializer[bytes],
@@ -158,7 +167,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None,
         serializer: t.Any,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -174,7 +183,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None = b"itsdangerous",
         *,
         serializer: t.Any,
@@ -189,7 +198,7 @@ class Serializer(t.Generic[_TSerialized]):
 
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _TSecretKey,
         salt: str | bytes | None = b"itsdangerous",
         serializer: t.Any | None = None,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -206,6 +215,15 @@ class Serializer(t.Generic[_TSerialized]):
         #: This allows a key rotation system to keep a list of allowed
         #: keys and remove expired ones.
         self.secret_keys: list[bytes] = _make_keys_list(secret_key)
+
+        #: A map of key id to secret key, ordered oldest to newest, if
+        #: ``secret_key`` was given as a dict. ``None`` when key ids
+        #: are not used.
+        #:
+        #: .. versionadded:: 2.3
+        self.secret_key_map: dict[bytes, bytes] | None = _make_key_id_map(
+            secret_key
+        )
 
         if salt is not None:
             salt = want_bytes(salt)
@@ -282,7 +300,12 @@ class Serializer(t.Generic[_TSerialized]):
         if salt is None:
             salt = self.salt
 
-        return self.signer(self.secret_keys, salt=salt, **self.signer_kwargs)
+        secret_key: _TSecretKey = self.secret_keys
+
+        if self.secret_key_map is not None:
+            secret_key = self.secret_key_map
+
+        return self.signer(secret_key, salt=salt, **self.signer_kwargs)
 
     def iter_unsigners(self, salt: str | bytes | None = None) -> cabc.Iterator[Signer]:
         """Iterates over all signers to be tried for unsigning. Starts
