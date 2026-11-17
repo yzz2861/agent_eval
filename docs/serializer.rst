@@ -15,14 +15,14 @@ Use :meth:`~Serializer.dumps` to serialize and sign the data:
     from itsdangerous.serializer import Serializer
     s = Serializer("secret-key")
     s.dumps([1, 2, 3, 4])
-    b'[1, 2, 3, 4].r7R9RhGgDPvvWl3iNzLuIIfELmo'
+    b'[1, 2, 3, 4].85dbe15dr7R9RhGgDPvvWl3iNzLuIIfELmo'
 
 Use :meth:`~Serializer.loads` to verify the signature and deserialize
 the data.
 
 .. code-block:: python
 
-    s.loads('[1, 2, 3, 4].r7R9RhGgDPvvWl3iNzLuIIfELmo')
+    s.loads('[1, 2, 3, 4].85dbe15dr7R9RhGgDPvvWl3iNzLuIIfELmo')
     [1, 2, 3, 4]
 
 By default, data is serialized to JSON with the built-in :mod:`json`

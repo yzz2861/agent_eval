@@ -5,6 +5,12 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   ``Signer`` prepends a short key id to each signature, identifying the
+    key that produced it. ``unsign`` selects the matching key directly, and
+    falls back to a constant-time comparison against all keys when the id is
+    missing or unknown, so the timing does not reveal which key matched.
+    Retiring a key is done by removing it from the ``secret_key`` list once
+    everything signed with it has expired.
 
 
 Version 2.2.0

@@ -103,6 +103,12 @@ class Signer:
         Added support for key rotation by passing a list to
         ``secret_key``.
 
+    .. versionchanged:: 2.3
+        Signatures carry a short key id prefix identifying the key that
+        produced them. Verification selects the matching key directly,
+        falling back to a constant-time comparison against all keys when
+        the id is missing or unknown.
+
     .. versionchanged:: 0.18
         ``algorithm`` was added as an argument to the class constructor.
 
@@ -125,6 +131,14 @@ class Signer:
     #:
     #: .. versionadded:: 0.14
     default_key_derivation: str = "django-concat"
+
+    #: The length, in ASCII characters, of the key id that is prepended
+    #: to each signature. The id is a truncated SHA-256 hex digest of
+    #: the secret key. It is not secret, it only identifies which key
+    #: produced a signature.
+    #:
+    #: .. versionadded:: 2.3
+    key_id_length: int = 8
 
     def __init__(
         self,
@@ -179,6 +193,50 @@ class Signer:
         """
         return self.secret_keys[-1]
 
+    def get_key_id(self, secret_key: str | bytes | None = None) -> bytes:
+        """Returns the short identifier for the given key. The id is a
+        truncated SHA-256 hex digest of the key. It is not secret, it
+        only identifies which key produced a signature so verification
+        can select the correct key directly.
+
+        :param secret_key: A specific secret key to get the id for.
+            Defaults to the last item in :attr:`secret_keys`.
+
+        .. versionadded:: 2.3
+        """
+        if secret_key is None:
+            secret_key = self.secret_keys[-1]
+        else:
+            secret_key = want_bytes(secret_key)
+
+        digest = hashlib.sha256(secret_key).hexdigest()
+        return digest[: self.key_id_length].encode("ascii")
+
+    @property
+    def key_id(self) -> bytes:
+        """The id of the newest (last) entry in :attr:`secret_keys`.
+        This is prepended to new signatures.
+
+        .. versionadded:: 2.3
+        """
+        return self.get_key_id()
+
+    @property
+    def key_ids(self) -> list[bytes]:
+        """The ids of all keys in :attr:`secret_keys`, from oldest to
+        newest. Useful to inspect which keys are still accepted, for
+        example when retiring old keys.
+
+        .. versionadded:: 2.3
+        """
+        return [self.get_key_id(key) for key in self.secret_keys]
+
+    def _keys_by_id(self) -> dict[bytes, bytes]:
+        """Map each key's id to the key, for all keys in
+        :attr:`secret_keys`.
+        """
+        return {self.get_key_id(key): key for key in self.secret_keys}
+
     def derive_key(self, secret_key: str | bytes | None = None) -> bytes:
         """This method is called to derive the key. The default key
         derivation choices can be overridden here. Key derivation is not
@@ -217,7 +275,7 @@ class Signer:
         value = want_bytes(value)
         key = self.derive_key()
         sig = self.algorithm.get_signature(key, value)
-        return base64_encode(sig)
+        return self.key_id + base64_encode(sig)
 
     def sign(self, value: str | bytes) -> bytes:
         """Signs the given string."""
@@ -226,20 +284,34 @@ class Signer:
 
     def verify_signature(self, value: str | bytes, sig: str | bytes) -> bool:
         """Verifies the signature for the given value."""
+        value = want_bytes(value)
+        sig = want_bytes(sig)
+        key_id = sig[: self.key_id_length]
+        keys_by_id = self._keys_by_id()
+
+        if key_id in keys_by_id:
+            # The signature names a known key, only that key is tried.
+            secret_keys = [keys_by_id[key_id]]
+            sig = sig[self.key_id_length :]
+        else:
+            # Missing or unknown key id, fall back to trying every key
+            # from newest to oldest.
+            secret_keys = list(reversed(self.secret_keys))
+
         try:
             sig = base64_decode(sig)
         except Exception:
             return False
 
-        value = want_bytes(value)
+        # Compare against every candidate key without exiting early, so
+        # that the timing does not reveal which key, if any, matched.
+        matched = False
 
-        for secret_key in reversed(self.secret_keys):
+        for secret_key in secret_keys:
             key = self.derive_key(secret_key)
+            matched |= self.algorithm.verify_signature(key, value, sig)
 
-            if self.algorithm.verify_signature(key, value, sig):
-                return True
-
-        return False
+        return matched
 
     def unsign(self, signed_value: str | bytes) -> bytes:
         """Unsigns the given string."""

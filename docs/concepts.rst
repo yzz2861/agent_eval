@@ -74,11 +74,11 @@ valid in the other context.
 
     s1 = URLSafeSerializer("secret-key", salt="activate")
     s1.dumps(42)
-    'NDI.MHQqszw6Wc81wOBQszCrEE_RlzY'
+    'NDI.85dbe15dMHQqszw6Wc81wOBQszCrEE_RlzY'
 
     s2 = URLSafeSerializer("secret-key", salt="upgrade")
     s2.dumps(42)
-    'NDI.c0MpsD6gzpilOAeUPra3NShPXsE'
+    'NDI.85dbe15dc0MpsD6gzpilOAeUPra3NShPXsE'
 
 The second serializer can't load data dumped with the first because the
 salts differ.
