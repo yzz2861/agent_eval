@@ -11,7 +11,6 @@ import collections
 import operator
 import os
 import re
-import warnings
 import weakref
 
 from enum import EnumMeta
@@ -19,6 +18,9 @@ from enum import IntEnum
 
 from .decorators import sdproperty
 
+from .errors import PGPArmorCRCError
+from .errors import PGPArmorError
+from .errors import PGPArmorHeaderError
 from .errors import PGPError
 
 __all__ = ['Armorable',
@@ -105,7 +107,11 @@ class Armorable(metaclass=abc.ABCMeta):
         Takes an ASCII-armored PGP block and returns the decoded byte value.
 
         :param text: An ASCII-armored PGP block, to un-armor.
-        :raises: :py:exc:`ValueError` if ``text`` did not contain an ASCII-armored PGP block.
+        :raises: :py:exc:`~pgpy.errors.PGPArmorError` (a :py:exc:`ValueError` and
+                 :py:exc:`~pgpy.errors.PGPError` subclass) if ``text`` did not contain a
+                 valid ASCII-armored PGP block, or if its head/tail, base64 body, or CRC24
+                 checksum were malformed or truncated. The raised exception carries the
+                 character offset at which the problem was detected.
         :raises: :py:exc:`TypeError` if ``text`` is not a ``str``, ``bytes``, or ``bytearray``
         :returns: A ``dict`` containing information from ``text``, including the de-armored data.
         It can contain the following keys: ``magic``, ``headers``, ``hashes``, ``cleartext``, ``body``, ``crc``.
@@ -118,32 +124,197 @@ class Armorable(metaclass=abc.ABCMeta):
         if isinstance(text, (bytes, bytearray)):  # pragma: no cover
             text = text.decode('latin-1')
 
-        m = Armorable.__armor_regex.search(text)
+        return Armorable._parse_armor(text)
 
-        if m is None:  # pragma: no cover
-            raise ValueError("Expected: ASCII-armored PGP data")
+    # ----- armor parsing helpers -------------------------------------------------
+    __armor_begin_re = re.compile(r'^-{5}BEGIN PGP (?P<magic>[A-Z0-9 ,]+)-{5}$')
+    __armor_end_re = re.compile(r'^-{5}END PGP (?P<magic>[A-Z0-9 ,]+)-{5}$')
+    __armor_header_re = re.compile(r'^(?P<key>.+): (?P<value>.+)$')
+    __armor_bodyline_re = re.compile(r'^[A-Za-z0-9+/]{1,76}={0,2}$')
+    __armor_crc_re = re.compile(r'^=(?P<crc>[A-Za-z0-9+/]{4})$')
+    __signed_begin_re = re.compile(r'^-{5}BEGIN PGP SIGNED MESSAGE-{5}$')
+    __signed_hash_re = re.compile(r'^Hash: (?P<hashes>[A-Za-z0-9\-+,]+)$')
 
-        m = m.groupdict()
+    @staticmethod
+    def _armor_lines(text):
+        # yield (line_without_newline, offset_of_line_start, newline_length)
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            nl = 2 if line.endswith('\r\n') else (1 if line[-1:] in ('\r', '\n') else 0)
+            yield line[:len(line) - nl], offset, nl
+            offset += len(line)
 
-        if m['hashes'] is not None:
-            m['hashes'] = m['hashes'].split(',')
+    @staticmethod
+    def _b64_decode(segment, offset, partial=None):
+        try:
+            return bytearray(base64.b64decode(segment.encode()))
 
-        if m['headers'] is not None:
-            m['headers'] = collections.OrderedDict(re.findall('^(?P<key>.+): (?P<value>.+)$\n?', m['headers'], flags=re.MULTILINE))
+        except (binascii.Error, TypeError) as ex:
+            raise PGPArmorError("Malformed base64 data: {:s}".format(str(ex)), offset, partial) from ex
 
-        if m['body'] is not None:
-            try:
-                m['body'] = bytearray(base64.b64decode(m['body'].encode()))
+    @staticmethod
+    def _parse_armor(text):
+        # A line-oriented replacement for the old regex-only unarmor path. Every failure
+        # raises a PGPArmorError subclass annotated with the character offset of the
+        # offending line/byte so truncated or spliced armor can be diagnosed precisely.
+        result = {'magic': None, 'headers': None, 'hashes': None, 'cleartext': None,
+                  'body': bytearray(), 'crc': None}
+        all_lines = list(Armorable._armor_lines(text))
 
-            except (binascii.Error, TypeError) as ex:
-                raise PGPError(str(ex)) from ex
+        # the old regex-based path used re.search, so armor embedded after other text
+        # was accepted; skip any leading lines until the first armor (or cleartext
+        # signature) header line is reached
+        start_index = None
+        for index, (line, line_offset, _) in enumerate(all_lines):
+            if (Armorable.__signed_begin_re.match(line) is not None
+                    or Armorable.__armor_begin_re.match(line) is not None):
+                first_line, first_offset = line, line_offset
+                start_index = index
+                break
 
-        if m['crc'] is not None:
-            m['crc'] = Header.bytes_to_int(base64.b64decode(m['crc'].encode()))
-            if Armorable.crc24(m['body']) != m['crc']:
-                warnings.warn('Incorrect crc24', stacklevel=3)
+        if start_index is None:
+            raise PGPArmorError("Expected: ASCII-armored PGP data", 0)
 
-        return m
+        lines = iter(all_lines[start_index + 1:])
+
+        if Armorable.__signed_begin_re.match(first_line):
+            hashes = None
+            cleartext_lines = []
+            in_cleartext = False
+
+            for line, line_offset, nl in lines:
+                hm = Armorable.__signed_hash_re.match(line)
+                if hm is not None and not in_cleartext:
+                    hashes = hm.group('hashes').split(',')
+                    continue
+
+                bm = Armorable.__armor_begin_re.match(line)
+                if bm is not None:
+                    begin_offset, begin_magic = line_offset, bm.group('magic')
+                    # remember whether a blank separator line preceded the armor header
+                    saw_separator_blank = any(cl[0] == '' for cl in cleartext_lines)
+                    break
+
+                if not in_cleartext:
+                    # the blank line separating the Hash header from the cleartext
+                    if line != '':
+                        raise PGPArmorHeaderError(
+                            "Expected a blank line after the cleartext signature headers", line_offset)
+                    in_cleartext = True
+                    continue
+
+                cleartext_lines.append((line, nl))
+
+            else:
+                raise PGPArmorHeaderError("Expected an armor header line after the cleartext signature",
+                                          len(text))
+
+            result['hashes'] = hashes
+            # blank line(s) directly before the armor header separate it from the
+            # cleartext and are not part of it
+            while cleartext_lines and cleartext_lines[-1][0] == '':
+                cleartext_lines.pop()
+            result['cleartext'] = ''.join(line + (('\r\n' if nl == 2 else '\n') if nl else '')
+                                          for line, nl in cleartext_lines)
+            if cleartext_lines and not saw_separator_blank:
+                # when the armor header immediately follows the last cleartext line,
+                # the old regex-based path did not include its trailing newline
+                result['cleartext'] = result['cleartext'].rstrip('\r\n')
+
+        else:
+            bm = Armorable.__armor_begin_re.match(first_line)
+            if bm is None:
+                raise PGPArmorHeaderError("Expected: ASCII-armored PGP data", first_offset)
+
+            begin_offset, begin_magic = first_offset, bm.group('magic')
+
+        result['magic'] = begin_magic
+
+        # armor headers (key: value), terminated by a blank line
+        headers = collections.OrderedDict()
+        body_lines = []
+        for line, line_offset, nl in lines:
+            if line == '':
+                break
+
+            hm = Armorable.__armor_header_re.match(line)
+            if hm is None:
+                # the blank separator line is optional in practice (some implementations
+                # emit the first body line directly after the last header); the first
+                # non-header line marks the start of the body
+                if not Armorable.__armor_bodyline_re.match(line):
+                    raise PGPArmorHeaderError("Malformed armor header line", line_offset, result)
+
+                body_lines.append((line, line_offset))
+                break
+
+            headers[hm.group('key')] = hm.group('value')
+
+        else:
+            raise PGPArmorHeaderError("Truncated armor block: expected a blank line and message body",
+                                      len(text), result)
+
+        if headers:
+            result['headers'] = headers
+
+        # base64-encoded body, terminated by the CRC line
+        crc_line = crc_offset = None
+        for line, line_offset, nl in lines:
+            cm = Armorable.__armor_crc_re.match(line)
+            if cm is not None:
+                crc_line, crc_offset = cm.group('crc'), line_offset
+                break
+
+            if not Armorable.__armor_bodyline_re.match(line):
+                raise PGPArmorError("Malformed character in armor body", line_offset, result)
+
+            body_lines.append((line, line_offset))
+
+        else:
+            raise PGPArmorError("Truncated armor block: expected a CRC24 line beginning with '='",
+                                len(text), result)
+
+        if not body_lines:
+            raise PGPArmorError("Truncated armor block: missing message body", begin_offset, result)
+
+        body = bytearray()
+        for line, line_offset in body_lines:
+            body += Armorable._b64_decode(line, line_offset, result)
+        result['body'] = body
+
+        crc_bytes = Armorable._b64_decode(crc_line, crc_offset, result)
+        if len(crc_bytes) != 3:
+            raise PGPArmorCRCError("Malformed CRC24 checksum", crc_offset, result)
+
+        expected_crc = Header.bytes_to_int(crc_bytes)
+        actual_crc = Armorable.crc24(body)
+        if actual_crc != expected_crc:
+            raise PGPArmorCRCError("Incorrect crc24: expected 0x{:06x}, computed 0x{:06x}".format(
+                expected_crc, actual_crc), crc_offset, result, expected=expected_crc, actual=actual_crc)
+        result['crc'] = expected_crc
+
+        # armor tail; its magic must match the head
+        for line, line_offset, nl in lines:
+            if line == '':
+                continue
+
+            em = Armorable.__armor_end_re.match(line)
+            if em is None:
+                raise PGPArmorHeaderError("Malformed armor tail line", line_offset, result)
+
+            if em.group('magic') != begin_magic:
+                raise PGPArmorHeaderError(
+                    "Armor tail '{:s}' does not match head '{:s}'".format(em.group('magic'), begin_magic),
+                    line_offset, result)
+
+            break
+
+        else:
+            raise PGPArmorHeaderError(
+                "Truncated armor block: expected '-----END PGP {:s}-----'".format(begin_magic),
+                len(text), result)
+
+        return result
 
     @staticmethod
     def crc24(data):

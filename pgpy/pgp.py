@@ -40,6 +40,8 @@ from .decorators import KeyAction
 
 from .errors import PGPDecryptionError
 from .errors import PGPError
+from .errors import PGPPacketError
+from .errors import PGPParseError
 
 from .packet import Key
 from .packet import MDC
@@ -69,6 +71,7 @@ from .packet.packets import Marker
 from .packet.packets import SKESessionKey
 from .packet.packets import SKESessionKeyV4
 
+from .packet.types import Header as PacketHeader
 from .packet.types import Opaque
 
 from .types import Armorable
@@ -1266,8 +1269,90 @@ class PGPMessage(Armorable, PGPObject):
 
         return decmsg
 
+    @staticmethod
+    def _read_packet(data, offset, partial=None):
+        # parse a single packet out of data (a bytearray that is consumed in place),
+        # validating the header and declared length against the remaining bytes so that
+        # truncated or spliced packet streams produce offset-annotated PGPPacketErrors
+        # instead of bare IndexErrors or silently incomplete objects.
+        start = offset
+        if len(data) == 0:
+            raise PGPPacketError("Truncated packet stream: expected a packet header", start, partial)
+
+        first = data[0]
+        if not (first & 0x80):
+            raise PGPPacketError(
+                "Invalid packet header byte 0x{:02x}: the high bit must be set".format(first),
+                start, partial)
+        if len(data) == 1:
+            raise PGPPacketError(
+                "Truncated packet (tag {:d} at offset {:d}): missing packet length field".format(
+                    ((first & 0x3F) if (first & 0x40) else ((first & 0x3C) >> 2)), start),
+                start, partial)
+
+        new_format = bool(first & 0x40)
+        tag = (first & 0x3F) if new_format else ((first & 0x3C) >> 2)
+        try:
+            PacketTag(tag)
+        except ValueError:
+            raise PGPPacketError("Unknown or reserved packet tag {:d}".format(tag), start, partial, tag)
+
+        # parse just the header on a copy to learn the declared length before the
+        # payload parser is allowed to mutate the shared packet buffer
+        probe = bytearray(data)
+        try:
+            probe_header = PacketHeader()
+            probe_header.parse(probe)
+        except Exception as ex:
+            raise PGPPacketError(
+                "Truncated or malformed packet header (tag {:d}): {:s}".format(tag, str(ex)),
+                start, partial, tag) from ex
+
+        total_size = len(probe_header) + probe_header.length
+        # record the available bytes before Packet() mutates the shared buffer
+        available = len(data)
+        if available < total_size:
+            raise PGPPacketError(
+                "Truncated packet (tag {:d} at offset {:d}): header declares a {:d}-byte packet, "
+                "but only {:d} bytes remain".format(tag, start, total_size, available),
+                start, partial, tag)
+
+        try:
+            pkt = Packet(data)
+        except PGPPacketError:
+            raise
+        except Exception as ex:
+            raise PGPPacketError(
+                "Malformed packet (tag {:d}): {:s}".format(tag, str(ex)), start, partial, tag) from ex
+
+        return pkt, start + total_size
+
+    @staticmethod
+    def _iter_packets(data, partial=None):
+        # walk a binary OpenPGP packet stream, yielding each successfully parsed
+        # packet in order. Parsing happens in place on data; on failure the
+        # PGPPacketError carries the absolute byte offset and the packets already
+        # yielded remain available to the caller for forensic inspection.
+        total = len(data)
+        offset = 0
+        while len(data) > 0:
+            pkt, next_offset = PGPMessage._read_packet(data, offset, partial)
+            offset = next_offset
+            yield pkt
+        if offset != total:
+            # defensive: packet parsing should consume the whole stream
+            raise PGPPacketError(
+                "Trailing {:d} byte(s) left after the last packet".format(total - offset),
+                offset, partial)
+
     def parse(self, packet):
-        unarmored = self.ascii_unarmor(packet)
+        try:
+            unarmored = self.ascii_unarmor(packet)
+        except PGPParseError as ex:
+            # attach the (partially populated) message object before re-raising so
+            # callers can inspect anything that was understood before the corruption
+            ex.partial = self
+            raise
         data = unarmored['body']
 
         if unarmored['magic'] is not None and unarmored['magic'] not in ['MESSAGE', 'SIGNATURE']:
@@ -1281,16 +1366,25 @@ class PGPMessage(Armorable, PGPObject):
             # the composition for this will be the 'cleartext' as a str,
             # followed by one or more signatures (each one loaded into a PGPSignature)
             self |= self.dash_unescape(unarmored['cleartext'])
-            while len(data) > 0:
-                pkt = Packet(data)
-                if not isinstance(pkt, Signature):  # pragma: no cover
-                    warnings.warn("Discarded unexpected packet: {:s}".format(pkt.__class__.__name__), stacklevel=2)
-                    continue
-                self |= PGPSignature() | pkt
+            try:
+                for pkt in self._iter_packets(bytearray(data), partial=self):
+                    if not isinstance(pkt, Signature):  # pragma: no cover
+                        warnings.warn("Discarded unexpected packet: {:s}".format(pkt.__class__.__name__), stacklevel=2)
+                        continue
+                    self |= PGPSignature() | pkt
+            except PGPParseError as ex:
+                ex.partial = self
+                raise
 
         else:
-            while len(data) > 0:
-                self |= Packet(data)
+            try:
+                for pkt in self._iter_packets(bytearray(data), partial=self):
+                    # merge each packet immediately so successfully parsed packets
+                    # survive on self if a later packet turns out to be corrupt
+                    self |= pkt
+            except PGPParseError as ex:
+                ex.partial = self
+                raise
 
 
 class PGPKey(Armorable, ParentRef, PGPObject):

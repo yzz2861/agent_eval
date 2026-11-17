@@ -19,6 +19,7 @@ from pgpy.packet import Packet
 from pgpy.types import Armorable
 from pgpy.types import Fingerprint
 from pgpy.types import SignatureVerification
+from pgpy.errors import PGPArmorCRCError
 from pgpy.errors import PGPError
 from pgpy.errors import PGPDecryptionError
 from pgpy.errors import PGPEncryptionError
@@ -264,16 +265,25 @@ class TestPGPKey(object):
         with pytest.raises(ValueError):
             key.parse(keytext)
 
-    def test_parse_wrong_crc24(self, recwarn):
-        keytext = _read('tests/testdata/keys/rsa.1.sec.asc').splitlines()
-        keytext[-2] = "=abcd"
-        keytext = '\n'.join(keytext)
+    def test_parse_wrong_crc24(self):
+        key_lines = _read('tests/testdata/keys/rsa.1.sec.asc').splitlines()
+        crc_index = next(i for i, line in enumerate(key_lines) if line.startswith('='))
+        crc_offset = sum(len(line) + 1 for line in key_lines[:crc_index])
+        key_lines[crc_index] = "=abcd"
+        keytext = '\n'.join(key_lines)
         key = PGPKey()
-        key.parse(keytext)
+        with pytest.raises(PGPArmorCRCError) as exc_info:
+            key.parse(keytext)
 
-        w = recwarn.pop(UserWarning)
-        assert str(w.message) == "Incorrect crc24"
-        assert w.filename == __file__
+        err = exc_info.value
+        assert isinstance(err, PGPError)
+        assert isinstance(err, ValueError)
+        assert err.offset == crc_offset
+        assert err.expected != err.actual
+        # the key packet stream is outside of PGPMessage's diagnostic path, but the
+        # armor-level partial payload is still preserved on the exception
+        assert err.partial is not None
+        assert err.partial['magic'] == 'PRIVATE KEY BLOCK'
 
     def test_empty_key_action(self):
         key = PGPKey()
