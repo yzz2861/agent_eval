@@ -338,6 +338,15 @@ class BaseFuzzer:
     def response_callbacks(
         self, path: str, response: BaseResponse
     ) -> tuple[Callable[[BaseResponse], Any], ...]:
+        if response.is_rate_limited:
+            # Throttling pages are target-side flow control, not content.
+            # Never report them as hits or feed them to calibration.
+            self.logger.debug(
+                f'"{response.url}" excluded as rate-limit response '
+                f"(status {response.status})"
+            )
+            return self.not_found_callbacks
+
         scanners = self.get_scanners_for(path)
 
         if self.is_excluded(response):

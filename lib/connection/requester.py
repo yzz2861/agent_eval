@@ -57,6 +57,7 @@ from lib.connection.proxy import (
     proxy_error_status,
 )
 from lib.connection.rate_limiter import RequestRateLimiter
+from lib.connection.throttle import AdaptiveThrottle
 from .request_target import (
     PathPreservingPoolMixin,
     RawRequestTarget,
@@ -418,6 +419,8 @@ class BaseRequester:
         self._query: str = ""
         self._ip_overrides = IPOverrides()
         self._rate_limiter = RequestRateLimiter()
+        # Per-target adaptive backoff; reset by set_url when the target changes.
+        self._throttle = AdaptiveThrottle(config.concurrency)
         # Display-only cache: (monotonic expiry, rate), owned by this requester.
         self._rate_snapshot: tuple[float, int] | None = None
         self._rate_snapshot_lock = threading.Lock()
@@ -455,6 +458,7 @@ class BaseRequester:
 
     def set_url(self, url: str) -> None:
         self._url = url
+        self._throttle.reset()
 
     def set_query(self, query: str) -> None:
         self._query = query
@@ -557,7 +561,13 @@ class Requester(BaseRequester):
     # :path: is expected not to start with "/"
     def request(self, path: str, proxy: str | None = None) -> Response:
         self.wait_for_rate_limit()
+        self._throttle.acquire()
+        try:
+            return self._request(path, proxy)
+        finally:
+            self._throttle.release()
 
+    def _request(self, path: str, proxy: str | None = None) -> Response:
         err_msg = None
         request_path = self.request_path(path)
         quoted_request_path = safequote(request_path)
@@ -618,6 +628,17 @@ class Requester(BaseRequester):
                 finally:
                     origin_response.close()
                 response.elapsed = time.perf_counter() - start_time
+
+                backoff = self._throttle.record_response(
+                    response.status,
+                    response.headers.get("retry-after"),
+                )
+                if backoff is not None:
+                    self.logger.info(
+                        f"Rate limited by target (status {response.status}); "
+                        f"backing off {backoff:.1f}s "
+                        f"(concurrency: {self._throttle.limit})"
+                    )
 
                 log_msg = f'"{self.config.method} {response.url}" {response.status} - {response.length}B'
 
@@ -929,7 +950,15 @@ class AsyncRequester(BaseRequester):
         self, path: str, session: httpx.AsyncClient | None = None, replay: bool = False
     ) -> AsyncResponse:
         await self.wait_for_rate_limit()
+        await self._throttle.acquire_async()
+        try:
+            return await self._request(path, session, replay)
+        finally:
+            self._throttle.release()
 
+    async def _request(
+        self, path: str, session: httpx.AsyncClient | None = None, replay: bool = False
+    ) -> AsyncResponse:
         err_msg = None
         request_path = self.request_path(path)
         quoted_request_path = safequote(request_path)
@@ -977,6 +1006,17 @@ class AsyncRequester(BaseRequester):
                 # Measure the whole streamed request lifecycle so sync and async
                 # modes report the same thing.
                 response.elapsed = time.perf_counter() - start_time
+
+                backoff = self._throttle.record_response(
+                    response.status,
+                    response.headers.get("retry-after"),
+                )
+                if backoff is not None:
+                    self.logger.info(
+                        f"Rate limited by target (status {response.status}); "
+                        f"backing off {backoff:.1f}s "
+                        f"(concurrency: {self._throttle.limit})"
+                    )
 
                 log_msg = f'"{self.config.method} {response.url}" {response.status} - {response.length}B'
 

@@ -53,6 +53,7 @@ from lib.connection.requester import (
     _find_ssl_error,
     _format_ssl_error,
 )
+from lib.connection.throttle import AdaptiveThrottle
 from lib.core.filter_config import FilterConfig
 from lib.core.request_config import RequestConfig
 from lib.core.target_config import TargetConfig
@@ -916,6 +917,7 @@ class TestRequesterElapsed(TestCase):
         requester.logger = Mock()
         requester.config = RequestConfig()
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None
@@ -943,6 +945,7 @@ class TestRequesterElapsed(TestCase):
         requester.logger = Mock()
         requester.config = RequestConfig()
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None
@@ -960,6 +963,7 @@ class TestRequesterElapsed(TestCase):
         requester.logger = Mock()
         requester.config = RequestConfig(max_retries=1)
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None
@@ -1709,6 +1713,7 @@ class TestAsyncRequesterElapsed(IsolatedAsyncioTestCase):
         requester.logger = Mock()
         requester.config = RequestConfig()
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None
@@ -1737,6 +1742,7 @@ class TestAsyncRequesterElapsed(IsolatedAsyncioTestCase):
         requester.logger = Mock()
         requester.config = RequestConfig()
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None
@@ -1755,6 +1761,7 @@ class TestAsyncRequesterElapsed(IsolatedAsyncioTestCase):
         requester.logger = Mock()
         requester.config = RequestConfig(max_retries=1)
         requester._rate_limiter = RequestRateLimiter()
+        requester._throttle = AdaptiveThrottle(1)
         requester._url = "https://example.com/"
         requester._query = ""
         requester.proxy_cred = None

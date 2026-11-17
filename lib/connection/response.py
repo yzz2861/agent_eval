@@ -237,6 +237,19 @@ class BaseResponse:
         return UNKNOWN
 
     @property
+    def is_rate_limited(self) -> bool:
+        """Whether the response is a throttling signal rather than content.
+
+        429 always means the target is rate limiting. 503 only counts when
+        paired with Retry-After, so genuine server-error pages remain
+        reportable findings.
+        """
+        if self.status == 429:
+            return True
+
+        return self.status == 503 and self.headers.get("retry-after") is not None
+
+    @property
     def length(self) -> int:
         return get_response_length(self.headers, len(self.body))
 
