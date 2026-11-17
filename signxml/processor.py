@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import re
 import threading
 from functools import lru_cache
 from typing import Any, ClassVar
@@ -17,6 +18,18 @@ from .exceptions import InvalidInput
 from .util import namespaces
 
 logger = logging.getLogger(__name__)
+
+# Absolute URIs (any scheme such as file:, http:, https:, or protocol-relative //host) are never
+# dereferenced, so that a malicious signature cannot induce local file reads or network requests.
+_ABSOLUTE_URI_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*:|//)")
+
+# Whitelist of supported XPointer expressions: id('ID') or an absolute path of element names with
+# optional positional predicates (e.g. /root/child[2]).
+_XPOINTER_ID_PATTERN = re.compile(r"id\('([^']*)'\)")
+_XPOINTER_PATH_PATTERN = re.compile(r"(/[A-Za-z_][\w.-]*(\[[1-9][0-9]*\])?)+")
+
+# Maximum number of location steps allowed in an XPointer path expression.
+_MAX_XPOINTER_PATH_DEPTH = 10
 
 
 @lru_cache
@@ -167,22 +180,50 @@ class XMLSignatureProcessor(XMLProcessor):
             raise InvalidInput("References without URIs are not supported")
         elif uri == "":
             return doc_root
-        elif uri.startswith("#xpointer("):
-            raise InvalidInput("XPointer references are not supported")
-            # doc_root.xpath(uri.lstrip("#"))[0]
         elif uri.startswith("#"):
-            for id_attribute in self.id_attributes:
-                xpath_query = f"//*[@*[local-name() = '{id_attribute}']=$uri]"
-                results = doc_root.xpath(xpath_query, uri=uri.lstrip("#"))
-                if len(results) > 1:
-                    raise InvalidInput(f"Ambiguous reference URI {uri} resolved to {len(results)} nodes")
-                elif len(results) == 1:
-                    return results[0]
-            raise InvalidInput(f"Unable to resolve reference URI: {uri}")
+            return self._resolve_same_document_reference(doc_root, uri)
+        elif _ABSOLUTE_URI_PATTERN.match(uri):
+            raise InvalidInput(f"External reference URI is not allowed: {uri}")
+        elif uri_resolver is None:
+            raise InvalidInput(f"External URI dereferencing is not configured: {uri}")
         else:
-            if uri_resolver is None:
-                raise InvalidInput(f"External URI dereferencing is not configured: {uri}")
             result = uri_resolver(uri)
             if result is None:
                 raise InvalidInput(f"Unable to resolve reference URI: {uri}")
             return result
+
+    def _resolve_same_document_reference(self, doc_root, uri):
+        if uri.startswith("#xpointer("):
+            return self._resolve_xpointer(doc_root, uri)
+        return self._resolve_id_reference(doc_root, uri, uri.lstrip("#"))
+
+    def _resolve_id_reference(self, doc_root, uri, id_value):
+        for id_attribute in self.id_attributes:
+            xpath_query = f"//*[@*[local-name() = '{id_attribute}']=$uri]"
+            results = doc_root.xpath(xpath_query, uri=id_value)
+            if len(results) > 1:
+                raise InvalidInput(f"Ambiguous reference URI {uri} resolved to {len(results)} nodes")
+            elif len(results) == 1:
+                return results[0]
+        raise InvalidInput(f"Unable to resolve reference URI: {uri}")
+
+    def _resolve_xpointer(self, doc_root, uri):
+        expression = uri[len("#xpointer(") :]
+        if not expression.endswith(")"):
+            raise InvalidInput(f"Unsupported XPointer reference: {uri}")
+        expression = expression[:-1]
+        id_match = _XPOINTER_ID_PATTERN.fullmatch(expression)
+        if id_match is not None:
+            return self._resolve_id_reference(doc_root, uri, id_match.group(1))
+        if _XPOINTER_PATH_PATTERN.fullmatch(expression) is None:
+            raise InvalidInput(f"XPointer expression is not in the supported whitelist: {uri}")
+        if expression.count("/") > _MAX_XPOINTER_PATH_DEPTH:
+            raise InvalidInput(
+                f"XPointer path exceeds the maximum supported depth of {_MAX_XPOINTER_PATH_DEPTH}: {uri}"
+            )
+        results = doc_root.xpath(expression)
+        if len(results) > 1:
+            raise InvalidInput(f"Ambiguous reference URI {uri} resolved to {len(results)} nodes")
+        elif len(results) == 0:
+            raise InvalidInput(f"Unable to resolve reference URI: {uri}")
+        return results[0]

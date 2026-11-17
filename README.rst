@@ -217,7 +217,9 @@ generate, pass the ``method`` argument to ``sign()``:
 For detached signatures, the code above will use the ``Id`` or ``ID`` attribute of ``root`` to generate a relative URI
 (``<Reference URI="#value"``). You can also override the value of ``URI`` by passing a ``reference_uri`` argument to
 ``sign()``. To verify a detached signature that refers to an external entity, pass a callable resolver in
-``XMLVerifier().verify(data, uri_resolver=...)``.
+``XMLVerifier().verify(data, uri_resolver=...)``. Only relative URIs are passed to the resolver; absolute URIs
+(``file:``, ``http(s):``, protocol-relative ``//host``, etc.) are always rejected with ``InvalidInput``, and
+same-document ``#xpointer(...)`` references are restricted to a whitelisted, depth-limited subset of expressions.
 
 See the `API documentation <https://xml-security.github.io/signxml/#id5>`_ for more details.
 

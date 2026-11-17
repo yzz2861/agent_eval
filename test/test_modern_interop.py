@@ -1,5 +1,6 @@
 """Modernized xmlsec vectors; unsupported features are reported as skips."""
 
+import re
 import sys
 import unittest
 from base64 import b64decode
@@ -26,6 +27,7 @@ _transforms = {method.value for method in CanonicalizationMethod} | {
     namespaces.ds + "base64",
     namespaces.ds + "enveloped-signature",
 }
+_absolute_uri = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*:|//)")
 
 
 def _resolve_uri(uri, folder):
@@ -45,6 +47,7 @@ class TestModernInterop(unittest.TestCase):
         paths = sorted(_fixtures.glob("*.modern/signature*.xml"))
         self.assertEqual(len(paths), 74)
         checked = 0
+        rejected_external = 0
         for path in paths:
             with self.subTest(vector=str(path.relative_to(_fixtures))):
                 root = etree.fromstring(path.read_bytes(), etree.XMLParser(resolve_entities=False, no_network=True))
@@ -85,14 +88,22 @@ class TestModernInterop(unittest.TestCase):
                     require_x509=False,
                     expect_references=len(signature.findall("ds:SignedInfo/ds:Reference", namespaces)),
                     verification_time=(
-                        cert.not_valid_before_utc + (cert.not_valid_after_utc - cert.not_valid_before_utc) / 2
-                    )
-                    if cert is not None
-                    else None,
+                        (cert.not_valid_before_utc + (cert.not_valid_after_utc - cert.not_valid_before_utc) / 2)
+                        if cert is not None
+                        else None
+                    ),
                 )
                 verifier = XMLVerifier()
                 verify = partial(verifier.verify, root, expect_config=config, **kwargs)
-                if signature.find("ds:SignedInfo/ds:SignatureMethod/ds:HMACOutputLength", namespaces) is not None:
+                reference_uris = [
+                    reference.get("URI") for reference in signature.findall("ds:SignedInfo/ds:Reference", namespaces)
+                ]
+                if any(uri is not None and _absolute_uri.match(uri) for uri in reference_uris):
+                    # Absolute reference URIs (file:, http(s):, etc.) are always rejected.
+                    with self.assertRaises(InvalidInput):
+                        verify()
+                    rejected_external += 1
+                elif signature.find("ds:SignedInfo/ds:SignatureMethod/ds:HMACOutputLength", namespaces) is not None:
                     with self.assertRaises((InvalidInput, InvalidSignature)):
                         verify()
                 elif "bad-" in path.name:
@@ -106,6 +117,7 @@ class TestModernInterop(unittest.TestCase):
                     )
                 checked += 1
         self.assertEqual(checked, 52)
+        self.assertEqual(rejected_external, 9)
 
 
 if __name__ == "__main__":

@@ -180,6 +180,87 @@ class TestVerifyXML(unittest.TestCase, LoadExampleKeys):
             )
             XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
 
+    def test_external_reference_uris_rejected(self):
+        # Absolute reference URIs must never be dereferenced, even when a uri_resolver is configured,
+        # so that signatures cannot induce local file reads or requests to internal addresses.
+        config = SignatureConfiguration(require_x509=False)
+        external_uris = (
+            "file:///etc/passwd",
+            "file:///C:/windows/system32/config/sam",
+            "FILE:///etc/passwd",
+            "http://example.com/payload.xml",
+            "https://internal.example.net/secret",
+            "//example.com/protocol-relative.xml",
+            "ftp://example.com/payload.xml",
+            "urn:example:payload",
+        )
+        for uri in external_uris:
+            with self.subTest(uri=uri):
+                signed = XMLSigner(method=methods.detached, signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+                    etree.fromstring(b'<data Id="p">hello</data>'), key=b"secret", reference_uri=uri
+                )
+                resolver = Mock(return_value=b"<data>hello</data>")
+                with self.assertRaisesRegex(InvalidInput, "External reference URI is not allowed"):
+                    XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config, uri_resolver=resolver)
+                resolver.assert_not_called()
+
+    def test_relative_reference_uri_requires_resolver(self):
+        config = SignatureConfiguration(require_x509=False)
+        signed = XMLSigner(method=methods.detached, signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            etree.fromstring(b"<data>hello</data>"), key=b"secret", reference_uri="payload.xml"
+        )
+        with self.assertRaisesRegex(InvalidInput, "External URI dereferencing is not configured"):
+            XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+        resolver = Mock(return_value=etree.fromstring(b"<data>hello</data>"))
+        result = XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config, uri_resolver=resolver)
+        resolver.assert_called_once_with("payload.xml")
+        self.assertEqual(result.signed_xml.tag, "data")
+
+    def test_xpointer_reference_whitelist(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><data Id="p">hello</data></root>')
+        # The whitelisted xpointer(id('...')) form is resolved within the current document.
+        signed = XMLSigner(method=methods.enveloped, signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="xpointer(id('p'))"
+        )
+        result = XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+        self.assertEqual(result.signed_xml.tag, "data")
+
+        verifier = XMLVerifier()
+        doc = etree.fromstring(b'<root><a><b Id="target">x</b></a></root>')
+        # Whitelisted forms: id() shorthand and shallow element-only absolute paths.
+        self.assertIs(verifier._resolve_reference(doc, {"URI": "#xpointer(id('target'))"}), doc[0][0])
+        self.assertIs(verifier._resolve_reference(doc, {"URI": "#xpointer(/root/a/b)"}), doc[0][0])
+        self.assertIs(verifier._resolve_reference(doc, {"URI": "#xpointer(/root/a/b[1])"}), doc[0][0])
+        # Everything else is rejected: non-whitelisted constructs, unresolvable targets, and bare XPath.
+        rejected = (
+            "#xpointer(//b)",
+            "#xpointer(id('target')/b)",
+            "#xpointer(here()/ancestor::root)",
+            "#xpointer(/root/a/b[last()])",
+            "#xpointer(/root/a/b",
+            "#xpointer(/root/missing)",
+            "#xpointer(id('missing'))",
+            "#//b",
+            "#/root/a/b",
+        )
+        for uri in rejected:
+            with self.subTest(uri=uri):
+                with self.assertRaises(InvalidInput):
+                    verifier._resolve_reference(doc, {"URI": uri})
+
+    def test_xpointer_path_depth_limit(self):
+        verifier = XMLVerifier()
+        doc = etree.fromstring(b"<root/>")
+        # Paths up to the depth limit pass the whitelist (and then fail to resolve)...
+        with self.assertRaisesRegex(InvalidInput, "Unable to resolve reference URI"):
+            verifier._resolve_reference(doc, {"URI": "#xpointer(" + "/a" * 10 + ")"})
+        # ...while deeper paths are rejected outright.
+        for depth in (11, 100):
+            with self.subTest(depth=depth):
+                with self.assertRaisesRegex(InvalidInput, "maximum supported depth"):
+                    verifier._resolve_reference(doc, {"URI": "#xpointer(" + "/a" * depth + ")"})
+
     def test_hmac_output_length(self):
         config = SignatureConfiguration(require_x509=False)
         for length in ("256", " +0256 ", "40", "160", "257", "0", "-1", "2_56", "256.0", "", "invalid"):
@@ -901,6 +982,15 @@ class TestSignXML(unittest.TestCase, LoadExampleKeys):
                 for suffix in ("", "-cert", "-cert-chain", "-issuer-serial")
             },
         }
+        # These fixtures dereference absolute http(s) reference URIs, which are always rejected.
+        external_uri_cases = {
+            "signature-rsa-detached.xml",
+            "signature-dsa-detached.xml",
+            "signature-hmac-sha1-exclusive-c14n-comments-detached.xml",
+            "signature-x509-crt.xml",
+            "signature-external-dsa.xml",
+            "signature-external-b64-dsa.xml",
+        }
 
         def resolver(uri, signature_file):
             if uri == "document.xml":
@@ -1001,8 +1091,10 @@ class TestSignXML(unittest.TestCase, LoadExampleKeys):
                         expect_config=expect_config,
                     )
                 except Exception as e:
-                    if filename != "enveloping-expired-cert.xml" and (
-                        filename in pinned_cert_cases or filename in phaos_cert_cases
+                    if (
+                        filename not in external_uri_cases
+                        and filename != "enveloping-expired-cert.xml"
+                        and (filename in pinned_cert_cases or filename in phaos_cert_cases)
                     ):
                         raise
                     unsupported_cases = (
@@ -1019,7 +1111,10 @@ class TestSignXML(unittest.TestCase, LoadExampleKeys):
                         "signature-big",
                         "enveloping-sha512-hmac-sha512",
                     )
-                    if signature_file.endswith("expired-cert.xml"):
+                    if filename in external_uri_cases:
+                        self.assertIsInstance(e, InvalidInput)
+                        self.assertIn("External reference URI is not allowed", str(e))
+                    elif signature_file.endswith("expired-cert.xml"):
                         with self.assertRaisesRegex(
                             InvalidCertificate,
                             "certificate has expired.*SignatureConfiguration",
