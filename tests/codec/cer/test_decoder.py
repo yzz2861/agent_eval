@@ -452,6 +452,43 @@ class NestingDepthLimitTestCase(BaseTestCase):
             assert False, 'Got RecursionError instead of PyAsn1Error'
 
 
+class DecodeBudgetTestCase(BaseTestCase):
+    """Test CER decoder configurable per-decode resource budgets."""
+
+    def testCustomNestingDepthRejected(self):
+        """Nesting beyond maxNestingDepth must raise PyAsn1Error."""
+        # Each \x30\x80 opens a new indefinite-length SEQUENCE
+        payload = b'\x30\x80' * 20
+        try:
+            decoder.decode(payload, maxNestingDepth=10)
+        except PyAsn1Error:
+            pass
+        else:
+            assert False, 'Nesting beyond custom depth limit tolerated'
+
+    def testComponentCountRejected(self):
+        """More items than maxComponentCount must raise PyAsn1Error."""
+        # SEQUENCE of twenty INTEGERs: 21 items in total
+        payload = b'\x30' + bytes([60]) + b'\x02\x01\x01' * 20
+        try:
+            decoder.decode(payload, maxComponentCount=20)
+        except PyAsn1Error:
+            pass
+        else:
+            assert False, 'Excessive component count tolerated'
+
+    def testValueLengthRejected(self):
+        """Value longer than maxValueLength must raise PyAsn1Error."""
+        # OCTET STRING with a 1024-octet value
+        payload = b'\x04\x82\x04\x00' + b'x' * 1024
+        try:
+            decoder.decode(payload, maxValueLength=1023)
+        except PyAsn1Error:
+            pass
+        else:
+            assert False, 'Oversized OCTET STRING tolerated'
+
+
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
 
 if __name__ == '__main__':

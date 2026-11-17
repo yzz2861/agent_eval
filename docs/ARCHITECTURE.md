@@ -1622,13 +1622,29 @@ dict (the limit's value and inventory row are under
 # pyasn1/codec/ber/decoder.py, SingleItemDecoder.__call__ entry
 _nestingLevel = options.get('_nestingLevel', 0)
 
-if _nestingLevel > MAX_NESTING_DEPTH:
+if _nestingLevel > budget.maxNestingDepth:
     raise error.PyAsn1Error(
-        'ASN.1 structure nesting depth exceeds limit (%d)' % MAX_NESTING_DEPTH
+        'ASN.1 structure nesting depth exceeds limit (%d)' % budget.maxNestingDepth
     )
 
 options['_nestingLevel'] = _nestingLevel + 1
 ```
+
+The `budget` is a `DecodeBudget` instance (same module) carrying the four
+configurable limits — `maxNestingDepth`, `maxComponentCount`,
+`maxSubstrateLength`, `maxValueLength` — plus the mutable counters. It is
+created once per top-level decode operation from the same-named decode
+options (falling back to the module constants) and shared by reference
+through the options dict as `options['_decodeBudget']`, so every recursive
+invocation of the operation counts against the same budget. The component
+count increments at `SingleItemDecoder.__call__` entry, the substrate check
+compares `substrate.tell()` against the position the operation started at,
+and the value-length check fires in the `stDecodeLength` block after the
+`sys.maxsize` guard. Because the budget object is shared by reference, it
+survives the per-call dict splatting that resets `_nestingLevel` for
+siblings; because it is only *created* at the top level, each top-level
+item of a `StreamingDecoder` gets a fresh budget, exactly like the nesting
+counter.
 
 `**kwargs` semantics make this correct: splatting builds a fresh dict per
 call, as under [The class spine](#the-class-spine), so each
@@ -1673,7 +1689,7 @@ bytes could otherwise grow into unbounded CPU or memory use.
 
 ### Decoder limits
 
-All five limits live in `pyasn1/codec/ber/decoder.py`, where the named
+All eight limits live in `pyasn1/codec/ber/decoder.py`, where the named
 constants sit at the top of the module (file locations in the
 [module map](#module-map)), and are inherited unchanged by CER and DER
 through the `SingleItemDecoder` subclasses in `cer/decoder.py` and
@@ -1681,7 +1697,14 @@ through the `SingleItemDecoder` subclasses in `cer/decoder.py` and
 and length rows fire inside the per-item state machine's `stDecodeTag` and
 `stDecodeLength` handling ([The per-item state
 machine](#the-per-item-state-machine)); the nesting counter travels in the
-options dict ([Bounding nesting depth](#bounding-nesting-depth)). The related
+options dict ([Bounding nesting depth](#bounding-nesting-depth)). The
+`MAX_NESTING_DEPTH`, `MAX_COMPONENT_COUNT`, `MAX_SUBSTRATE_LENGTH` and
+`MAX_VALUE_LENGTH` rows form the configurable decode budget: the constants
+are only defaults, overridable per decode call via the `maxNestingDepth`,
+`maxComponentCount`, `maxSubstrateLength` and `maxValueLength` options
+accepted by `decode()`, `Decoder` and `StreamingDecoder`, and their
+counters share one `DecodeBudget` object per top-level decode operation
+([Bounding nesting depth](#bounding-nesting-depth)). The related
 type-layer bound, the CVE-2026-59886 conversion guard on `Real`, lives in the
 type system rather than the decoder; its mechanism is described in
 [Bounded conversion of Real](#bounded-conversion-of-real).
@@ -1691,6 +1714,9 @@ type system rather than the decoder; its mechanism is described in
 | `MAX_OID_ARC_CONTINUATION_OCTETS` | 20 continuation octets (arcs up to 147 bits, 21 octets in all) | `ObjectIdentifierPayloadDecoder.valueDecoder` (OID) and `RelativeOIDPayloadDecoder.valueDecoder` (RELATIVE-OID), in the continuation loop before the arc accumulates | A short run of continuation octets accumulates a single arc into an unbounded integer | CVE-2026-23490 / GHSA-63vm-454h-vhhq, 0.6.2, commit `be353d7`, `CHANGES.rst` under `Revision 0.6.2` |
 | `MAX_TAG_OCTETS` | 20 octets (140-bit tag IDs) | the long-form tag loop in `SingleItemDecoder.__call__`'s `stDecodeTag` block | Unbounded long-form tag IDs build a huge integer from a tiny substrate; a companion fix in `tag.py` stopped `repr()` tripping the Python 3.11+ int-to-str limit | CVE-2026-59884 / GHSA-m4p7-r5rc-7g4j, 0.6.4, commit `516db4e`, `CHANGES.rst` under `Revision 0.6.4` |
 | `MAX_NESTING_DEPTH` | 100 levels | `SingleItemDecoder.__call__`, at generator entry | Deeply nested encodings (`b'\x30\x80' * 50000` is two bytes per level) drive the generator chain into `RecursionError` | CVE-2026-30922 / GHSA-jr27-m4p2-rc6r, 0.6.3, commit `25ad481`, `CHANGES.rst` under `Revision 0.6.3` |
+| `MAX_COMPONENT_COUNT` | 100000 items per top-level decode operation | `SingleItemDecoder.__call__`, at generator entry, on the shared `DecodeBudget` | A small substrate decoding into a huge number of TLV items (e.g. millions of empty components) keeps the decoder busy for unbounded CPU time | No CVE; 0.7.0-dev, `CHANGES.rst` under the pending `Revision 0.7.0` |
+| `MAX_SUBSTRATE_LENGTH` | 64 MiB consumed per top-level decode operation | `SingleItemDecoder.__call__`, at generator entry, comparing `substrate.tell()` with the operation's start position | An unbounded input stream keeps a resumable decode operation reading indefinitely | No CVE; 0.7.0-dev, `CHANGES.rst` under the pending `Revision 0.7.0` |
+| `MAX_VALUE_LENGTH` | `sys.maxsize` octets per definite-length value | the `stDecodeLength` block of `SingleItemDecoder.__call__`, after the `sys.maxsize` guard | A huge declared length is only rejected at the platform bound; tightening it per application caps single-value memory exposure | No CVE; 0.7.0-dev, `CHANGES.rst` under the pending `Revision 0.7.0` |
 | `MAX_LENGTH_OCTETS` | 8 octets | the `stDecodeLength` block of `SingleItemDecoder.__call__`, before any length octet is read | An oversized length header produced an `OverflowError` escaping as a non-`PyAsn1Error` | No CVE; issue #54 / PR #100, 0.6.3, commit `6d40bde`, `CHANGES.rst` under `Revision 0.6.3` |
 | `length > sys.maxsize` guard | platform-dependent | inline in the `stDecodeLength` block, after length accumulation; no named constant | An 8-octet length can still encode 2^64-1, which no `read()` can satisfy | No CVE; PR #108, commit `100f3af`, `CHANGES.rst` under the pending `Revision 0.7.0`; on `main` before the 0.6.4 release-prep commit, but absent from the shipped `v0.6.4` tag lineage |
 | *Supplementary:* OID arcs accumulate in a list | not numeric | `ObjectIdentifierPayloadDecoder.valueDecoder` / `RelativeOIDPayloadDecoder.valueDecoder`: `list.append` per arc, one `tuple()` at the final yield | The previous `oid += (subId,)` was quadratic in arc count | CVE-2026-59885 / GHSA-8ppf-4f7h-5ppj, 0.6.4, commit `5932cc8`, `CHANGES.rst` under `Revision 0.6.4` |
@@ -1711,6 +1737,17 @@ so an off-by-one in a comparison is caught. All live in
 `LengthFieldLimitTestCase.testLengthValueAtPlatformLimitIsNotRejected` vs
 `testLengthValueAbovePlatformLimitIsRejected` (the `sys.maxsize` guard,
 reachable via a monkey-patched `decoder.sys.maxsize`).
+
+The configurable budget has the same matched pairs in `DecodeBudgetTestCase`
+(`tests/codec/ber/test_decoder.py`): custom-depth, component-count,
+value-length and substrate-length limits each get an at-limit and a
+one-over test, plus truncated-stream and no-partial-object cases, with
+rejection mirrors in `tests/codec/cer/test_decoder.py` and
+`tests/codec/der/test_decoder.py`. The recursive-schema cases live in
+`RecursiveSchemaBudgetTestCase` (same file), whose `setUp` disables the
+debug logger because a recursive schema trips a `prettyPrintType` quirk on
+the logging path (`NonStreamingCompatibilityTestCase`, same file, uses the
+same workaround for an unrelated issue).
 
 The at-limit tests also pin the exact values, so lowering the OID or tag
 limits breaks `testMaxAllowedContinuationOctets` and
@@ -1882,4 +1919,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-

@@ -1,6 +1,16 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Added configurable BER/CER/DER decode budgets bounding resource use on
+  untrusted input: maximum nesting depth, component count, substrate size
+  and single-value length, all per top-level decode operation. The budgets
+  default to the new ``MAX_COMPONENT_COUNT``, ``MAX_SUBSTRATE_LENGTH`` and
+  ``MAX_VALUE_LENGTH`` constants (plus the existing ``MAX_NESTING_DEPTH``)
+  in ``pyasn1.codec.ber.decoder`` and can be tightened per decode call via
+  the ``maxNestingDepth``, ``maxComponentCount``, ``maxSubstrateLength``
+  and ``maxValueLength`` options of ``decode()``, ``Decoder`` and
+  ``StreamingDecoder``. Exceeding a budget raises PyAsn1Error without
+  leaking partially decoded objects
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

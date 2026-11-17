@@ -45,6 +45,42 @@ MAX_NESTING_DEPTH = 100
 # Maximum number of bytes in a BER length field (8 bytes = up to 2^64-1)
 MAX_LENGTH_OCTETS = 8
 
+# Maximum number of ASN.1 items (tags) decoded per top-level decode
+# operation
+MAX_COMPONENT_COUNT = 100000
+
+# Maximum number of substrate octets consumed per top-level decode
+# operation (64 MiB)
+MAX_SUBSTRATE_LENGTH = 64 * 1024 * 1024
+
+# Maximum number of octets in a single definite-length value. Defaults
+# to the platform maximum readable size; the hard `length > sys.maxsize`
+# guard in `SingleItemDecoder.__call__` fires first at this value.
+MAX_VALUE_LENGTH = sys.maxsize
+
+
+class DecodeBudget(object):
+    """Mutable resource budget for a single top-level decode operation.
+
+    One instance is created at the entry of a top-level decode and shared
+    (by reference, through the decode options dict) with every recursive
+    decoder invocation the operation spawns, so the counters are global
+    to the operation. The limits are configurable per decode call via the
+    `maxNestingDepth`, `maxComponentCount`, `maxSubstrateLength` and
+    `maxValueLength` decode options.
+    """
+
+    def __init__(self, maxNestingDepth=MAX_NESTING_DEPTH,
+                 maxComponentCount=MAX_COMPONENT_COUNT,
+                 maxSubstrateLength=MAX_SUBSTRATE_LENGTH,
+                 maxValueLength=MAX_VALUE_LENGTH):
+        self.maxNestingDepth = maxNestingDepth
+        self.maxComponentCount = maxComponentCount
+        self.maxSubstrateLength = maxSubstrateLength
+        self.maxValueLength = maxValueLength
+        self.componentCount = 0
+        self.startPosition = 0
+
 
 class AbstractPayloadDecoder(object):
     protoComponent = None
@@ -1601,14 +1637,38 @@ class SingleItemDecoder(object):
                  decodeFun=None, substrateFun=None,
                  **options):
 
+        budget = options.get('_decodeBudget')
+
+        if budget is None:
+            budget = DecodeBudget(
+                maxNestingDepth=options.get('maxNestingDepth', MAX_NESTING_DEPTH),
+                maxComponentCount=options.get('maxComponentCount', MAX_COMPONENT_COUNT),
+                maxSubstrateLength=options.get('maxSubstrateLength', MAX_SUBSTRATE_LENGTH),
+                maxValueLength=options.get('maxValueLength', MAX_VALUE_LENGTH)
+            )
+            budget.startPosition = substrate.tell()
+            options['_decodeBudget'] = budget
+
         _nestingLevel = options.get('_nestingLevel', 0)
 
-        if _nestingLevel > MAX_NESTING_DEPTH:
+        if _nestingLevel > budget.maxNestingDepth:
             raise error.PyAsn1Error(
-                'ASN.1 structure nesting depth exceeds limit (%d)' % MAX_NESTING_DEPTH
+                'ASN.1 structure nesting depth exceeds limit (%d)' % budget.maxNestingDepth
             )
 
         options['_nestingLevel'] = _nestingLevel + 1
+
+        budget.componentCount += 1
+
+        if budget.componentCount > budget.maxComponentCount:
+            raise error.PyAsn1Error(
+                'ASN.1 component count exceeds limit (%d)' % budget.maxComponentCount
+            )
+
+        if substrate.tell() - budget.startPosition > budget.maxSubstrateLength:
+            raise error.PyAsn1Error(
+                'Substrate size exceeds limit (%d octets)' % budget.maxSubstrateLength
+            )
 
         allowEoo = options.pop('allowEoo', False)
 
@@ -1766,6 +1826,12 @@ class SingleItemDecoder(object):
 
                 if length == -1 and not self.supportIndefLength:
                     raise error.PyAsn1Error('Indefinite length encoding not supported by this codec')
+
+                if length > budget.maxValueLength:
+                    raise error.PyAsn1Error(
+                        'Value length %d exceeds limit (%d)' % (
+                            length, budget.maxValueLength)
+                    )
 
                 state = stGetValueDecoder
 
@@ -1987,6 +2053,23 @@ class StreamingDecoder(object):
         me required is that ASN.1 structure is encoded in the *IMPLICIT*
         tagging mode.
 
+    maxNestingDepth: :py:class:`int`
+        Maximum ASN.1 structure nesting depth (default
+        ``MAX_NESTING_DEPTH``). Decoding a more deeply nested structure
+        raises :py:class:`~pyasn1.error.PyAsn1Error`.
+
+    maxComponentCount: :py:class:`int`
+        Maximum number of ASN.1 items decoded per top-level decode
+        operation (default ``MAX_COMPONENT_COUNT``).
+
+    maxSubstrateLength: :py:class:`int`
+        Maximum number of substrate octets consumed per top-level decode
+        operation (default ``MAX_SUBSTRATE_LENGTH``).
+
+    maxValueLength: :py:class:`int`
+        Maximum number of octets in a single definite-length value
+        (default ``MAX_VALUE_LENGTH``).
+
     Yields
     ------
     : :py:class:`~pyasn1.type.base.PyAsn1Item`, :py:class:`~pyasn1.error.SubstrateUnderrunError`
@@ -2115,6 +2198,23 @@ class Decoder(object):
             decode passes as 2nd item.
             The streaming variant shall yield an object that will be propagated as
             decode() return value, and leave the remaining payload in the stream.
+
+        maxNestingDepth: :py:class:`int`
+            Maximum ASN.1 structure nesting depth (default
+            ``MAX_NESTING_DEPTH``). Decoding a more deeply nested structure
+            raises :py:class:`~pyasn1.error.PyAsn1Error`.
+
+        maxComponentCount: :py:class:`int`
+            Maximum number of ASN.1 items decoded per top-level decode
+            operation (default ``MAX_COMPONENT_COUNT``).
+
+        maxSubstrateLength: :py:class:`int`
+            Maximum number of substrate octets consumed per top-level decode
+            operation (default ``MAX_SUBSTRATE_LENGTH``).
+
+        maxValueLength: :py:class:`int`
+            Maximum number of octets in a single definite-length value
+            (default ``MAX_VALUE_LENGTH``).
 
         Returns
         -------

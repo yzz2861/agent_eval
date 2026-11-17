@@ -91,6 +91,12 @@ downstream callers depend on. Rationale in
   is enforced inline in the `stDecodeLength` state handling of
   `SingleItemDecoder.__call__`. There is no per-codec override hook: one
   constant protects all three codecs.
+  `MAX_COMPONENT_COUNT`, `MAX_SUBSTRATE_LENGTH` and `MAX_VALUE_LENGTH`
+  join them as the defaults of the configurable decode budget: a
+  `DecodeBudget` instance created per top-level decode operation, shared
+  through `options['_decodeBudget']` and tunable per call via the
+  `maxNestingDepth`/`maxComponentCount`/`maxSubstrateLength`/
+  `maxValueLength` decode options.
 - **`eoo.endOfOctets` is compared with `is`, never `==`.** It is a singleton
   whose `defaultValue` is `0`, so `==` is true against a decoded `Integer(0)`
   and would truncate an indefinite-length container silently, with no
@@ -98,6 +104,9 @@ downstream callers depend on. Rationale in
 - **Forward the options dict.** Recursion depth rides in
   `options['_nestingLevel']`, not the call stack; a freshly built options dict
   defeats the nesting-depth fix.
+  The shared decode budget rides in the same dict as
+  `options['_decodeBudget']`; dropping it resets the component-count and
+  substrate-size budgets for everything below.
 - **The streaming idiom is load-bearing.** Reads are written as `for chunk in
   readFromStream(...): if isinstance(chunk, SubstrateUnderrunError): yield chunk`
   then use the leaked loop variable. Rewriting it as `next()` or a

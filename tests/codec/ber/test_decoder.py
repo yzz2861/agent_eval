@@ -2556,6 +2556,208 @@ class NestingDepthLimitTestCase(BaseTestCase):
             assert False, 'Deeply nested with schema not rejected'
 
 
+class DecodeBudgetTestCase(BaseTestCase):
+    """Test the configurable per-decode-operation resource budgets."""
+
+    def testCustomNestingDepthRejected(self):
+        """Nesting beyond maxNestingDepth must raise PyAsn1Error."""
+        # Each \x30\x80 opens a new indefinite-length SEQUENCE
+        payload = b'\x30\x80' * 20
+        try:
+            decoder.decode(payload, maxNestingDepth=10)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Nesting beyond custom depth limit tolerated'
+
+    def testCustomNestingDepthAtLimitWorks(self):
+        """Nesting exactly at maxNestingDepth must decode."""
+        # NULL wrapped in ten definite-length SEQUENCEs
+        inner = b'\x05\x00'
+        for _ in range(10):
+            inner = b'\x30' + bytes([len(inner)]) + inner
+        asn1Object, _ = decoder.decode(inner, maxNestingDepth=10)
+        assert asn1Object is not None, 'Nesting at custom depth limit rejected'
+
+    def testCustomNestingDepthOneOverRejected(self):
+        """One level over maxNestingDepth must raise PyAsn1Error."""
+        # NULL wrapped in eleven definite-length SEQUENCEs
+        inner = b'\x05\x00'
+        for _ in range(11):
+            inner = b'\x30' + bytes([len(inner)]) + inner
+        try:
+            decoder.decode(inner, maxNestingDepth=10)
+        except error.PyAsn1Error as exc:
+            assert 'nesting depth' in str(exc).lower(), \
+                'Error message missing depth info: %s' % exc
+        else:
+            assert False, 'Nesting one over custom depth limit tolerated'
+
+    def testComponentCountRejected(self):
+        """More items than maxComponentCount must raise PyAsn1Error."""
+        # SEQUENCE of twenty INTEGERs: 21 items in total
+        payload = b'\x30' + bytes([60]) + b'\x02\x01\x01' * 20
+        try:
+            decoder.decode(payload, maxComponentCount=20)
+        except error.PyAsn1Error as exc:
+            assert 'component count' in str(exc).lower(), \
+                'Error message missing count info: %s' % exc
+        else:
+            assert False, 'Excessive component count tolerated'
+
+    def testComponentCountAtLimitWorks(self):
+        """Item count exactly at maxComponentCount must decode."""
+        # SEQUENCE of twenty INTEGERs: 21 items in total
+        payload = b'\x30' + bytes([60]) + b'\x02\x01\x01' * 20
+        asn1Object, _ = decoder.decode(payload, maxComponentCount=21)
+        assert len(asn1Object) == 20, 'Component count at limit rejected'
+
+    def testValueLengthRejected(self):
+        """Value longer than maxValueLength must raise PyAsn1Error."""
+        # OCTET STRING with a 1024-octet value
+        payload = b'\x04\x82\x04\x00' + b'x' * 1024
+        try:
+            decoder.decode(payload, maxValueLength=1023)
+        except error.PyAsn1Error as exc:
+            assert 'value length' in str(exc).lower(), \
+                'Error message missing length info: %s' % exc
+        else:
+            assert False, 'Oversized OCTET STRING tolerated'
+
+    def testValueLengthAtLimitWorks(self):
+        """Value exactly at maxValueLength must decode."""
+        # OCTET STRING with a 1024-octet value
+        payload = b'\x04\x82\x04\x00' + b'x' * 1024
+        asn1Object, _ = decoder.decode(payload, maxValueLength=1024)
+        assert bytes(asn1Object) == b'x' * 1024, \
+            'Value at custom length limit rejected'
+
+    def testSubstrateLengthRejected(self):
+        """Input beyond maxSubstrateLength must raise PyAsn1Error."""
+        # 62-octet SEQUENCE of twenty INTEGERs; the last component
+        # decode starts 59 octets into the substrate
+        payload = b'\x30' + bytes([60]) + b'\x02\x01\x01' * 20
+        try:
+            decoder.decode(payload, maxSubstrateLength=58)
+        except error.PyAsn1Error as exc:
+            assert 'substrate size' in str(exc).lower(), \
+                'Error message missing size info: %s' % exc
+        else:
+            assert False, 'Oversized substrate tolerated'
+
+    def testSubstrateLengthAtLimitWorks(self):
+        """Input exactly at maxSubstrateLength must decode."""
+        # 62-octet SEQUENCE of twenty INTEGERs; the last component
+        # decode starts 59 octets into the substrate
+        payload = b'\x30' + bytes([60]) + b'\x02\x01\x01' * 20
+        asn1Object, _ = decoder.decode(payload, maxSubstrateLength=59)
+        assert len(asn1Object) == 20, 'Substrate at custom size limit rejected'
+
+    def testTruncatedStreamRaisesUnderrun(self):
+        """Truncated input must raise a controlled PyAsn1Error, not hang."""
+        # Indefinite-length SEQUENCE with a truncated INTEGER inside
+        payload = b'\x30\x80\x02\x01'
+        try:
+            decoder.decode(payload, maxComponentCount=100)
+        except error.SubstrateUnderrunError:
+            pass
+        else:
+            assert False, 'Truncated substrate tolerated'
+
+    def testTruncatedStreamEndOfStream(self):
+        """StreamingDecoder must surface EndOfStreamError on truncated input."""
+        # Indefinite-length SEQUENCE with a truncated INTEGER inside
+        stream = io.BytesIO(b'\x30\x80\x02\x01')
+        try:
+            list(decoder.StreamingDecoder(stream, maxComponentCount=100))
+        except error.EndOfStreamError:
+            pass
+        else:
+            assert False, 'Truncated stream tolerated'
+
+    def testNoPartialObjectOnBudgetExceeded(self):
+        """Budget exhaustion must not leak half-decoded objects."""
+        # Indefinite-length SEQUENCE of fifty INTEGERs
+        payload = b'\x30\x80' + b'\x02\x01\x01' * 50 + b'\x00\x00'
+        yielded = []
+        try:
+            for asn1Object in decoder.StreamingDecoder(
+                    io.BytesIO(payload), maxComponentCount=5):
+                yielded.append(asn1Object)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Excessive component count tolerated'
+        assert not yielded, 'Partially decoded object leaked: %r' % (yielded,)
+
+
+class RecursiveSchemaBudgetTestCase(BaseTestCase):
+    """Test decode budgets against cyclically nested recursive schemas."""
+
+    def setUp(self):
+        from pyasn1 import debug
+        BaseTestCase.setUp(self)
+        # Recursive schemas trip an unrelated prettyPrintType quirk on the
+        # debug logging path; disable logging to exercise the decode path.
+        debug.setLogger(None)
+
+    def testRecursiveSetSchemaNesting(self):
+        """Cyclically nested SETs against a recursive schema must be caught."""
+
+        class Node(univ.Set):
+            pass
+
+        Node.componentType = namedtype.NamedTypes(
+            namedtype.OptionalNamedType('child', Node())
+        )
+
+        # Each \x31\x80 opens a new indefinite-length SET
+        payload = b'\x31\x80' * 200
+        try:
+            decoder.decode(payload, asn1Spec=Node())
+        except error.PyAsn1Error:
+            pass
+        except RecursionError:
+            assert False, 'Got RecursionError instead of PyAsn1Error'
+        else:
+            assert False, 'Cyclic SET nesting tolerated'
+
+    def testRecursiveSetSchemaNestingMessage(self):
+        """The nesting depth limit, not another error, must fire."""
+
+        class Node(univ.Set):
+            pass
+
+        Node.componentType = namedtype.NamedTypes(
+            namedtype.OptionalNamedType('child', Node())
+        )
+
+        payload = b'\x31\x80' * 200
+        try:
+            decoder.decode(payload, asn1Spec=Node())
+        except error.PyAsn1Error as exc:
+            assert 'nesting depth' in str(exc).lower(), \
+                'Error message missing depth info: %s' % exc
+        else:
+            assert False, 'Cyclic SET nesting tolerated'
+
+    def testRecursiveSetSchemaShallowWorks(self):
+        """A shallow value must still decode against a recursive schema."""
+
+        class Node(univ.Set):
+            pass
+
+        Node.componentType = namedtype.NamedTypes(
+            namedtype.OptionalNamedType('child', Node())
+        )
+
+        # SET { SET { } } in definite-length form
+        inner = b'\x31\x00'
+        outer = b'\x31' + bytes([len(inner)]) + inner
+        asn1Object, _ = decoder.decode(outer, asn1Spec=Node())
+        assert asn1Object.isValue, 'Shallow recursive SET rejected'
+
+
 class NonStreamingCompatibilityTestCase(BaseTestCase):
     def setUp(self):
         from pyasn1 import debug
