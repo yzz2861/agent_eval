@@ -269,6 +269,11 @@ class Sanitizer:
         else:
             html = unicodedata.normalize("NFKC", html)
 
+        # Remove control characters from the whole document (text nodes,
+        # tails and attribute values) before parsing; lxml cannot serialize
+        # them and would raise when elements are dropped or rewritten.
+        html = filter_control_characters(html)
+
         html = "<div>%s</div>" % html
         try:
             doc = lxml.html.fromstring(html)

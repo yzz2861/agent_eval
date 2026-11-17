@@ -1,6 +1,10 @@
+import random
+import re
 from unittest import TestCase
 
-from .sanitizer import Sanitizer
+import lxml.html
+
+from .sanitizer import DEFAULT_SETTINGS, Sanitizer
 
 
 default_sanitizer = Sanitizer()
@@ -830,3 +834,185 @@ git commit
             ],
             sanitizer=sanitizer,
         )
+
+
+class FuzzSanitizerTestCase(TestCase):
+    """Bounded, deterministic, pure-stdlib HTML mutation fuzzing."""
+
+    FUZZ_ITERATIONS = 500
+    FUZZ_SEED = 20261117
+    MAX_ELEMENTS = 6
+    MAX_DEPTH = 4
+
+    FORBIDDEN_TAGS = (
+        "script", "iframe", "object", "embed", "form", "input", "style",
+        "svg", "math", "link", "meta", "base", "frame", "frameset",
+        "applet", "audio", "video", "source", "template", "noscript",
+        "textarea", "button", "select", "option", "canvas",
+    )
+    EVENT_ATTRIBUTES = (
+        "onerror", "onload", "onclick", "onmouseover", "onfocus",
+        "onblur", "oninput", "onchange", "onsubmit", "onkeyup",
+        "onkeydown", "onbegin", "onfinish", "onresize", "onscroll",
+        "ontoggle", "onpointerover",
+    )
+    ATTRIBUTE_NAMES = EVENT_ATTRIBUTES + (
+        "href", "src", "style", "class", "id", "title", "name",
+        "srcdoc", "formaction", "xlink:href", "data-x",
+    )
+    ATTRIBUTE_VALUES = (
+        "javascript:alert(1)", "alert(1)", "x", "#", "/path",
+        "http://example.com", "JaVaScRiPt:alert(1)",
+        "java\tscript:alert(1)", " data:,", "",
+    )
+    TEXT_PAYLOADS = ("alert(1)", "javascript:alert(1)", "foo", "", "  ")
+    ENTITIES = (
+        "&#60;", "&#x3c;", "&lt;", "&#62;", "&#x3e;", "&gt;",
+        "&#34;", "&#39;", "&quot;", "&amp;", "&nbsp;", "&#0;",
+    )
+    WEIRD_CHARACTERS = (
+        "\t", "\n", "\r", "\f", "\v", "\u0000", "\u0001", "\u000b",
+        "\ufeff", "\u200b", "\u00a0", "\uff1c", "\uff1e", "\uff02",
+    )
+    TAG_NAME_MUTATIONS = (
+        "script", "SCRIPT", "Script", " script", "script\t", "scrIpt",
+        "svg/script",
+    )
+    ATTRIBUTE_DELIMITERS = ("\"", "\x27", "")
+
+    def _random_text(self, rng):
+        parts = []
+        for _ in range(rng.randint(0, 4)):
+            parts.append(rng.choice(self.TEXT_PAYLOADS))
+            if rng.random() < 0.5:
+                parts.append(rng.choice(self.ENTITIES))
+            if rng.random() < 0.3:
+                parts.append(rng.choice(self.WEIRD_CHARACTERS))
+        return "".join(parts)
+
+    def _random_attribute(self, rng):
+        name = rng.choice(self.ATTRIBUTE_NAMES)
+        value = rng.choice(self.ATTRIBUTE_VALUES)
+        delimiter = rng.choice(self.ATTRIBUTE_DELIMITERS)
+        styles = (
+            " %s" % name,
+            " %s=%s%s%s" % (name, delimiter, value, delimiter),
+            " %s =%s%s%s" % (name, delimiter, value, delimiter),
+            " %s\\n=%s%s%s" % (name, delimiter, value, delimiter),
+        )
+        return rng.choice(styles)
+
+    def _random_element(self, rng, depth):
+        tag = rng.choice(
+            tuple(DEFAULT_SETTINGS["tags"])
+            + self.FORBIDDEN_TAGS
+            + self.TAG_NAME_MUTATIONS
+        )
+        attributes = "".join(
+            self._random_attribute(rng) for _ in range(rng.randint(0, 4))
+        )
+        opening = rng.choice((
+            "<%s%s>" % (tag, attributes),
+            "<%s%s/>" % (tag, attributes),
+            "< %s%s>" % (tag, attributes),
+            "<%s%s" % (tag, attributes),
+            "<!--%s%s-->" % (tag, attributes),
+        ))
+        closing = rng.choice((
+            "</%s>" % tag,
+            "</ %s>" % tag,
+            "</%s >" % tag,
+            "",
+            "<!--</%s>-->" % tag,
+        ))
+        inner = self._random_text(rng)
+        if depth < self.MAX_DEPTH:
+            for _ in range(rng.randint(0, 3)):
+                inner += self._random_element(rng, depth + 1)
+            inner += self._random_text(rng)
+        if rng.random() < 0.4:
+            inner = rng.choice(self.ENTITIES + self.WEIRD_CHARACTERS) + inner
+        return opening + inner + closing
+
+    def _random_html(self, rng):
+        chunks = [self._random_text(rng)]
+        for _ in range(rng.randint(1, self.MAX_ELEMENTS)):
+            chunks.append(self._random_element(rng, 0))
+            chunks.append(self._random_text(rng))
+        if rng.random() < 0.3:
+            chunks.append("<!DOCTYPE html>")
+        if rng.random() < 0.3:
+            chunks.append("<?xml version=\x271.0\x27?>")
+        if rng.random() < 0.3:
+            chunks.append("<!-- %s -->" % rng.choice(self.EVENT_ATTRIBUTES))
+        rng.shuffle(chunks)
+        return "".join(chunks)
+
+    def _assert_clean(self, html, cleaned):
+        # Parse-level oracle: only allowed tags and non-event attributes
+        doc = lxml.html.fromstring("<div>%s</div>" % cleaned)
+        allowed_tags = DEFAULT_SETTINGS["tags"]
+        for element in doc.iter():
+            tag = element.tag
+            if not isinstance(tag, str) or tag == "div":
+                continue
+            self.assertIn(tag, allowed_tags, html)
+            for attribute in element.attrib:
+                name = attribute.lower()
+                self.assertFalse(name.startswith("on"), (html, cleaned))
+                self.assertNotIn(name, ("srcdoc", "formaction"), (html, cleaned))
+        # Raw oracle (defense in depth). Only consider text which is still
+        # inside a real, unescaped tag so that escaped payloads such as
+        # "&lt;script onerror=...&gt;" cannot trigger false positives.
+        live_tags = re.findall(r"<[^<>&]*>", cleaned)
+        forbidden_pattern = re.compile(
+            r"<\s*/?\s*(%s)(?=[\s/>])" % "|".join(self.FORBIDDEN_TAGS),
+            re.IGNORECASE,
+        )
+        event_pattern = re.compile(
+            r"[\s/][\w:-]*on[a-z]+\s*=", re.IGNORECASE
+        )
+        for live_tag in live_tags:
+            self.assertIsNone(
+                forbidden_pattern.search(live_tag), (html, cleaned)
+            )
+            self.assertIsNone(
+                event_pattern.search(live_tag), (html, cleaned)
+            )
+
+    def test_bounded_random_mutation_fuzzing(self):
+        # Fixed seed and a fixed, small iteration count make every run
+        # deterministic and bounded; only the standard library random
+        # module is used to generate inputs.
+        rng = random.Random(self.FUZZ_SEED)
+        for _ in range(self.FUZZ_ITERATIONS):
+            html = self._random_html(rng)
+            cleaned = default_sanitizer.sanitize(html)
+            self._assert_clean(html, cleaned)
+            # Sanitization must always return a plain string.
+            self.assertIsInstance(cleaned, str)
+
+
+class ControlCharacterRegressionTestCase(TestCase):
+    """Inputs which made sanitize() raise ValueError before the input was
+    filtered for XML-illegal control characters."""
+
+    def test_control_characters_in_attributes_and_tails(self):
+        entries = (
+            ("<a href=\"\x01\">x</a>", "<a href=\"#\">x</a>"),
+            ("a<script>\x01</script>b", "ab"),
+            ("<p>\x00</p>", ""),
+            ("<b>\x01</b>x", "x"),
+            ("<script>x</script>\x00y", "y"),
+            ("<a name=\"\x0b\">x</a>", "<a name=\"\">x</a>"),
+        )
+        for before, after in entries:
+            with self.subTest(before=before):
+                self.assertEqual(default_sanitizer.sanitize(before), after)
+
+    def test_fuzz_crash_sample_does_not_raise(self):
+        # Reduced sample discovered by the random mutation fuzzer; the
+        # control character in the dropped element tail used to crash the
+        # internal lxml cleaner.
+        sample = "<!--c-->\x01<script>alert(1)</script>tail"
+        self.assertEqual(default_sanitizer.sanitize(sample), "tail")
