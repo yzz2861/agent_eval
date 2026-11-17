@@ -106,6 +106,18 @@ class SignatureConfiguration:
     fixed, and not added to the Transforms. This setting can be used to validate signatures in those use-cases.
     """
 
+    validate_reference_identity: bool = True
+    """
+    If ``True``, guard against XML signature wrapping attacks by validating the identity of the element each
+    same-document ``Reference`` resolves to. The node path of every resolved reference target is recorded when
+    the reference is resolved, and the element returned as ``VerifyResult.signed_xml`` is checked to correspond
+    to that exact target. Documents showing signs of signature wrapping - a reference URI matching multiple
+    elements (duplicate IDs), or a reference target with a same-named ancestor or descendant element (indicating
+    the signed element may have been relocated and replaced) - are rejected with
+    :class:`signxml.exceptions.InvalidSignature`. Set this to ``False`` to disable these checks and restore the
+    legacy verification behavior.
+    """
+
 
 _DEFAULT_SIGNATURE_CONFIG = SignatureConfiguration()
 
@@ -689,10 +701,25 @@ class XMLVerifier(XMLSignatureProcessor):
         transforms = self._find(reference, "Transforms", require=False)
         digest_method_alg_name = self._find(reference, "DigestMethod").get("Algorithm")
         digest_value = self._find(reference, "DigestValue")
+        uri = reference.get("URI")
+        validate_identity = self.config.validate_reference_identity
+        if validate_identity and uri is not None and uri.startswith("#") and not uri.startswith("#xpointer("):
+            self._assert_unique_reference_id(root, uri)
         payload = self._resolve_reference(root, reference, uri_resolver=uri_resolver)
         if isinstance(payload, etree._Element):
             self._reject_manifests(payload)
-        if reference.get("URI") == "" or reference.get("URI").startswith("#"):
+        reference_target_path = None
+        if validate_identity and isinstance(payload, etree._Element) and uri is not None and uri.startswith("#"):
+            self._assert_no_same_name_wrapping(payload, uri)
+        if (
+            validate_identity
+            and isinstance(payload, etree._Element)
+            and uri is not None
+            and (uri == "" or uri.startswith("#"))
+        ):
+            # Record the resolved node path so the verified element can be matched to the reference target.
+            reference_target_path = payload.getroottree().getpath(payload)
+        if uri == "" or uri.startswith("#"):
             # XMLDSig 4.4.3.3: same-document references omit comments before applying transforms.
             etree.strip_tags(payload, etree.Comment)
         payload_c14n = self._apply_transforms(
@@ -715,12 +742,65 @@ class XMLVerifier(XMLSignatureProcessor):
             payload_c14n_xml = None
         if payload_c14n_xml is not None:
             self._reject_manifests(payload_c14n_xml)
+        if reference_target_path is not None:
+            # A base64 transform replaces the payload with decoded content, so the resulting
+            # XML can legitimately differ from the reference target element.
+            has_base64_transform = (
+                any(
+                    transform.get("Algorithm") == "http://www.w3.org/2000/09/xmldsig#base64"
+                    for transform in self._findall(transforms, "Transform")
+                )
+                if transforms is not None
+                else False
+            )
+            self._assert_reference_target_identity(
+                payload, reference_target_path, None if has_base64_transform else payload_c14n_xml
+            )
 
         if isinstance(signature_key_used, bytes):
             signature_key = signature_key_used
         else:
             signature_key = signature_key_used.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
         return VerifyResult(payload_c14n, payload_c14n_xml, signature, signature_key=signature_key)
+
+    def _assert_unique_reference_id(self, root, uri):
+        target = uri.lstrip("#")
+        matches = 0
+        for id_attribute in self.id_attributes:
+            xpath_query = f"//*[@*[local-name() = '{id_attribute}']=$uri]"
+            matches += len(root.xpath(xpath_query, uri=target))
+        if matches > 1:
+            raise InvalidSignature(
+                f"Reference URI {uri} matched {matches} elements with duplicate IDs; "
+                "this indicates a possible signature wrapping attack"
+            )
+
+    def _assert_no_same_name_wrapping(self, payload, uri):
+        for ancestor in payload.iterancestors():
+            if ancestor.tag == payload.tag:
+                raise InvalidSignature(
+                    f"Reference target {uri} has a same-named ancestor element; "
+                    "this indicates a possible signature wrapping attack"
+                )
+        for descendant in payload.iterdescendants():
+            if isinstance(descendant.tag, str) and descendant.tag == payload.tag:
+                raise InvalidSignature(
+                    f"Reference target {uri} has a same-named descendant element; "
+                    "this indicates a possible signature wrapping attack"
+                )
+
+    def _assert_reference_target_identity(self, payload, reference_target_path, payload_c14n_xml):
+        current_path = payload.getroottree().getpath(payload)
+        if current_path != reference_target_path:
+            raise InvalidSignature(
+                f"Reference target moved from {reference_target_path} to {current_path} during verification; "
+                "this indicates a possible signature wrapping attack"
+            )
+        if payload_c14n_xml is not None and payload_c14n_xml.tag != payload.tag:
+            raise InvalidSignature(
+                "The verified signed XML element does not match the element the reference resolved to; "
+                "this indicates a possible signature wrapping attack"
+            )
 
     def validate_schema(self, signature):
         last_exception = None

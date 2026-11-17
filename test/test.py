@@ -291,6 +291,72 @@ class TestVerifyXML(unittest.TestCase, LoadExampleKeys):
                     self.assertEqual(verified.signed_xml.find(".//ds:Signature", namespaces).get("Id"), "other")
                     self.assertEqual(verified.signed_xml.xpath(".//comment()"), [])
 
+    def test_signature_wrapping_same_name_ancestor_rejected(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><item Id="payload">signed content</item></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="#payload"
+        )
+        XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+        # Wrapping attack: relocate the signed element inside a same-named wrapper that the
+        # application would consume instead of the verified element.
+        signed_item = signed.find("item")
+        wrapper = signed.makeelement("item")
+        signed.replace(signed_item, wrapper)
+        wrapper.append(signed_item)
+        with self.assertRaisesRegex(InvalidSignature, "same-named ancestor"):
+            XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+        # Legacy behavior: identity validation can be disabled.
+        legacy_config = replace(config, validate_reference_identity=False)
+        result = XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=legacy_config)
+        self.assertEqual(result.signed_xml.tag, "item")
+
+    def test_signature_wrapping_same_name_descendant_rejected(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><item Id="payload"><item>nested</item></item></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="#payload"
+        )
+        with self.assertRaisesRegex(InvalidSignature, "same-named descendant"):
+            XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+        legacy_config = replace(config, validate_reference_identity=False)
+        result = XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=legacy_config)
+        self.assertEqual(result.signed_xml.tag, "item")
+
+    def test_signature_wrapping_duplicate_id_rejected(self):
+        config = SignatureConfiguration(require_x509=False)
+        root = etree.fromstring(b'<root><item Id="payload">good</item></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri="#payload"
+        )
+        XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+        # Wrapping attack: inject a same-ID impostor element ahead of the signed element.
+        signed.insert(0, etree.fromstring(b'<item Id="payload">evil</item>'))
+        with self.assertRaisesRegex(InvalidSignature, "duplicate IDs"):
+            XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+        # Legacy behavior: duplicate IDs surface as an ambiguous reference input error.
+        legacy_config = replace(config, validate_reference_identity=False)
+        with self.assertRaisesRegex(InvalidInput, "Ambiguous reference URI"):
+            XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=legacy_config)
+
+    def test_multiple_references_identity_validated(self):
+        config = SignatureConfiguration(require_x509=False, expect_references=2)
+        root = etree.fromstring(b'<root><a Id="ref1">one</a><b Id="ref2"><c>two</c></b></root>')
+        signed = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256).sign(
+            root, key=b"secret", reference_uri=["#ref1", "#ref2"]
+        )
+        results = XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].signed_xml.tag, "a")
+        self.assertEqual(results[0].signed_xml.text, "one")
+        self.assertEqual(results[1].signed_xml.tag, "b")
+        self.assertEqual(results[1].signed_xml.find("c").text, "two")
+
     def test_signing_same_document_comments(self):
         for method in methods:
             with self.subTest(method=method):
