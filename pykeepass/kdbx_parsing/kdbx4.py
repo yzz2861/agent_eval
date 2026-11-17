@@ -24,7 +24,6 @@ from construct import (
     Padding,
     Peek,
     Pointer,
-    Prefixed,
     RepeatUntil,
     Struct,
     Switch,
@@ -33,14 +32,23 @@ from construct import (
 )
 
 from .common import (
+    MAX_AES_KDF_ROUNDS,
+    MAX_ARGON2_ITERATIONS,
+    MAX_ARGON2_MEMORY_BYTES,
+    MAX_ARGON2_PARALLELISM,
+    MAX_FIELD_SIZE,
+    MAX_KDF_SALT_SIZE,
+    MIN_KDF_SALT_SIZE,
     XML,
     AES256Payload,
+    BoundedPrefixed,
     ChaCha20Payload,
     CipherId,
     CompressionFlags,
     Concatenated,
     Decompressed,
     DynamicDict,
+    KDBXParameterError,
     ProtectedStreamId,
     Reparsed,
     TwoFishPayload,
@@ -60,40 +68,114 @@ kdf_uuids = {
 }
 
 
+def _require_kdf_parameter(kdf_parameters, key):
+    """Fetch a variant-dictionary KDF parameter or raise a structured error."""
+
+    try:
+        return kdf_parameters[key].value
+    except (KeyError, AttributeError):
+        raise KDBXParameterError(
+            "KDF parameter {} is missing or malformed".format(key)
+        )
+
+
+def validate_kdf_parameters(kdf_parameters):
+    """Validate attacker-controlled KDF parameters before expensive work.
+
+    Bounds memory, iteration count, parallelism and salt size so that a
+    malicious database cannot exhaust CPU or memory.  Only structural metadata
+    (parameter names/limits) appears in error messages.
+    """
+
+    uuid = _require_kdf_parameter(kdf_parameters, "$UUID")
+
+    if uuid in (kdf_uuids["argon2"], kdf_uuids["argon2id"]):
+        salt = _require_kdf_parameter(kdf_parameters, "S")
+        iterations = _require_kdf_parameter(kdf_parameters, "I")
+        memory_bytes = _require_kdf_parameter(kdf_parameters, "M")
+        parallelism = _require_kdf_parameter(kdf_parameters, "P")
+
+        if not (MIN_KDF_SALT_SIZE <= len(salt) <= MAX_KDF_SALT_SIZE):
+            raise KDBXParameterError(
+                "Argon2 salt size {} outside permitted range ({}, {})".format(
+                    len(salt), MIN_KDF_SALT_SIZE, MAX_KDF_SALT_SIZE
+                )
+            )
+        if not (1 <= iterations <= MAX_ARGON2_ITERATIONS):
+            raise KDBXParameterError(
+                "Argon2 iterations {} outside permitted range (1, {})".format(
+                    iterations, MAX_ARGON2_ITERATIONS
+                )
+            )
+        if not (1 <= memory_bytes <= MAX_ARGON2_MEMORY_BYTES):
+            raise KDBXParameterError(
+                "Argon2 memory parameter outside permitted range "
+                "(1, {} bytes)".format(MAX_ARGON2_MEMORY_BYTES)
+            )
+        if not (1 <= parallelism <= MAX_ARGON2_PARALLELISM):
+            raise KDBXParameterError(
+                "Argon2 parallelism {} outside permitted range (1, {})".format(
+                    parallelism, MAX_ARGON2_PARALLELISM
+                )
+            )
+
+    elif uuid == kdf_uuids["aeskdf"]:
+        salt = _require_kdf_parameter(kdf_parameters, "S")
+        rounds = _require_kdf_parameter(kdf_parameters, "R")
+
+        if not (MIN_KDF_SALT_SIZE <= len(salt) <= MAX_KDF_SALT_SIZE):
+            raise KDBXParameterError(
+                "AES-KDF salt size {} outside permitted range ({}, {})".format(
+                    len(salt), MIN_KDF_SALT_SIZE, MAX_KDF_SALT_SIZE
+                )
+            )
+        if not (1 <= rounds <= MAX_AES_KDF_ROUNDS):
+            raise KDBXParameterError(
+                "AES-KDF rounds {} outside permitted range (1, {})".format(
+                    rounds, MAX_AES_KDF_ROUNDS
+                )
+            )
+
+    else:
+        raise KDBXParameterError("Unsupported key derivation method")
+
+
 def compute_transformed(context):
     """Compute transformed key for opening database"""
+
+    kdf_parameters = context._.header.value.dynamic_header.kdf_parameters.data.dict
+    # reject out-of-bounds/missing parameters before doing any expensive work
+    validate_kdf_parameters(kdf_parameters)
+
+    if context._._.transformed_key is not None:
+        return context._._.transformed_key
 
     key_composite = compute_key_composite(
         password=context._._.password,
         keyfile=context._._.keyfile
     )
-    kdf_parameters = context._.header.value.dynamic_header.kdf_parameters.data.dict
+    uuid = kdf_parameters['$UUID'].value
 
-    if context._._.transformed_key is not None:
-        transformed_key = context._._.transformed_key
-    elif kdf_parameters['$UUID'].value in (kdf_uuids['argon2'], kdf_uuids['argon2id']):
+    if uuid in (kdf_uuids['argon2'], kdf_uuids['argon2id']):
         transformed_key = argon2.low_level.hash_secret_raw(
             secret=key_composite,
             salt=kdf_parameters['S'].value,
             hash_len=32,
-            type=(argon2.low_level.Type.ID if kdf_parameters['$UUID'].value == kdf_uuids['argon2id'] else argon2.low_level.Type.D),
+            type=(argon2.low_level.Type.ID if uuid == kdf_uuids['argon2id'] else argon2.low_level.Type.D),
             time_cost=kdf_parameters['I'].value,
             memory_cost=kdf_parameters['M'].value // 1024,
             parallelism=kdf_parameters['P'].value,
             version=kdf_parameters['V'].value
         )
-    elif kdf_parameters['$UUID'].value == kdf_uuids['aeskdf']:
-        key_composite = compute_key_composite(
-            password=context._._.password,
-            keyfile=context._._.keyfile
-        )
+    elif uuid == kdf_uuids['aeskdf']:
         transformed_key = aes_kdf(
             kdf_parameters['S'].value,
             kdf_parameters['R'].value,
             key_composite
         )
     else:
-        raise Exception('Unsupported key derivation method')
+        # unreachable: validate_kdf_parameters already rejected the UUID
+        raise KDBXParameterError('Unsupported key derivation method')
 
     return transformed_key
 
@@ -119,8 +201,8 @@ def compute_header_hmac_hash(context):
 # --------------- KDF Params / Plugin Data ----------------
 VariantDictionaryItem = Struct(
     "type" / Byte,
-    "key" / Prefixed(Int32ul, GreedyString('utf-8')),
-    "value" / Prefixed(
+    "key" / BoundedPrefixed(Int32ul, GreedyString('utf-8'), MAX_FIELD_SIZE, "variant dictionary key"),
+    "value" / BoundedPrefixed(
         Int32ul,
         Switch(
             this.type,
@@ -132,7 +214,9 @@ VariantDictionaryItem = Struct(
              0x42: GreedyBytes,
              0x18: GreedyString('utf-8')
              }
-        )
+        ),
+        MAX_FIELD_SIZE,
+        "variant dictionary value"
     ),
     "next_byte" / Peek(Byte)
 )
@@ -167,7 +251,7 @@ DynamicHeaderItem = Struct(
          'public_custom_data': 12
          }
     ),
-    "data" / Prefixed(
+    "data" / BoundedPrefixed(
         Int32ul,
         Switch(
             this.id,
@@ -176,7 +260,9 @@ DynamicHeaderItem = Struct(
              'cipher_id': CipherId
              },
             default=GreedyBytes
-        )
+        ),
+        MAX_FIELD_SIZE,
+        "dynamic header field"
     )
 )
 
@@ -213,7 +299,7 @@ def compute_payload_block_hash(this):
 EncryptedPayloadBlock = Struct(
     "hmac_hash_offset" / Tell,
     Padding(32),
-    "block_data" / Prefixed(Int32ul, GreedyBytes),
+    "block_data" / BoundedPrefixed(Int32ul, GreedyBytes, MAX_FIELD_SIZE, "encrypted payload block"),
     # hmac_hash has to be at the end with a pointer because it needs to
     # come after other fields
     "hmac_hash" / Pointer(
@@ -250,13 +336,15 @@ InnerHeaderItem = Struct(
          'binary': 0x03
          }
     ),
-    "data" / Prefixed(
+    "data" / BoundedPrefixed(
         Int32ul,
         Switch(
             this.type,
             {'protected_stream_id': ProtectedStreamId},
             default=GreedyBytes
-        )
+        ),
+        MAX_FIELD_SIZE,
+        "inner header field"
     )
 )
 

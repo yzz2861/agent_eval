@@ -96,6 +96,9 @@ class PyKeePass:
         else:
             filename = self.filename
 
+        # discard any previously opened database so a failed parse can never
+        # leave partially decrypted plaintext reachable through self.kdbx
+        self.kdbx = None
         try:
             if hasattr(filename, "read"):
                 self.kdbx = KDBX.parse_stream(

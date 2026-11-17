@@ -13,6 +13,7 @@ from construct import (
     Adapter,
     BitsSwapped,
     BitStruct,
+    BytesIOWithOffsets,
     Container,
     Flag,
     GreedyBytes,
@@ -20,7 +21,9 @@ from construct import (
     ListContainer,
     Mapping,
     Padding,
+    Subconstruct,
     Switch,
+    stream_write,
 )
 from Cryptodome.Cipher import AES, ChaCha20, Salsa20
 from Cryptodome.Random import get_random_bytes
@@ -42,6 +45,94 @@ class CredentialsError(Exception):
 
 class PayloadChecksumError(Exception):
     pass
+
+
+class KDBXFormatError(Exception):
+    """Base class for structured errors raised while hardening KDBX parsing.
+
+    Messages intentionally carry only structural metadata (field names and
+    limits), never decrypted content, so that a failed parse cannot leak
+    partial plaintext through the exception chain."""
+
+
+class KDBXParameterError(KDBXFormatError):
+    """Raised when a header/KDF parameter is missing or outside safe bounds."""
+
+
+class StreamLimitError(KDBXFormatError):
+    """Raised when a length-prefixed stream or field exceeds its size cap."""
+
+
+class XMLParseError(KDBXFormatError):
+    """Raised when the payload XML is malformed, truncated or too large."""
+
+
+# -------------------- Hardening limits --------------------
+# These caps bound attacker-controlled allocations and CPU work when parsing
+# untrusted databases.  They are deliberately generous compared with values
+# produced by legitimate KeePass clients while still rejecting pathological
+# parameters used in denial-of-service databases.
+
+# length-prefixed fields (variant dictionary items, dynamic/inner header
+# items, encrypted payload blocks) - 16 MiB
+MAX_FIELD_SIZE = 16 * 2 ** 20
+
+# decompressed, decrypted XML payload - 256 MiB
+MAX_XML_SIZE = 256 * 2 ** 20
+
+# KDF salt 'S' - KeePass uses 32 bytes, allow a practical range
+MIN_KDF_SALT_SIZE = 8
+MAX_KDF_SALT_SIZE = 1024
+
+# Argon2 parameters.  memory_cost is expressed in KiB (the variant dictionary
+# 'M' value is in bytes and is divided by 1024 before reaching argon2-cffi).
+MAX_ARGON2_ITERATIONS = 1000
+MAX_ARGON2_MEMORY_KIB = 1 * 2 ** 20       # 1 GiB in KiB
+MAX_ARGON2_MEMORY_BYTES = MAX_ARGON2_MEMORY_KIB * 1024
+MAX_ARGON2_PARALLELISM = 64
+
+# AES-KDF transformation rounds
+MAX_AES_KDF_ROUNDS = 100_000_000
+
+
+class BoundedPrefixed(Subconstruct):
+    """Length-prefixed stream whose declared length is validated up front.
+
+    Drop-in replacement for constructs ``Prefixed``: it parses/builds the same
+    raw value (e.g. ``bytes`` for a `GreedyBytes` subcon), but rejects declared
+    lengths outside ``[0, max_size]`` before any bytes are read.  This keeps a
+    malicious database from advertising an enormous 32-bit length to trigger
+    oversized allocations or stream over-reads.
+    """
+
+    def __init__(self, length_field, subcon, max_size, name="field"):
+        super().__init__(subcon)
+        self.length_field = length_field
+        self.max_size = max_size
+        self.name = name
+
+    def _check_length(self, length, path):
+        if length < 0 or length > self.max_size:
+            raise StreamLimitError(
+                "{} length {} outside permitted range (0, {})".format(
+                    self.name, length, self.max_size
+                )
+            )
+
+    def _parse(self, stream, context, path):
+        length = self.length_field._parsereport(stream, context, path)
+        self._check_length(length, path)
+        substream = BytesIOWithOffsets.from_reading(stream, length, path)
+        return self.subcon._parsereport(substream, context, path)
+
+    def _build(self, obj, stream, context, path):
+        substream = io.BytesIO()
+        self.subcon._build(obj, substream, context, path)
+        data = substream.getvalue()
+        self._check_length(len(data), path)
+        self.length_field._build(len(data), stream, context, path)
+        stream_write(stream, data, len(data), path)
+        return obj
 
 
 class DynamicDict(Adapter):
@@ -240,11 +331,27 @@ def rotate_seeds(kdbx, rotate_kdf_salt=True):
 
 
 class XML(Adapter):
-    """Bytes <---> lxml etree"""
+    """Bytes <---> lxml etree
+
+    The input is size-checked before being handed to the parser, and parser
+    failures are re-raised as `XMLParseError` without embedding any payload
+    bytes so that malformed/truncated databases cannot leak partial plaintext.
+    """
 
     def _decode(self, data, con, path):
-        parser = etree.XMLParser(remove_blank_text=True)
-        return etree.parse(io.BytesIO(data), parser)
+        if len(data) > MAX_XML_SIZE:
+            raise StreamLimitError(
+                "XML payload exceeds maximum allowed size of {} bytes".format(
+                    MAX_XML_SIZE
+                )
+            )
+        # huge_tree stays disabled so lxml rejects entity-expansion and
+        # depth/recursion attacks in untrusted databases
+        parser = etree.XMLParser(remove_blank_text=True, huge_tree=False)
+        try:
+            return etree.parse(io.BytesIO(data), parser)
+        except etree.XMLSyntaxError:
+            raise XMLParseError("Malformed or truncated XML payload")
 
     def _encode(self, tree, con, path):
         return etree.tostring(tree)
@@ -415,10 +522,34 @@ class TwoFishPayload(DecryptedPayload):
 
 
 class Decompressed(Adapter):
-    """Compressed Bytes <---> Decompressed Bytes"""
+    """Compressed Bytes <---> Decompressed Bytes
+
+    Decompression is streamed through a size cap (see `MAX_XML_SIZE`) so that
+    a compression bomb embedded in a malicious database cannot exhaust memory.
+    """
 
     def _decode(self, data, con, path):
-        return zlib.decompress(data, 16 + 15)
+        decompressor = zlib.decompressobj(16 + 15)
+        # cap the amount returned from each call so that a compression bomb
+        # cannot force an arbitrarily large allocation in a single step
+        output = decompressor.decompress(data, MAX_XML_SIZE + 1)
+        if len(output) > MAX_XML_SIZE:
+            raise StreamLimitError(
+                "Decompressed payload exceeds maximum allowed size of {} "
+                "bytes".format(MAX_XML_SIZE)
+            )
+        output += decompressor.flush()
+        if len(output) > MAX_XML_SIZE:
+            raise StreamLimitError(
+                "Decompressed payload exceeds maximum allowed size of {} "
+                "bytes".format(MAX_XML_SIZE)
+            )
+        if not decompressor.eof:
+            raise StreamLimitError(
+                "Decompressed payload exceeds maximum allowed size of {} "
+                "bytes".format(MAX_XML_SIZE)
+            )
+        return output
 
     def _encode(self, data, con, path):
         compressobj = zlib.compressobj(
