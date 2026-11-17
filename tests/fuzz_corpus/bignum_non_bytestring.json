@@ -1,0 +1,9 @@
+{
+  "category": "bignum",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "bignum value must be a byte string",
+  "outcome": "error"
+}

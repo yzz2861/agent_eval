@@ -1,0 +1,8 @@
+{
+  "category": "map",
+  "kwargs": {
+    "allow_duplicate_keys": false
+  },
+  "match": "Duplicate map key",
+  "outcome": "error"
+}

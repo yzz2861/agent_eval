@@ -1,0 +1,9 @@
+{
+  "category": "array",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "maximum container nesting depth (400) exceeded",
+  "outcome": "error"
+}

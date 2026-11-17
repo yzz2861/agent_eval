@@ -1,0 +1,11 @@
+{
+  "category": "shared_reference",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {
+    "max_depth": 4
+  },
+  "match": "maximum container nesting depth (4) exceeded",
+  "outcome": "error"
+}

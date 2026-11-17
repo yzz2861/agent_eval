@@ -1,0 +1,5 @@
+{
+  "category": "float",
+  "match": "mantissa must be an integer",
+  "outcome": "error"
+}

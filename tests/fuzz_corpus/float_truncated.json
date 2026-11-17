@@ -1,0 +1,9 @@
+{
+  "category": "float",
+  "cause": null,
+  "cause_match": null,
+  "exception": "CBORDecodeEOF",
+  "kwargs": {},
+  "match": "premature end of stream",
+  "outcome": "error"
+}

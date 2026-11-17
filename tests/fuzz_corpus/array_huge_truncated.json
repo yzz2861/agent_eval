@@ -1,0 +1,7 @@
+{
+  "category": "array",
+  "exception": "CBORDecodeEOF",
+  "kwargs": {},
+  "match": "premature end of stream",
+  "outcome": "error"
+}

@@ -1,0 +1,9 @@
+{
+  "category": "shared_reference",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "shared reference 5 not found",
+  "outcome": "error"
+}

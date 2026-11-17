@@ -1,0 +1,9 @@
+{
+  "category": "tag",
+  "cause": "RuntimeError",
+  "cause_match": "contains a reference to itself",
+  "exception": null,
+  "kwargs": {},
+  "match": "error decoding map",
+  "outcome": "error"
+}

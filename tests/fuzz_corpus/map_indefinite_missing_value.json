@@ -1,0 +1,9 @@
+{
+  "category": "map",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "missing value for key in indefinite-length map",
+  "outcome": "error"
+}

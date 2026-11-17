@@ -1,0 +1,7 @@
+{
+  "category": "float",
+  "exception": null,
+  "kwargs": {},
+  "match": "error decoding bigfloat",
+  "outcome": "error"
+}

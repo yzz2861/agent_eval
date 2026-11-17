@@ -1,0 +1,9 @@
+{
+  "category": "indefinite",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "non-byte string",
+  "outcome": "error"
+}

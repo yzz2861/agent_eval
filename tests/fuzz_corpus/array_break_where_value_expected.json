@@ -1,0 +1,9 @@
+{
+  "category": "indefinite",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "break code encountered where a data item was expected",
+  "outcome": "error"
+}

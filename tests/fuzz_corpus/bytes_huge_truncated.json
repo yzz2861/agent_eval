@@ -1,0 +1,7 @@
+{
+  "category": "bytes",
+  "exception": "CBORDecodeEOF",
+  "kwargs": {},
+  "match": "premature end of stream",
+  "outcome": "error"
+}

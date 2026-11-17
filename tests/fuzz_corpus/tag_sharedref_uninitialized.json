@@ -1,0 +1,9 @@
+{
+  "category": "shared_reference",
+  "cause": null,
+  "cause_match": null,
+  "exception": null,
+  "kwargs": {},
+  "match": "shared value 0 has not been initialized",
+  "outcome": "error"
+}
