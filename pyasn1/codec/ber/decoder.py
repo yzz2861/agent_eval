@@ -1596,6 +1596,24 @@ class SingleItemDecoder(object):
         self._tagCache = {}
         self._tagSetCache = {}
 
+    def _checkTag(self, firstOctet, tagId, tagOctets, options):
+        """Validate tag encoding against codec-specific canonical rules.
+
+        BER imposes no canonical encoding, so this is a no-op; the DER
+        subclass overrides it to reject non-minimal tag encodings in
+        strict mode.
+        """
+        pass
+
+    def _checkLength(self, firstOctet, lengthOctets, length, options):
+        """Validate length encoding against codec-specific canonical rules.
+
+        BER imposes no canonical encoding, so this is a no-op; the DER
+        subclass overrides it to reject non-minimal length encodings in
+        strict mode.
+        """
+        pass
+
     def __call__(self, substrate, asn1Spec=None,
                  tagSet=None, length=None, state=stDecodeTag,
                  decodeFun=None, substrateFun=None,
@@ -1666,6 +1684,7 @@ class SingleItemDecoder(object):
                     if tagId == 0x1F:
                         isShortTag = False
                         tagOctetCount = 0
+                        tagIdOctets = []
                         tagId = 0
 
                         while True:
@@ -1687,9 +1706,13 @@ class SingleItemDecoder(object):
                                 )
                             tagId <<= 7
                             tagId |= (integerTag & 0x7F)
+                            tagIdOctets.append(integerTag)
 
                             if not integerTag & 0x80:
                                 break
+
+                        self._checkTag(
+                            firstOctet, tagId, tagIdOctets, options)
 
                     lastTag = tag.Tag(
                         tagClass=tagClass, tagFormat=tagFormat, tagId=tagId
@@ -1730,6 +1753,8 @@ class SingleItemDecoder(object):
                 if firstOctet < 128:
                     length = firstOctet
 
+                    self._checkLength(firstOctet, (), length, options)
+
                 elif firstOctet > 128:
                     size = firstOctet & 0x7F
 
@@ -1754,6 +1779,10 @@ class SingleItemDecoder(object):
                         length <<= 8
                         length |= lengthOctet
                     size += 1
+
+                    self._checkLength(
+                        firstOctet, tuple(encodedLength), length, options
+                    )
 
                     if length > sys.maxsize:
                         raise error.PyAsn1Error(

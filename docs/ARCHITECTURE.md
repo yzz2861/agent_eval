@@ -770,8 +770,8 @@ flowchart LR
         DEO["REAL OVERRIDE - one class only<br/>SetEncoder DYNAMIC choice key<br/>resolves the chosen alternative"]
         DSE["SingleItemEncoder<br/>fixedDefLengthMode True<br/>fixedChunkSize 0"]
         DDM["decoder TAG_MAP + TYPE_MAP<br/>copy plus backfill that adds nothing"]
-        DDO["REAL OVERRIDES<br/>BitString supportConstructedForm False<br/>OctetString supportConstructedForm False"]
-        DSD["SingleItemDecoder<br/>supportIndefLength False"]
+        DDO["REAL OVERRIDES + strict=True<br/>BitString/OctetString constructed False<br/>strict Boolean, SET/SET OF ordering"]
+        DSD["SingleItemDecoder<br/>supportIndefLength False<br/>strict _checkTag/_checkLength"]
         DEO -->|"update"| DEM
         DSE -->|"reads"| DEM
         DDO -->|"update"| DDM
@@ -781,7 +781,7 @@ flowchart LR
     BEM -.->|"shallow copy - 22 of 28 tag entries<br/>and 21 of 29 type entries are the SAME objects"| CEM
     CEM -.->|"shallow copy - 27 of 28 tag entries<br/>and 28 of 29 type entries are the SAME objects"| DEM
     BDM -.->|"shallow copy - 22 of 26 tag entries<br/>and ALL 28 type entries are the SAME objects"| CDM
-    CDM -.->|"shallow copy - 23 of 26 tag entries<br/>and ALL 28 type entries are the SAME objects"| DDM
+    CDM -.->|"shallow copy - 22 of 26 tag entries<br/>and 25 of 28 type entries are the SAME objects"| DDM
 
     classDef override fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#000
     classDef maps fill:#dae8fc,stroke:#3c6ea5,stroke-width:2px,color:#000
@@ -796,11 +796,15 @@ flowchart LR
 The dotted copy edges carry the measured counts. The CER encoder keeps 22 of
 28 tag entries and 21 of 29 type entries as the same objects as BER's; the DER
 encoder keeps 27 of 28 and 28 of 29 relative to CER; on the decoder side the
-copies keep 22 of 26 and then 23 of 26 tag entries, with all 28 type entries
-identical at both steps. The derived decoder `TYPE_MAP`s are therefore
-100 percent inherited, so CER and DER strictness applies only on the schemaless
-tag-driven path; [Registration and import
-order](#registration-and-import-order) traces the mechanism.
+copies keep 22 of 26 tag entries at each step. The CER decoder `TYPE_MAP` is
+still 100 percent inherited (28 of 28 identical to BER), but the DER decoder
+replaces 3 of its 28 type entries (25 of 28 identical to CER) with strict-aware
+subclasses so that opt-in DER canonicalization reaches the schema-driven path;
+the historical default behavior of those entries is unchanged. CER strictness
+therefore applies only on the schemaless tag-driven path, while DER's
+`strict=True` checks fire on both paths. [Registration and import
+order](#registration-and-import-order) traces the mechanism and
+[Strict DER decoding](#strict-der-decoding) documents the option.
 
 ### Sharing by identity
 
@@ -828,21 +832,23 @@ Measured by identity comparison:
 | --- | --- | --- | --- |
 | `der.encoder.TAG_MAP` | 28 | 22 | 6 |
 | `der.encoder.TYPE_MAP` | 29 | 21 | 8 |
-| `der.decoder.TAG_MAP` | 26 | 22 | 4 |
-| `der.decoder.TYPE_MAP` | 28 | 28 | 0 |
+| `der.decoder.TAG_MAP` | 26 | 21 | 5 |
+| `der.decoder.TYPE_MAP` | 28 | 25 | 3 |
 
 The distinct entries are few. On the encoder side they are Boolean, Real, the
 two time types, Set/SetOf, Sequence/SequenceOf (`TYPE_MAP` only: CER's
 `omitEmptyOptionals` and `ifNotEmpty` rewrites in `cer/encoder.py`) and the
 stray integer key; on the decoder side,
-Boolean (from CER), BitString and OctetString (the two
-`supportConstructedForm = False` subclasses in `der/decoder.py`), plus a
-re-instantiated but behaviorally identical `RealPayloadDecoder`: the
-`RealPayloadDecoder = decoder.RealPayloadDecoder` alias in `der/decoder.py`,
-whose `# TODO: prohibit non-canonical encoding` comment marks it as a
-placeholder for a stricter decoder nobody wrote. Between CER and DER the
-coupling is tighter still: DER's entire encoder-side contribution is one class
-plus two class attributes.
+BitString and OctetString (the two
+`supportConstructedForm = False` subclasses in `der/decoder.py`), the
+re-instantiated but behaviorally identical `RealPayloadDecoder` alias, and the
+strict-aware `SetPayloadDecoder` in the tag map. The three distinct
+`TYPE_MAP` entries are the strict-aware `BooleanPayloadDecoder`,
+`SetPayloadDecoder` and `SetOfPayloadDecoder`; the
+`RealPayloadDecoder = decoder.RealPayloadDecoder` alias still carries the
+`# TODO: prohibit non-canonical encoding` placeholder for REAL. Between CER
+and DER the coupling is tighter still: DER's entire encoder-side contribution
+is one class plus two class attributes.
 
 Editing a BER payload codec thus edits DER, and there is no indirection
 to absorb the change. An edit to `IntegerEncoder.encodeValue` in
@@ -899,8 +905,10 @@ constructed types are ambiguous or untagged by tagSet alone ([The type
 system](#the-type-system)), and both maps read each type's `typeId` at import
 ([Type identity and dispatch keys](#type-identity-and-dispatch-keys)). By the
 time CER's loop runs, its `TYPE_MAP` is already a copy of BER's post-backfill
-map, so the derived loops add nothing, and `cer.decoder.TYPE_MAP` and
-`der.decoder.TYPE_MAP` share all 28 entries with BER's. The encoder side has
+map, so the derived loops add nothing and `cer.decoder.TYPE_MAP` shares all
+28 entries with BER's. DER's loop likewise adds nothing, but DER replaces
+three entries up front (Boolean, Set and SetOf) with strict-aware subclasses,
+leaving 25 of 28 identical to BER. The encoder side has
 no backfill at all: encoder `TYPE_MAP`s are written out longhand (the
 module-level `TYPE_MAP = {...}` literal in `ber/encoder.py`) or copied and
 updated by hand.
@@ -918,7 +926,10 @@ permissive decoder. Two probes confirm it:
   `Constructed encoding form prohibited`, but the same bytes with
   `asn1Spec=univ.OctetString()` decode fine.
 - `cer.decode(b'\x01\x01\x01')` raises `Unexpected Boolean payload: 1`, but
-  with `asn1Spec=univ.Boolean()` returns `True`.
+  with `asn1Spec=univ.Boolean()` returns `True`. The same lenient default
+  holds for DER (its schema-driven Boolean entry delegates to BER unless
+  `strict=True` is passed); with `strict=True` DER raises
+  `Unexpected Boolean payload: 1` on both paths.
 
 The one DER restriction that always applies is `supportIndefLength = False`,
 because it sits on `der/decoder.py`'s `SingleItemDecoder` itself rather than
@@ -1010,7 +1021,65 @@ subclasses, `BitStringPayloadDecoder` and `OctetStringPayloadDecoder`, setting
 `valueDecoder` methods in `ber/decoder.py`), plus
 `supportIndefLength = False` on its `SingleItemDecoder`; how that one
 attribute shuts indefinite framing off entirely is covered in [Two framing
-modes](#two-framing-modes).
+modes](#two-framing-modes). It also adds the opt-in strict machinery described
+in [Strict DER decoding](#strict-der-decoding): a strict-aware
+`BooleanPayloadDecoder`, the `_StrictSetOrderingPayloadDecoderMixin` family
+for SET/SET OF, and `_checkTag`/`_checkLength` overrides on
+`SingleItemDecoder`.
+
+### Strict DER decoding
+
+The DER decoder historically reused the lenient BER/CER machinery, so it
+accepted several encodings that DER (X.690) forbids: non-minimal length
+fields, non-minimal long-form tag numbers, Boolean payloads other than
+`0x00`/`0xFF` on the schema-driven path, and SET/SET OF components not
+sorted canonically. Accepting multiple byte strings for one ASN.1 value
+matters wherever bytes are authenticated, because a signature verifier that
+re-encodes strictly and a parser that accepts a variant can disagree over what
+was signed.
+
+`der.decode(substrate, asn1Spec=..., strict=True)` turns on canonicalization
+checks while leaving the default (`strict=False`) byte-for-byte compatible
+with the historical behavior. The flag travels in the options dict like every
+other call-time key (see [The options channel](#the-options-channel)) and is
+read, never popped, so it reaches nested decoders through the normal
+`**options` propagation; an unknown spelling is still silently ignored
+([Configuration surfaces](#configuration-surfaces)).
+
+Four checks fire, each raising `~pyasn1.error.PyAsn1Error`:
+
+- Non-minimal length. `SingleItemDecoder._checkLength` in
+  `der/decoder.py` rejects a one-octet long-form length below 128 (use the
+  short form) and a multi-octet long-form length whose first content octet is
+  zero. The hook is a no-op `SingleItemDecoder._checkLength` on BER that the
+  DER subclass overrides, called from the shared `stDecodeLength` block.
+- Non-minimal tag. `SingleItemDecoder._checkTag` rejects a tag id below 31
+  carried in the long form and a multi-octet tag id whose first continuation
+  octet is `0x80` (a leading all-zero base-128 digit). BER's matching hook is
+  a no-op, called once from the long-tag branch of `stDecodeTag` with the raw
+  continuation octets.
+- Boolean payload. The strict-aware `BooleanPayloadDecoder` delegates to
+  CER's `0x00`/`0xFF` rule when `strict` is set and to BER's permissive
+  integer decoder otherwise. It is installed in `TYPE_MAP`, which is what the
+  schema-driven path consults first; the tag-driven path already went through
+  CER's strict class.
+- SET/SET OF ordering. `SetPayloadDecoder` and `SetOfPayloadDecoder` use
+  `_StrictSetOrderingPayloadDecoderMixin`, which wraps the recursive
+  `decodeFun` to snapshot each component's raw on-the-wire TLV without
+  disturbing the stream position. SET components must have ascending encoded
+  tag octets; SET OF components must be in the same right-zero-padded
+  lexicographic order `SetOfEncoder` produces. The check is skipped when a
+  caller supplies its own `substrateFun`, since that callback owns component
+  framing.
+
+Because the strict checks live in `der/decoder.py` and reach in through
+overridable no-op hooks rather than edits to BER payload decoders, BER and CER
+behavior is unchanged and DER's default path stays permissive. The five-part
+security-test shape is mirrored in
+`tests/codec/der/test_decoder_strict.py`: every non-canonical input has both a
+default-mode acceptance case (proving compatibility) and a strict-mode
+rejection case, with schema-driven and schemaless paths covered where the
+dispatch differs.
 
 ### Configuration surfaces
 

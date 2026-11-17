@@ -1,6 +1,13 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Added an opt-in strict DER canonicalization mode to the DER decoder,
+  enabled with `strict=True`. In strict mode non-minimal length encodings,
+  non-minimal long-form tag numbers, Boolean payloads other than 0x00/0xFF
+  and SET/SET OF components not sorted per X.690 raise `PyAsn1Error`. The
+  default behavior stays lenient and byte-for-byte compatible; coverage lives
+  in `tests/codec/der/test_decoder_strict.py`.
+
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

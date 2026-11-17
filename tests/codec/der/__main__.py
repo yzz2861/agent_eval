@@ -8,7 +8,8 @@ import unittest
 
 suite = unittest.TestLoader().loadTestsFromNames(
     ['tests.codec.der.test_encoder.suite',
-     'tests.codec.der.test_decoder.suite']
+     'tests.codec.der.test_decoder.suite',
+     'tests.codec.der.test_decoder_strict.suite']
 )
 
 
