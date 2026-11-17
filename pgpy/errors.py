@@ -4,6 +4,7 @@
 __all__ = ('PGPError',
            'PGPEncryptionError',
            'PGPDecryptionError',
+           'PGPKeyLifecycleError',
            'PGPIncompatibleECPointFormatError',
            'PGPOpenSSLCipherNotSupportedError',
            'PGPInsecureCipherError',
@@ -12,6 +13,12 @@ __all__ = ('PGPError',
 
 class PGPError(Exception):
     """Raised as a general error in PGPy"""
+    pass
+
+
+class PGPKeyLifecycleError(PGPError):
+    """Raised when a primary key or subkey is selected for a cryptographic operation
+    but is not in a valid lifecycle state (missing binding signature, revoked, or expired)"""
     pass
 
 

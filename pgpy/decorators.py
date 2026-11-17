@@ -73,6 +73,9 @@ class KeyAction(object):
     def __init__(self, *usage, **conditions):
         super(KeyAction, self).__init__()
         self.flags = set(usage)
+        # lifecycle checks only apply when a key is consumed by a cryptographic action
+        # (sign/encrypt/decrypt), not when the key material is being managed (bind/certify/revoke)
+        self.enforce_lifecycle = conditions.pop('enforce_lifecycle', True)
         self.conditions = conditions
 
     @contextlib.contextmanager
@@ -87,11 +90,26 @@ class KeyAction(object):
         em['flags'] = ', '.join(flag.name for flag in self.flags)
 
         if len(self.flags):
+            # remembers the first subkey that was rejected for a lifecycle reason, so that when no
+            # usable key carries the requested flag the specific reason can be surfaced
+            rejected_for_lifecycle = None
             for _key in _preiter(key, key.subkeys.values()):
-                if self.flags & set(_key._get_key_flags(user)):
+                # a subkey that fails its lifecycle checks can never satisfy a usage flag
+                lifecycle_error = None
+                if _key is not key and self.enforce_lifecycle and _key._lifecycle_enforced():
+                    try:
+                        _key.check_lifecycle()
+                    except PGPError as error:
+                        lifecycle_error = error
+                        rejected_for_lifecycle = rejected_for_lifecycle or error
+
+                if lifecycle_error is None and self.flags & set(_key._get_key_flags(user)):
                     break
 
-            else:  # pragma: no cover
+            else:
+                if rejected_for_lifecycle is not None:
+                    raise rejected_for_lifecycle
+
                 warning = "Key {keyid:s} does not have the required usage flag {flags:s}".format(**em)
                 if key._require_usage_flags:
                     raise PGPError(warning)
@@ -124,8 +142,16 @@ class KeyAction(object):
             if len(key._uids) == 0 and key.is_primary and action is not key.certify.__wrapped__:
                 raise PGPError("Key is not complete - please add a User ID!")
 
+            # validate the primary key before any subkey selection takes place, so a revoked or
+            # expired primary key is always rejected with a controlled lifecycle error
+            if self.enforce_lifecycle and key.is_primary:
+                key._assert_usable()
+
             with self.usage(key, kwargs.get('user', None)) as _key:
                 self.check_attributes(key)
+
+                if self.enforce_lifecycle:
+                    _key._assert_usable()
 
                 # do the thing
                 return action(_key, *args, **kwargs)
