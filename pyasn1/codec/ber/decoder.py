@@ -45,6 +45,16 @@ MAX_NESTING_DEPTH = 100
 # Maximum number of bytes in a BER length field (8 bytes = up to 2^64-1)
 MAX_LENGTH_OCTETS = 8
 
+# Highest legal Unicode scalar value (Unicode 16.0, ITU-T X.680 38.1)
+MAX_UNICODE_CODE_POINT = 0x10FFFF
+
+# Highest code point representable in the BMP (UTF-16 single code unit)
+MAX_BMP_CODE_POINT = 0xFFFF
+
+# UTF-16 surrogate code points are never legal Unicode scalar values
+MIN_SURROGATE_CODE_POINT = 0xD800
+MAX_SURROGATE_CODE_POINT = 0xDFFF
+
 
 class AbstractPayloadDecoder(object):
     protoComponent = None
@@ -331,9 +341,54 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
         yield self._createComponent(asn1Spec, tagSet, bitString, **options)
 
 
+def _validateFixedWidthCodepoints(value, valueStart, unitSize, maxCodePoint):
+    """Reject misaligned or out-of-range fixed-width Unicode code units.
+
+    BMPString (UTF-16-BE, 2-octet units) and UniversalString (UTF-32-BE,
+    4-octet units) can encode code points that are not legal Unicode
+    scalars: values past the type limit or UTF-16 surrogate values. The
+    check runs before the value object is created, and reports the
+    absolute substrate offset of the offending code unit.
+    """
+    typeName = 'BMPString' if unitSize == 2 else 'UniversalString'
+
+    if len(value) % unitSize:
+        raise error.PyAsn1Error(
+            '%s value of %d octets is not aligned to %d-octet code units '
+            'at position %d' % (
+                typeName, len(value), unitSize, valueStart + len(value) - 1)
+        )
+
+    for index in range(0, len(value), unitSize):
+        codePoint = int.from_bytes(value[index:index + unitSize], 'big')
+
+        if codePoint > maxCodePoint:
+            raise error.PyAsn1Error(
+                '%s code point 0x%X exceeds maximum code point 0x%X '
+                'at position %d' % (
+                    typeName, codePoint, maxCodePoint, valueStart + index)
+            )
+
+        if MIN_SURROGATE_CODE_POINT <= codePoint <= MAX_SURROGATE_CODE_POINT:
+            raise error.PyAsn1Error(
+                '%s code point 0x%X is a reserved UTF-16 surrogate '
+                'at position %d' % (typeName, codePoint, valueStart + index)
+            )
+
+
 class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
     protoComponent = univ.OctetString('')
     supportConstructedForm = True
+
+    def _validateValue(self, chunk, valueOffset):
+        """Validate the fully assembled octet string value.
+
+        Subclasses representing fixed-width Unicode code point strings
+        (BMPString, UniversalString) override this to reject truncated
+        code units and code points outside the Unicode range. The default
+        implementation treats arbitrary octet strings as valid.
+        """
+        pass
 
     def valueDecoder(self, substrate, asn1Spec,
                      tagSet=None, length=None, state=None,
@@ -348,10 +403,12 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
             return
 
         if tagSet[0].tagFormat == tag.tagFormatSimple:  # XXX what tag to check?
+            valueOffset = substrate.tell()
             for chunk in readFromStream(substrate, length, options):
                 if isinstance(chunk, SubstrateUnderrunError):
                     yield chunk
 
+            self._validateValue(chunk, valueOffset)
             yield self._createComponent(asn1Spec, tagSet, chunk, **options)
 
             return
@@ -375,7 +432,9 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
 
             fragments.append(bytes(component))
 
-        yield self._createComponent(asn1Spec, tagSet, b''.join(fragments), **options)
+        value = b''.join(fragments)
+        self._validateValue(value, original_position)
+        yield self._createComponent(asn1Spec, tagSet, value, **options)
 
     def indefLenValueDecoder(self, substrate, asn1Spec,
                              tagSet=None, length=None, state=None,
@@ -392,6 +451,7 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
         # Assemble the logical value of each fragment, including nested ones.
         fragments = []
 
+        original_position = substrate.tell()
         while True:  # loop over fragments
 
             for component in decodeFun(
@@ -408,7 +468,9 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
 
             fragments.append(bytes(component))
 
-        yield self._createComponent(asn1Spec, tagSet, b''.join(fragments), **options)
+        value = b''.join(fragments)
+        self._validateValue(value, original_position)
+        yield self._createComponent(asn1Spec, tagSet, value, **options)
 
 
 class NullPayloadDecoder(AbstractSimplePayloadDecoder):
@@ -1495,10 +1557,22 @@ class GeneralStringPayloadDecoder(OctetStringPayloadDecoder):
 
 class UniversalStringPayloadDecoder(OctetStringPayloadDecoder):
     protoComponent = char.UniversalString()
+    charUnitSize = 4
+
+    def _validateValue(self, value, valueStart):
+        _validateFixedWidthCodepoints(
+            value, valueStart, self.charUnitSize, MAX_UNICODE_CODE_POINT
+        )
 
 
 class BMPStringPayloadDecoder(OctetStringPayloadDecoder):
     protoComponent = char.BMPString()
+    charUnitSize = 2
+
+    def _validateValue(self, value, valueStart):
+        _validateFixedWidthCodepoints(
+            value, valueStart, self.charUnitSize, MAX_BMP_CODE_POINT
+        )
 
 
 # "useful" types
@@ -1647,6 +1721,7 @@ class SingleItemDecoder(object):
             if state is stDecodeTag:
                 # Decode tag
                 isShortTag = True
+                tagStartPosition = substrate.tell()
 
                 for firstByte in readFromStream(substrate, 1, options):
                     if isinstance(firstByte, SubstrateUnderrunError):
@@ -1682,8 +1757,9 @@ class SingleItemDecoder(object):
                             tagOctetCount += 1
                             if tagOctetCount > MAX_TAG_OCTETS:
                                 raise error.PyAsn1Error(
-                                    'Tag ID octet count exceeds limit (%d)' % (
-                                        MAX_TAG_OCTETS,)
+                                    'Tag ID octet count exceeds limit (%d) '
+                                    'at position %d' % (
+                                        MAX_TAG_OCTETS, tagStartPosition)
                                 )
                             tagId <<= 7
                             tagId |= (integerTag & 0x7F)
@@ -1721,6 +1797,8 @@ class SingleItemDecoder(object):
 
             if state is stDecodeLength:
                 # Decode length
+                lengthFieldPosition = substrate.tell()
+
                 for firstOctet in readFromStream(substrate, 1, options):
                     if isinstance(firstOctet, SubstrateUnderrunError):
                         yield firstOctet
@@ -1735,8 +1813,9 @@ class SingleItemDecoder(object):
 
                     if size > MAX_LENGTH_OCTETS:
                         raise error.PyAsn1Error(
-                            'BER length field size %d exceeds limit (%d)' % (
-                                size, MAX_LENGTH_OCTETS)
+                            'BER length field size %d exceeds limit (%d) '
+                            'at position %d' % (
+                                size, MAX_LENGTH_OCTETS, lengthFieldPosition)
                         )
 
                     # encoded in size bytes
@@ -1757,8 +1836,9 @@ class SingleItemDecoder(object):
 
                     if length > sys.maxsize:
                         raise error.PyAsn1Error(
-                            'Length %d exceeds maximum readable size %d' % (
-                                length, sys.maxsize)
+                            'Length %d exceeds maximum readable size %d '
+                            'at position %d' % (
+                                length, sys.maxsize, lengthFieldPosition)
                         )
 
                 else:  # 128 means indefinite

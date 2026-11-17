@@ -452,6 +452,47 @@ class NestingDepthLimitTestCase(BaseTestCase):
             assert False, 'Got RecursionError instead of PyAsn1Error'
 
 
+class DecoderLimitPositionTestCase(BaseTestCase):
+    """Inherited BER limits must reject malformed input with an offset."""
+
+    def testExcessiveLongTagReportsPosition(self):
+        # Long-form tag with 21 continuation octets (one over the limit)
+        payload = b'\x1f' + b'\x80' * 20 + b'\x01' + b'\x02\x01\x01'
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error as exc:
+            assert 'position 0' in str(exc), 'Missing offset in: %s' % exc
+        else:
+            assert False, 'excessive long tag tolerated'
+
+    def testOversizedLengthFieldReportsPosition(self):
+        payload = b'\x02\x89' + b'\xFF' * 9 + b'\x01'
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error as exc:
+            assert 'position 1' in str(exc), 'Missing offset in: %s' % exc
+        else:
+            assert False, 'oversized length field tolerated'
+
+    def testBmpStringLoneSurrogateRejected(self):
+        payload = b'\x1e\x02\xd8\x00'
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error as exc:
+            assert 'position 2' in str(exc), 'Missing offset in: %s' % exc
+        else:
+            assert False, 'lone BMPString surrogate tolerated'
+
+    def testUniversalStringAboveMaximumRejected(self):
+        payload = b'\x1c\x04\x00\x11\x00\x00'
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error as exc:
+            assert 'position 2' in str(exc), 'Missing offset in: %s' % exc
+        else:
+            assert False, 'out-of-range UniversalString code point tolerated'
+
+
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
 
 if __name__ == '__main__':

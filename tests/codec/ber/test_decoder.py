@@ -2440,6 +2440,150 @@ class LengthFieldLimitTestCase(BaseTestCase):
             assert False, 'Expected PyAsn1Error'
 
 
+class TagLengthPositionTestCase(BaseTestCase):
+    """Tag/length limit errors must name the absolute substrate offset."""
+
+    def testExcessiveLongTagReportsPosition(self):
+        # Universal-class long-form tag (0x1F) with 21 continuation octets,
+        # one over MAX_TAG_OCTETS; the tag starts at offset 0
+        payload = b'\x1f' + b'\x80' * 20 + b'\x01' + b'\x02\x01\x01'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'position 0' in message, 'Missing offset in: %s' % message
+            assert 'tag id octet count' in message.lower(), message
+        else:
+            assert False, 'excessive long tag tolerated'
+
+    def testExcessiveLongTagAfterAnotherItemReportsAbsolutePosition(self):
+        # The malformed tag follows a valid 3-octet INTEGER, so its absolute
+        # offset is 3 in the stream
+        prefix = b'\x02\x01\x05'
+        payload = prefix + b'\x1f' + b'\x80' * 20 + b'\x01' + b'\x02\x01\x01'
+        try:
+            list(decoder.StreamingDecoder(io.BytesIO(payload)))
+        except error.PyAsn1Error as exc:
+            assert 'position 3' in str(exc), 'Wrong offset in: %s' % exc
+        else:
+            assert False, 'excessive long tag tolerated'
+
+    def testOversizedLengthFieldReportsPosition(self):
+        # 0x89 = long form, 9 length octets (exceeds MAX_LENGTH_OCTETS);
+        # the length field starts at offset 1
+        payload = b'\x02\x89' + b'\xFF' * 9 + b'\x01'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'position 1' in message, 'Missing offset in: %s' % message
+            assert 'length field size' in message.lower(), message
+        else:
+            assert False, 'oversized length field tolerated'
+
+    def testOversizedLengthAfterAnotherItemReportsAbsolutePosition(self):
+        prefix = b'\x04\x03abc'
+        payload = prefix + b'\x04\x89' + b'\xFF' * 9
+        try:
+            list(decoder.StreamingDecoder(io.BytesIO(payload)))
+        except error.PyAsn1Error as exc:
+            assert 'position 6' in str(exc), 'Wrong offset in: %s' % exc
+        else:
+            assert False, 'oversized length field tolerated'
+
+    def testMultiByteLengthRoundTrip(self):
+        # Long-form lengths of 1..8 octets must keep decoding correctly;
+        # leading zero padding exercises every legal field width
+        value = 5
+        body = b'hello'
+        for octetCount in (1, 2, 4, 8):
+            lengthBytes = value.to_bytes(octetCount, 'big')
+            payload = b'\x04' + bytes((0x80 | octetCount,)) + lengthBytes + body
+            asn1Object, rest = decoder.decode(payload)
+            assert rest == b''
+            assert bytes(asn1Object) == body
+
+
+class FixedWidthStringCodepointTestCase(BaseTestCase):
+    """BMPString/UniversalString codepoint limits fire at decoder level."""
+
+    def testBmpStringLoneSurrogateRejected(self):
+        # BMPString (tag 0x1E) carrying the lone surrogate 0xD800
+        payload = b'\x1e\x02\xd8\x00'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'position 2' in message, 'Missing value offset in: %s' % message
+            assert 'surrogate' in message.lower(), message
+        else:
+            assert False, 'lone BMPString surrogate tolerated'
+
+    def testBmpStringSecondCodeUnitSurrogateReportsItsOffset(self):
+        # Two code units: 'A' (0x0041) then surrogate 0xD800 at offset 4
+        payload = b'\x1e\x04\x00\x41\xd8\x00'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            assert 'position 4' in str(exc), 'Wrong offset in: %s' % exc
+        else:
+            assert False, 'BMPString surrogate in second unit tolerated'
+
+    def testBmpStringMisalignedValueRejected(self):
+        # 3-octet value cannot be split into 2-octet BMP code units
+        payload = b'\x1e\x03\x00\x41\x00'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            assert 'position' in str(exc).lower(), 'Missing offset: %s' % exc
+        else:
+            assert False, 'misaligned BMPString value tolerated'
+
+    def testBmpStringValidValueDecodes(self):
+        asn1Object, rest = decoder.decode(b'\x1e\x02\x00\x41')
+        assert rest == b''
+        assert str(asn1Object) == 'A'
+
+    def testUniversalStringAboveMaximumRejected(self):
+        # UniversalString (tag 0x1C) carrying 0x110000, one past the
+        # MAX_UNICODE_CODE_POINT limit; value starts at offset 2
+        payload = b'\x1c\x04\x00\x11\x00\x00'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'position 2' in message, 'Missing value offset in: %s' % message
+            assert 'maximum code point' in message.lower(), message
+        else:
+            assert False, 'out-of-range UniversalString code point tolerated'
+
+    def testUniversalStringSurrogateRejected(self):
+        # UniversalString carrying the surrogate 0xDBFF
+        payload = b'\x1c\x04\x00\x00\xdb\xff'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            assert 'position 2' in str(exc), 'Wrong offset in: %s' % exc
+            assert 'surrogate' in str(exc).lower()
+        else:
+            assert False, 'UniversalString surrogate tolerated'
+
+    def testUniversalStringMisalignedValueRejected(self):
+        payload = b'\x1c\x03\x00\x00\x00'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            assert 'position' in str(exc).lower(), 'Missing offset: %s' % exc
+        else:
+            assert False, 'misaligned UniversalString value tolerated'
+
+    def testUniversalStringValidValueDecodes(self):
+        # U+1F600 (grinning face) is a valid non-BMP scalar
+        asn1Object, rest = decoder.decode(b'\x1c\x04\x00\x01\xf6\x00')
+        assert rest == b''
+        assert str(asn1Object) == '\U0001F600'
+
+
 class NestingDepthLimitTestCase(BaseTestCase):
     """Test protection against deeply nested ASN.1 structures (CVE prevention)."""
 

@@ -1673,7 +1673,7 @@ bytes could otherwise grow into unbounded CPU or memory use.
 
 ### Decoder limits
 
-All five limits live in `pyasn1/codec/ber/decoder.py`, where the named
+All the numeric limits live in `pyasn1/codec/ber/decoder.py`, where the named
 constants sit at the top of the module (file locations in the
 [module map](#module-map)), and are inherited unchanged by CER and DER
 through the `SingleItemDecoder` subclasses in `cer/decoder.py` and
@@ -1693,12 +1693,23 @@ type system rather than the decoder; its mechanism is described in
 | `MAX_NESTING_DEPTH` | 100 levels | `SingleItemDecoder.__call__`, at generator entry | Deeply nested encodings (`b'\x30\x80' * 50000` is two bytes per level) drive the generator chain into `RecursionError` | CVE-2026-30922 / GHSA-jr27-m4p2-rc6r, 0.6.3, commit `25ad481`, `CHANGES.rst` under `Revision 0.6.3` |
 | `MAX_LENGTH_OCTETS` | 8 octets | the `stDecodeLength` block of `SingleItemDecoder.__call__`, before any length octet is read | An oversized length header produced an `OverflowError` escaping as a non-`PyAsn1Error` | No CVE; issue #54 / PR #100, 0.6.3, commit `6d40bde`, `CHANGES.rst` under `Revision 0.6.3` |
 | `length > sys.maxsize` guard | platform-dependent | inline in the `stDecodeLength` block, after length accumulation; no named constant | An 8-octet length can still encode 2^64-1, which no `read()` can satisfy | No CVE; PR #108, commit `100f3af`, `CHANGES.rst` under the pending `Revision 0.7.0`; on `main` before the 0.6.4 release-prep commit, but absent from the shipped `v0.6.4` tag lineage |
+| `MAX_UNICODE_CODE_POINT` | 0x10FFFF (highest Unicode scalar) | `_validateFixedWidthCodepoints`, called from `OctetStringPayloadDecoder._validateValue` on the UniversalString path before the value object is built | A UniversalString (UTF-32-BE) 4-octet unit can encode any 32-bit value, including scalars past the Unicode range | No CVE; pending `Revision 0.7.0` |
+| `MAX_BMP_CODE_POINT` plus the surrogate band (`MIN_SURROGATE_CODE_POINT`/`MAX_SURROGATE_CODE_POINT`, 0xD800-0xDFFF) | 0xFFFF with surrogates excluded | the same `_validateFixedWidthCodepoints` helper on the BMPString (UTF-16-BE) path; misaligned 2-/4-octet values are rejected there too | Fixed-width code units can encode lone UTF-16 surrogates or values outside the type range, which must never surface as decoded text; every rejection names the absolute substrate offset | No CVE; pending `Revision 0.7.0` |
 | *Supplementary:* OID arcs accumulate in a list | not numeric | `ObjectIdentifierPayloadDecoder.valueDecoder` / `RelativeOIDPayloadDecoder.valueDecoder`: `list.append` per arc, one `tuple()` at the final yield | The previous `oid += (subId,)` was quadratic in arc count | CVE-2026-59885 / GHSA-8ppf-4f7h-5ppj, 0.6.4, commit `5932cc8`, `CHANGES.rst` under `Revision 0.6.4` |
 
 The checks fire before the value they guard is materialized: the tag limit
 before the shift, the length-octet limit before the octets are read, the OID
-limit before the arc accumulates. Moving a check after its accumulation keeps
-the error message and loses the protection.
+limit before the arc accumulates, and the fixed-width Unicode code-point
+checks before the BMPString/UniversalString value object is constructed.
+Moving a check after its accumulation keeps the error message and loses the
+protection. Every decoder-level rejection names the absolute substrate
+offset of the offending octet in an `at position N` clause: the tag and
+length guards record `substrate.tell()` at the start of the field
+(`tagStartPosition`, `lengthFieldPosition`), while the Unicode helper
+adds the code-unit index to the value start offset captured in
+`OctetStringPayloadDecoder.valueDecoder`. The substrate is always wrapped
+into a seekable stream by `asSeekableStream`, so `tell()` is the offset
+from the start of the input even for a non-seekable source.
 
 The boundary tests come in matched pairs, at-limit passes and one-over fails,
 so an off-by-one in a comparison is caught. All live in
@@ -1710,7 +1721,19 @@ so an off-by-one in a comparison is caught. All live in
 `testOversizedLengthField` (length), and
 `LengthFieldLimitTestCase.testLengthValueAtPlatformLimitIsNotRejected` vs
 `testLengthValueAbovePlatformLimitIsRejected` (the `sys.maxsize` guard,
-reachable via a monkey-patched `decoder.sys.maxsize`).
+reachable via a monkey-patched `decoder.sys.maxsize`). The offset-bearing
+diagnostics have their own classes, `TagLengthPositionTestCase` (long tag
+and oversize length at offset 0 and after a leading item, plus the
+multi-byte length round trip in `testMultiByteLengthRoundTrip`) and
+`FixedWidthStringCodepointTestCase` (BMPString/UniversalString surrogate,
+out-of-range and misaligned values, each asserting the `at position N`
+offset alongside valid-value cases). Per the mirror rule,
+`DecoderLimitPositionTestCase` repeats the tag, length and Unicode
+rejections in `tests/codec/cer/test_decoder.py` and
+`tests/codec/der/test_decoder.py`: CER and DER inherit the whole
+`SingleItemDecoder` and the character-string decoders through module
+import, and the mirrors are what keep a future codec override from quietly
+exempting one dialect.
 
 The at-limit tests also pin the exact values, so lowering the OID or tag
 limits breaks `testMaxAllowedContinuationOctets` and

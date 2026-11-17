@@ -1,6 +1,13 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Hardened BER/CER/DER decoding of BMPString and UniversalString values:
+  code points above the type range (0xFFFF for BMPString, 0x10FFFF for
+  UniversalString) and reserved UTF-16 surrogate code points are now
+  rejected with PyAsn1Error, along with values misaligned to the 2-/4-octet
+  code units. Tag, length and Unicode rejection messages now report the
+  absolute substrate offset of the offending octet.
+
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.
