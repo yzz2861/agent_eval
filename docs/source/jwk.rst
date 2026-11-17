@@ -18,6 +18,10 @@ Classes
    :members:
    :show-inheritance:
 
+.. autoclass:: jwcrypto.jwk.JWKUsagePolicy
+   :members:
+   :show-inheritance:
+
 Exceptions
 ----------
 
@@ -56,6 +60,9 @@ Registries
    :annotation:
 
 .. autodata:: jwcrypto.jwk.JWKOperationsRegistry
+   :annotation:
+
+.. autodata:: jwcrypto.jwk.DefaultJWKUsagePolicy
    :annotation:
 
 Examples

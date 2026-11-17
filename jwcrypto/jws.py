@@ -7,7 +7,8 @@ from jwcrypto.common import base64url_decode, base64url_encode
 from jwcrypto.common import check_crit, merge_headers, validate_headers
 from jwcrypto.common import json_decode, json_encode
 from jwcrypto.jwa import JWA
-from jwcrypto.jwk import JWK, JWKSet
+from jwcrypto.jwk import DefaultJWKUsagePolicy
+from jwcrypto.jwk import JWK, JWKSet, JWKUsagePolicy
 
 JWSHeaderRegistry = {
     'alg': JWSEHeaderParameter('Algorithm', False, True, None),
@@ -108,7 +109,7 @@ class JWSCore:
 
     """
 
-    def __init__(self, alg, key, header, payload, algs=None):
+    def __init__(self, alg, key, header, payload, algs=None, policy=None):
         """Core JWS token handling.
 
         :param alg: The algorithm used to produce the signature.
@@ -119,6 +120,10 @@ class JWSCore:
         :param header: A JSON string representing the protected header.
         :param payload(bytes): An arbitrary value
         :param algs: An optional list of allowed algorithms
+        :param policy: An optional (:class:`jwcrypto.jwk.JWKUsagePolicy`)
+         object used to validate key usage constraints before signing
+         or verifying. If None the
+         (:data:`jwcrypto.jwk.DefaultJWKUsagePolicy`) is used.
 
         :raises ValueError: if the key is not a (:class:`jwcrypto.jwk.JWK`)
         :raises InvalidJWAAlgorithm: if the algorithm is not valid, is
@@ -128,6 +133,7 @@ class JWSCore:
         self.alg = alg
         self.engine = self._jwa(alg, algs)
         self.key = key
+        self.policy = policy
 
         if header is not None:
             if isinstance(header, dict):
@@ -161,6 +167,7 @@ class JWSCore:
         """Generates a signature"""
         if not isinstance(self.key, JWK):
             raise ValueError('key is not a JWK object')
+        self.key.check_constraints('sig', 'sign', self.alg, self.policy)
         sigin = b'.'.join([self.protected.encode('utf-8'),
                            self.payload])
         signature = self.engine.sign(self.key, sigin)
@@ -177,6 +184,8 @@ class JWSCore:
         :rtype: `bool`
         """
         try:
+            self.key.check_constraints('sig', 'verify', self.alg,
+                                       self.policy)
             sigin = b'.'.join([self.protected.encode('utf-8'),
                                self.payload])
             self.engine.verify(self.key, sigin, signature)
@@ -201,9 +210,32 @@ class JWS:
         self.objects['payload'] = payload
         self.verifylog = None
         self._allowed_algs = None
+        self._key_usage_policy = None
         self.header_registry = JWSEHeaderRegistry(JWSHeaderRegistry)
         if header_registry:
             self.header_registry.update(header_registry)
+
+    @property
+    def key_usage_policy(self):
+        """The JWK usage policy.
+
+        The (:class:`jwcrypto.jwk.JWKUsagePolicy`) object used to
+        validate key usage constraints ('use', 'key_ops' and 'alg')
+        before signing or verifying. Can be changed by setting a
+        custom policy object. Defaults to
+        (:data:`jwcrypto.jwk.DefaultJWKUsagePolicy`).
+        """
+
+        if self._key_usage_policy:
+            return self._key_usage_policy
+        else:
+            return DefaultJWKUsagePolicy
+
+    @key_usage_policy.setter
+    def key_usage_policy(self, policy):
+        if not isinstance(policy, JWKUsagePolicy):
+            raise TypeError('Key usage policy must be a JWKUsagePolicy')
+        self._key_usage_policy = policy
 
     @property
     def allowed_algs(self):
@@ -276,7 +308,8 @@ class JWS:
         # verifies
         if isinstance(key, JWK):
             signer = JWSCore(resulting_alg, key, protected,
-                             payload, self._allowed_algs)
+                             payload, self._allowed_algs,
+                             policy=self.key_usage_policy)
             signer.verify(signature)
             self.verifylog.append("Success")
         elif isinstance(key, JWKSet):
@@ -292,7 +325,8 @@ class JWS:
                 try:
                     signer2 = JWSCore(
                         resulting_alg, k, protected,
-                        payload, self._allowed_algs
+                        payload, self._allowed_algs,
+                        policy=self.key_usage_policy
                     )
                     signer2.verify(signature)
                     self.verifylog.append("Success")
@@ -527,7 +561,7 @@ class JWS:
 
         c = JWSCore(
             alg, key, protected, self.objects.get('payload'),
-            self.allowed_algs
+            self.allowed_algs, policy=self.key_usage_policy
         )
         sig = c.sign()
 

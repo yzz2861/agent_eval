@@ -360,6 +360,110 @@ class InvalidJWKValue(JWException):
     """
 
 
+class JWKUsagePolicy:
+    """JWK Usage Policy.
+
+    This policy validates that the constraints declared in a key
+    (the 'use', 'key_ops' and 'alg' parameters) are consistent with
+    the operation that is about to be performed with the key.
+
+    The default policy is intentionally strict: if a key declares a
+    constraint, it must match the requested context. Keys that do not
+    declare a constraint are not restricted by it.
+
+    Applications can subclass this class and override individual
+    checks (or the whole :meth:`check` method) and then pass the
+    custom policy object to the JWS/JWE objects (via their
+    ``key_usage_policy`` property) or directly to
+    :meth:`JWK.check_constraints` and :meth:`JWK.get_op_key`.
+    """
+
+    def check_use(self, key, usage):
+        """Checks the 'use' constraint.
+
+        :param key: The (:class:`jwcrypto.jwk.JWK`) key to check.
+        :param usage: The usage required by the context, one of
+         'sig' or 'enc'.
+
+        :raises InvalidJWKUsage: if the key declares a 'use' parameter
+         that does not match the required usage.
+        """
+        use = key.get('use')
+        if use and use != usage:
+            raise InvalidJWKUsage(usage, use)
+
+    def check_key_ops(self, key, operations):
+        """Checks the 'key_ops' constraint.
+
+        :param key: The (:class:`jwcrypto.jwk.JWK`) key to check.
+        :param operations: The operation required by the context, or
+         an iterable of operations of which at least one must be
+         permitted (for example key wrapping contexts accept either
+         'wrapKey' or 'encrypt').
+
+        :raises InvalidJWKOperation: if the key declares a 'key_ops'
+         parameter that does not permit any of the requested
+         operations.
+        """
+        if isinstance(operations, str):
+            requested = [operations]
+        else:
+            requested = list(operations)
+        ops = key.get('key_ops')
+        if ops:
+            if not isinstance(ops, list):
+                ops = [ops]
+            if not any(op in ops for op in requested):
+                operation = requested[0] if len(requested) == 1 \
+                    else requested
+                raise InvalidJWKOperation(operation, ops)
+
+    def check_alg(self, key, algorithm):
+        """Checks the 'alg' constraint.
+
+        :param key: The (:class:`jwcrypto.jwk.JWK`) key to check.
+        :param algorithm: The algorithm the key is about to be used
+         with, or None if unknown.
+
+        :raises InvalidJWKValue: if the key declares an 'alg'
+         parameter that does not match the requested algorithm.
+        """
+        if algorithm is None:
+            return
+        key_alg = key.get('alg')
+        if key_alg and key_alg != algorithm:
+            raise InvalidJWKValue(
+                'Key "alg" ("%s") does not match the requested '
+                'algorithm ("%s")' % (key_alg, algorithm))
+
+    def check(self, key, usage, operations, algorithm=None):
+        """Checks all key constraints against the requested context.
+
+        :param key: The (:class:`jwcrypto.jwk.JWK`) key to check.
+        :param usage: The usage required by the context, one of
+         'sig' or 'enc'.
+        :param operations: The operation required by the context, or
+         an iterable of acceptable operations.
+        :param algorithm: The algorithm the key is about to be used
+         with (optional).
+
+        :raises InvalidJWKUsage: on 'use' constraint violation.
+        :raises InvalidJWKOperation: on 'key_ops' constraint violation.
+        :raises InvalidJWKValue: on 'alg' constraint violation.
+        """
+        self.check_use(key, usage)
+        self.check_key_ops(key, operations)
+        self.check_alg(key, algorithm)
+
+
+DefaultJWKUsagePolicy = JWKUsagePolicy()
+"""The default JWK usage policy.
+
+Enforces the 'use', 'key_ops' and 'alg' constraints declared in a key
+whenever the key is used for a sign/verify/wrap/unwrap operation.
+"""
+
+
 class JWK(dict):
     """JSON Web Key object
 
@@ -901,17 +1005,36 @@ class JWK(dict):
         """
         return self._get_curve_by_name(arg)
 
-    def _check_constraints(self, usage, operation):
-        use = self.get('use')
-        if use and use != usage:
-            raise InvalidJWKUsage(usage, use)
-        ops = self.get('key_ops')
-        if ops:
-            if not isinstance(ops, list):
-                ops = [ops]
-            if operation not in ops:
-                raise InvalidJWKOperation(operation, ops)
-        # TODO: check alg ?
+    def check_constraints(self, usage, operation, algorithm=None,
+                          policy=None):
+        """Check that the key constraints allow the requested operation.
+
+        Validates the 'use', 'key_ops' and 'alg' parameters declared
+        in the key against the requested context, using the provided
+        usage policy.
+
+        :param usage: The usage required by the context, one of
+         'sig' or 'enc'.
+        :param operation: The operation required by the context, or
+         an iterable of acceptable operations. The valid set of
+         operations is available in the :data:`JWKOperationsRegistry`
+         registry.
+        :param algorithm: The algorithm the key is about to be used
+         with (optional).
+        :param policy: A (:class:`JWKUsagePolicy`) object used to
+         perform the checks. If None the :data:`DefaultJWKUsagePolicy`
+         is used.
+
+        :raises InvalidJWKUsage: on 'use' constraint violation.
+        :raises InvalidJWKOperation: on 'key_ops' constraint violation.
+        :raises InvalidJWKValue: on 'alg' constraint violation.
+        """
+        if policy is None:
+            policy = DefaultJWKUsagePolicy
+        policy.check(self, usage, operation, algorithm)
+
+    def _check_constraints(self, usage, operation, alg=None, policy=None):
+        self.check_constraints(usage, operation, alg, policy)
 
     def _decode_int(self, n):
         return int(hexlify(base64url_decode(n)), 16)
@@ -1052,7 +1175,7 @@ class JWK(dict):
         else:
             raise NotImplementedError
 
-    def get_op_key(self, operation=None, arg=None):
+    def get_op_key(self, operation=None, arg=None, alg=None, policy=None):
         """Get the key object associated to the requested operation.
         For example the public RSA key for the 'verify' operation or
         the private EC key for the 'decrypt' operation.
@@ -1062,11 +1185,19 @@ class JWK(dict):
          :data:`JWKOperationsRegistry` registry.
         :param arg: An optional, context specific, argument.
          For example a curve name.
+        :param alg: An optional algorithm name the key is about to be
+         used with. If provided, and the key declares an 'alg'
+         parameter, the two must match according to the usage policy.
+        :param policy: An optional (:class:`JWKUsagePolicy`) object
+         used to validate the key constraints. If None the
+         :data:`DefaultJWKUsagePolicy` is used.
 
         :raises InvalidJWKOperation: if the operation is unknown or
          not permitted with this key.
         :raises InvalidJWKUsage: if the use constraints do not permit
          the operation.
+        :raises InvalidJWKValue: if the 'alg' constraint does not
+         permit the requested algorithm.
 
         :return: A Python Cryptography key object for asymmetric keys
             or a baseurl64_encoded octet string for symmetric keys
@@ -1080,16 +1211,16 @@ class JWK(dict):
                 return self.get('k')
             raise InvalidJWKOperation(operation, validops)
         elif operation == 'sign':
-            self._check_constraints('sig', operation)
+            self._check_constraints('sig', operation, alg, policy)
             return self._get_private_key(arg)
         elif operation == 'verify':
-            self._check_constraints('sig', operation)
+            self._check_constraints('sig', operation, alg, policy)
             return self._get_public_key(arg)
         elif operation == 'encrypt' or operation == 'wrapKey':
-            self._check_constraints('enc', operation)
+            self._check_constraints('enc', operation, alg, policy)
             return self._get_public_key(arg)
         elif operation == 'decrypt' or operation == 'unwrapKey':
-            self._check_constraints('enc', operation)
+            self._check_constraints('enc', operation, alg, policy)
             return self._get_private_key(arg)
         else:
             raise NotImplementedError

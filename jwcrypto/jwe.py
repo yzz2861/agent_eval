@@ -10,7 +10,8 @@ from jwcrypto.common import base64url_decode, base64url_encode
 from jwcrypto.common import check_crit, merge_headers, validate_headers
 from jwcrypto.common import json_decode, json_encode
 from jwcrypto.jwa import JWA
-from jwcrypto.jwk import JWKSet
+from jwcrypto.jwk import DefaultJWKUsagePolicy
+from jwcrypto.jwk import JWK, JWKSet, JWKUsagePolicy
 
 # Limit the amount of data we are willing to decompress by default.
 default_max_compressed_size = 256 * 1024
@@ -86,6 +87,7 @@ class JWE:
         self._allowed_algs = None
         self.objects = {}
         self.plaintext = None
+        self._key_usage_policy = None
         self.header_registry = JWSEHeaderRegistry(JWEHeaderRegistry)
         self.flattened = flattened
         if header_registry:
@@ -118,6 +120,28 @@ class JWE:
             self.add_recipient(recipient, header=header)
         elif header:
             raise ValueError('Header is allowed only with default recipient')
+
+    @property
+    def key_usage_policy(self):
+        """The JWK usage policy.
+
+        The (:class:`jwcrypto.jwk.JWKUsagePolicy`) object used to
+        validate key usage constraints ('use', 'key_ops' and 'alg')
+        before wrapping or unwrapping keys. Can be changed by setting
+        a custom policy object. Defaults to
+        (:data:`jwcrypto.jwk.DefaultJWKUsagePolicy`).
+        """
+
+        if self._key_usage_policy:
+            return self._key_usage_policy
+        else:
+            return DefaultJWKUsagePolicy
+
+    @key_usage_policy.setter
+    def key_usage_policy(self, policy):
+        if not isinstance(policy, JWKUsagePolicy):
+            raise TypeError('Key usage policy must be a JWKUsagePolicy')
+        self._key_usage_policy = policy
 
     def _jwa_keymgmt(self, name):
         allowed = self._allowed_algs or default_allowed_algs
@@ -213,6 +237,12 @@ class JWE:
         :raises ValueError: if the compression type is unknown.
         :raises InvalidJWAAlgorithm: if the 'alg' provided in the JOSE
          headers is missing or unknown, or otherwise not implemented.
+        :raises InvalidJWKUsage: if the key usage constraints do not
+         permit the operation.
+        :raises InvalidJWKOperation: if the key operations constraints
+         do not permit the operation.
+        :raises InvalidJWKValue: if the key 'alg' constraint does not
+         match the requested algorithm.
         """
         if self.plaintext is None:
             raise ValueError('Missing plaintext')
@@ -224,6 +254,13 @@ class JWE:
 
         jh = self._get_jose_header(header)
         alg, enc = self._get_alg_enc_from_headers(jh)
+
+        if isinstance(key, JWK):
+            # With direct encryption the key is the CEK, so its 'alg'
+            # constraint applies to the content encryption algorithm.
+            algname = enc.name if alg.name == 'dir' else alg.name
+            key.check_constraints('enc', ['wrapKey', 'encrypt'],
+                                  algname, self.key_usage_policy)
 
         rec = {}
         if header:
@@ -350,6 +387,12 @@ class JWE:
 
     def _unwrap_decrypt(self, alg, enc, key, enckey, header,
                         aad, iv, ciphertext, tag):
+        if isinstance(key, JWK):
+            # With direct encryption the key is the CEK, so its 'alg'
+            # constraint applies to the content encryption algorithm.
+            algname = enc.name if alg.name == 'dir' else alg.name
+            key.check_constraints('enc', ['unwrapKey', 'decrypt'],
+                                  algname, self.key_usage_policy)
         cek = alg.unwrap(key, enc.wrap_key_size, enckey, header)
         data = enc.decrypt(cek, aad, iv, ciphertext, tag)
         self.decryptlog.append('Success')

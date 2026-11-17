@@ -457,6 +457,7 @@ class TestJWK(unittest.TestCase):
         # also test key generation with input_keysize != keysize
         key = jwk.JWK.generate(kty='oct', alg="A128CBC-HS256")
         self.assertEqual(len(base64url_decode(key['k'])), 32)
+        key = jwk.JWK.generate(kty='oct', size=256)
         e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128CBC-HS256"}')
         e.add_recipient(key)
         enc = e.serialize()
@@ -1027,6 +1028,248 @@ customhdr_jws_example = \
     '}'
 
 
+class TestJWKUsagePolicy(unittest.TestCase):
+
+    def test_default_policy_instance(self):
+        self.assertIsInstance(jwk.DefaultJWKUsagePolicy,
+                              jwk.JWKUsagePolicy)
+
+    def test_check_constraints_no_declared_constraints(self):
+        # A key that declares no constraints is not restricted
+        key = jwk.JWK.generate(kty='oct', size=256)
+        key.check_constraints('sig', 'sign', 'HS256')
+        key.check_constraints('sig', 'verify', 'HS512')
+        key.check_constraints('enc', ['wrapKey', 'encrypt'], 'A256KW')
+        key.check_constraints('enc', ['unwrapKey', 'decrypt'], 'dir')
+
+    def test_use_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, use='enc')
+        with self.assertRaises(jwk.InvalidJWKUsage):
+            key.check_constraints('sig', 'sign', 'HS256')
+        key = jwk.JWK.generate(kty='oct', size=256, use='sig')
+        with self.assertRaises(jwk.InvalidJWKUsage):
+            key.check_constraints('enc', 'wrapKey', 'A256KW')
+
+    def test_key_ops_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, key_ops=['verify'])
+        with self.assertRaises(jwk.InvalidJWKOperation):
+            key.check_constraints('sig', 'sign', 'HS256')
+        key.check_constraints('sig', 'verify', 'HS256')
+        # any of the acceptable operations is enough
+        key = jwk.JWK.generate(kty='oct', size=256, key_ops=['decrypt'])
+        key.check_constraints('enc', ['unwrapKey', 'decrypt'], 'A256KW')
+        with self.assertRaises(jwk.InvalidJWKOperation):
+            key.check_constraints('enc', ['wrapKey', 'encrypt'], 'A256KW')
+
+    def test_alg_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=512, alg='HS256')
+        key.check_constraints('sig', 'sign', 'HS256')
+        with self.assertRaises(jwk.InvalidJWKValue):
+            key.check_constraints('sig', 'sign', 'HS384')
+        # no algorithm requested, no check performed
+        key.check_constraints('sig', 'sign')
+
+    def test_get_op_key_with_alg(self):
+        key = jwk.JWK.generate(kty='oct', size=512, alg='HS256')
+        key.get_op_key('sign', alg='HS256')
+        with self.assertRaises(jwk.InvalidJWKValue):
+            key.get_op_key('sign', alg='HS512')
+
+    def test_jws_sign_use_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, use='enc')
+        s = jws.JWS(payload=b'test')
+        with self.assertRaises(jwk.InvalidJWKUsage):
+            s.add_signature(key, protected={'alg': 'HS256'})
+
+    def test_jws_verify_use_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        s = jws.JWS(payload=b'test')
+        s.add_signature(key, protected={'alg': 'HS256'})
+        token = s.serialize(compact=True)
+        badkey = jwk.JWK(kty='oct', k=key['k'], use='enc')
+        c = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            c.deserialize(token, badkey)
+
+    def test_jws_sign_key_ops_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, key_ops=['verify'])
+        s = jws.JWS(payload=b'test')
+        with self.assertRaises(jwk.InvalidJWKOperation):
+            s.add_signature(key, protected={'alg': 'HS256'})
+
+    def test_jws_verify_key_ops_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        s = jws.JWS(payload=b'test')
+        s.add_signature(key, protected={'alg': 'HS256'})
+        token = s.serialize(compact=True)
+        badkey = jwk.JWK(kty='oct', k=key['k'], key_ops=['sign'])
+        c = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            c.deserialize(token, badkey)
+
+    def test_jws_sign_alg_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=512, alg='HS256')
+        s = jws.JWS(payload=b'test')
+        with self.assertRaises(jwk.InvalidJWKValue):
+            s.add_signature(key, protected={'alg': 'HS384'})
+
+    def test_jws_verify_alg_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=512)
+        s = jws.JWS(payload=b'test')
+        s.add_signature(key, protected={'alg': 'HS384'})
+        token = s.serialize(compact=True)
+        badkey = jwk.JWK(kty='oct', k=key['k'], alg='HS256')
+        c = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            c.deserialize(token, badkey)
+
+    def test_jws_keyset_selects_matching_alg(self):
+        key1 = jwk.JWK.generate(kty='oct', alg='HS256', kid='key1')
+        key2 = jwk.JWK.generate(kty='oct', alg='HS384', kid='key2')
+        ks = jwk.JWKSet()
+        ks.add(key1)
+        ks.add(key2)
+        # sign with key2, no kid header so all keys are tried; only
+        # key2's 'alg' constraint matches the token algorithm
+        s = jws.JWS(payload=b'secret')
+        s.add_signature(key2, protected={'alg': 'HS384'})
+        c = jws.JWS()
+        c.deserialize(s.serialize(), ks)
+        self.assertEqual(c.payload, b'secret')
+        # a token signed with an algorithm no key in the set permits
+        # must fail even if the key material is present
+        key3 = jwk.JWK.generate(kty='oct', size=512)
+        s2 = jws.JWS(payload=b'secret')
+        s2.add_signature(key3, protected={'alg': 'HS384'})
+        ks2 = jwk.JWKSet()
+        ks2.add(jwk.JWK(kty='oct', k=key3['k'], alg='HS256'))
+        c2 = jws.JWS()
+        with self.assertRaises(JWKeyNotFound):
+            c2.deserialize(s2.serialize(), ks2)
+
+    def test_jwe_wrap_use_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, use='sig')
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        with self.assertRaises(jwk.InvalidJWKUsage):
+            e.add_recipient(key)
+
+    def test_jwe_unwrap_use_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        e.add_recipient(key)
+        token = e.serialize()
+        badkey = jwk.JWK(kty='oct', k=key['k'], use='sig')
+        d = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            d.deserialize(token, badkey)
+
+    def test_jwe_wrap_key_ops_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, key_ops=['unwrapKey'])
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        with self.assertRaises(jwk.InvalidJWKOperation):
+            e.add_recipient(key)
+
+    def test_jwe_unwrap_key_ops_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        e.add_recipient(key)
+        token = e.serialize()
+        badkey = jwk.JWK(kty='oct', k=key['k'], key_ops=['wrapKey'])
+        d = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            d.deserialize(token, badkey)
+
+    def test_jwe_wrap_alg_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256, alg='A128KW')
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        with self.assertRaises(jwk.InvalidJWKValue):
+            e.add_recipient(key)
+
+    def test_jwe_unwrap_alg_conflict(self):
+        key = jwk.JWK.generate(kty='oct', size=256)
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        e.add_recipient(key)
+        token = e.serialize()
+        badkey = jwk.JWK(kty='oct', k=key['k'], alg='A128KW')
+        d = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            d.deserialize(token, badkey)
+
+    def test_jwe_dir_alg_checked_against_enc(self):
+        # with 'dir' the key is the CEK, its 'alg' constraint applies
+        # to the content encryption algorithm
+        key = jwk.JWK.generate(kty='oct', size=256, alg='A256GCM')
+        e = jwe.JWE('test', '{"alg":"dir","enc":"A256GCM"}')
+        e.add_recipient(key)
+        token = e.serialize()
+        d = jwe.JWE()
+        d.deserialize(token, key)
+        self.assertEqual(d.payload, b'test')
+        badkey = jwk.JWK(kty='oct', k=key['k'], alg='A128GCM')
+        d2 = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            d2.deserialize(token, badkey)
+
+    def test_jwe_keyset_selects_matching_alg(self):
+        key1 = jwk.JWK.generate(kty='oct', alg='A128KW', kid='key1')
+        key2 = jwk.JWK.generate(kty='oct', alg='A256KW', kid='key2')
+        ks = jwk.JWKSet()
+        ks.add(key1)
+        ks.add(key2)
+        # encrypt to key2, no kid header so all keys are tried; only
+        # key2's 'alg' constraint matches the token algorithm
+        e = jwe.JWE('secret', '{"alg":"A256KW","enc":"A128GCM"}')
+        e.add_recipient(key2)
+        d = jwe.JWE()
+        d.deserialize(e.serialize(), ks)
+        self.assertEqual(d.payload, b'secret')
+
+    def test_custom_policy_override(self):
+        class NoAlgPolicy(jwk.JWKUsagePolicy):
+            def check_alg(self, key, algorithm):
+                pass
+
+        policy = NoAlgPolicy()
+        # sign with a mismatched 'alg' is allowed with the custom policy
+        key = jwk.JWK.generate(kty='oct', size=512, alg='HS256')
+        s = jws.JWS(payload=b'test')
+        s.key_usage_policy = policy
+        s.add_signature(key, protected={'alg': 'HS384'})
+        token = s.serialize(compact=True)
+        # default policy rejects it on verify
+        c = jws.JWS()
+        with self.assertRaises(jws.InvalidJWSSignature):
+            c.deserialize(token, key)
+        # custom policy allows it
+        c2 = jws.JWS()
+        c2.key_usage_policy = policy
+        c2.deserialize(token, key)
+        self.assertEqual(c2.payload, b'test')
+
+    def test_custom_policy_override_jwe(self):
+        class NoAlgPolicy(jwk.JWKUsagePolicy):
+            def check_alg(self, key, algorithm):
+                pass
+
+        key = jwk.JWK.generate(kty='oct', size=256, alg='A128KW')
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        e.key_usage_policy = NoAlgPolicy()
+        e.add_recipient(key)
+        token = e.serialize()
+        d = jwe.JWE()
+        d.key_usage_policy = NoAlgPolicy()
+        d.deserialize(token, key)
+        self.assertEqual(d.payload, b'test')
+
+    def test_policy_type_check(self):
+        s = jws.JWS(payload=b'test')
+        with self.assertRaises(TypeError):
+            s.key_usage_policy = object()
+        e = jwe.JWE('test', '{"alg":"A256KW","enc":"A128GCM"}')
+        with self.assertRaises(TypeError):
+            e.key_usage_policy = object()
+
+
 class TestJWS(unittest.TestCase):
     def check_sign(self, test):
         s = jws.JWSCore(test['alg'],
@@ -1222,7 +1465,7 @@ class TestJWS(unittest.TestCase):
         ks = jwk.JWKSet()
         key1 = jwk.JWK.generate(kty='oct', alg='HS256', kid='key1')
         key2 = jwk.JWK.generate(kty='oct', alg='HS384', kid='key2')
-        key3 = jwk.JWK.generate(kty='oct', alg='HS512', kid='key3')
+        key3 = jwk.JWK.generate(kty='oct', size=512, kid='key3')
         ks.add(key1)
         ks.add(key2)
         s1 = jws.JWS(payload=b'secret')
