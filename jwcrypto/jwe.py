@@ -10,12 +10,16 @@ from jwcrypto.common import base64url_decode, base64url_encode
 from jwcrypto.common import check_crit, merge_headers, validate_headers
 from jwcrypto.common import json_decode, json_encode
 from jwcrypto.jwa import JWA
-from jwcrypto.jwk import JWKSet
+from jwcrypto.jwk import JWK, JWKSet
 
 # Limit the amount of data we are willing to decompress by default.
 default_max_compressed_size = 256 * 1024
 # Limit the maximum plaintext size to 100MB by default.
 default_max_plaintext_size = 100 * 1024 * 1024
+# Limit the maximum decompression ratio we are willing to accept by
+# default. DEFLATE can theoretically compress up to ~1032:1, anything
+# even remotely close to that is almost certainly a decompression bomb.
+default_max_compression_ratio = 1000
 # Limit the number of recipients accepted in one decrypt() call.
 default_max_recipients = 10
 
@@ -55,11 +59,38 @@ default_allowed_algs = [
 
 
 # These have been moved to jwcrypto.common, maintain here for backwards compat
+JWException = common.JWException
 InvalidCEKeyLength = common.InvalidCEKeyLength
 InvalidJWEData = common.InvalidJWEData
 InvalidJWEKeyLength = common.InvalidJWEKeyLength
 InvalidJWEKeyType = common.InvalidJWEKeyType
 InvalidJWEOperation = common.InvalidJWEOperation
+
+
+# Expected JWK 'kty' for each key management algorithm. Used to verify
+# that the key offered for decryption matches the 'alg' (and 'enc', for
+# direct encryption) declared in the protected headers, so that a token
+# cannot trick the recipient into using a key with an algorithm family
+# it was not intended for (algorithm confusion).
+_alg_to_key_types = {
+    'RSA1_5': {'RSA'},
+    'RSA-OAEP': {'RSA'},
+    'RSA-OAEP-256': {'RSA'},
+    'A128KW': {'oct'},
+    'A192KW': {'oct'},
+    'A256KW': {'oct'},
+    'dir': {'oct'},
+    'ECDH-ES': {'EC', 'OKP'},
+    'ECDH-ES+A128KW': {'EC', 'OKP'},
+    'ECDH-ES+A192KW': {'EC', 'OKP'},
+    'ECDH-ES+A256KW': {'EC', 'OKP'},
+    'A128GCMKW': {'oct'},
+    'A192GCMKW': {'oct'},
+    'A256GCMKW': {'oct'},
+    'PBES2-HS256+A128KW': {'oct'},
+    'PBES2-HS384+A192KW': {'oct'},
+    'PBES2-HS512+A256KW': {'oct'},
+}
 
 
 class JWE:
@@ -182,6 +213,22 @@ class JWE:
             raise InvalidJWEData('Missing "enc" from headers')
         enc = self._jwa_enc(encname)
         return alg, enc
+
+    def _check_key_type(self, algname, enc, key):
+        # Verify the key matches the alg/enc combination declared in the
+        # protected headers to prevent algorithm confusion attacks.
+        if not isinstance(key, JWK):
+            return
+        expected = _alg_to_key_types.get(algname)
+        kty = key.get('kty', None)
+        if expected is not None and kty not in expected:
+            raise InvalidJWEKeyType('/'.join(sorted(expected)), kty)
+        if algname == 'dir':
+            # With direct encryption the key is used as CEK, so its size
+            # must match the content encryption algorithm.
+            bits = len(base64url_decode(key.get_op_key('decrypt'))) * 8
+            if bits != enc.wrap_key_size:
+                raise InvalidJWEKeyLength(enc.wrap_key_size, bits)
 
     def _encrypt(self, alg, enc, jh):
         aad = base64url_encode(self.objects.get('protected', ''))
@@ -370,6 +417,9 @@ class JWE:
         alg = self._jwa_keymgmt(jh.get('alg', None))
         enc = self._jwa_enc(jh.get('enc', None))
 
+        if not isinstance(key, JWKSet):
+            self._check_key_type(jh['alg'], enc, key)
+
         aad = base64url_encode(self.objects.get('protected', ''))
         if 'aad' in self.objects:
             aad += '.' + base64url_encode(self.objects['aad'])
@@ -386,6 +436,7 @@ class JWE:
 
             for k in keys:
                 try:
+                    self._check_key_type(jh['alg'], enc, k)
                     data = self._unwrap_decrypt(alg, enc, k,
                                                 ppe.get('encrypted_key', b''),
                                                 jh, aad, self.objects['iv'],
@@ -420,6 +471,13 @@ class JWE:
                 raise InvalidJWEData(
                     'Compressed data exceeds maximum allowed'
                     'output size' + f' ({max_plaintext})')
+            if len(data) > 0 and \
+                    len(self.plaintext) > len(data) * \
+                    default_max_compression_ratio:
+                self.plaintext = None
+                raise InvalidJWEData(
+                    'Decompression ratio exceeds maximum allowed'
+                    'ratio' + f' ({default_max_compression_ratio})')
         elif compress is None:
             self.plaintext = data
         else:
@@ -436,6 +494,13 @@ class JWE:
          the library default applies. Application writers are recommended
          to set a limit here if they know what is the max plaintext size
          for their application.
+
+         Note that when the 'zip' header parameter is used, decompression
+         is additionally bounded by the maximum compressed size and the
+         maximum decompression ratio (see the module level
+         'default_max_compressed_size' and 'default_max_compression_ratio'
+         values), and the key type is checked against the 'alg'/'enc'
+         combination declared in the protected headers.
 
         :raises InvalidJWEOperation: if the key is not a JWK object.
         :raises InvalidJWEData: if the ciphertext can't be decrypted or

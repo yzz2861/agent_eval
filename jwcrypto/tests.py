@@ -2603,6 +2603,10 @@ class ConformanceTests(unittest.TestCase):
         # raise the limit on compressed token size so we can decrypt
         defcmax = jwe.default_max_compressed_size
         jwe.default_max_compressed_size = 10 * 1024 * 1024
+        # this payload compresses at a ~1030:1 ratio, so raise the
+        # maximum allowed decompression ratio as well
+        defrmax = jwe.default_max_compression_ratio
+        jwe.default_max_compression_ratio = 2000
 
         # this passes if we explicitly allow larger plaintext via API
         check.decrypt(key, max_plaintext=1000000000)
@@ -2625,6 +2629,102 @@ class ConformanceTests(unittest.TestCase):
 
         # restore plaintext limits
         jwe.default_max_plaintext_size = defpmax
+
+        # restore ratio limits
+        jwe.default_max_compression_ratio = defrmax
+
+    def test_jwe_decompression_ratio_limit(self):
+        key = jwk.JWK(kty='oct', k=base64url_encode(b'A' * (128 // 8)))
+        # Payload that compresses at roughly 250:1, above the test limit
+        # of 100:1 but well below the library default of 1000:1
+        payload = bytes(range(256)) * 16 * 256
+        protected_header = {
+            "alg": "A128KW",
+            "enc": "A128GCM",
+            "zip": "DEF",
+        }
+        enc = jwe.JWE(payload, recipient=key,
+                      protected=protected_header).serialize(compact=True)
+        check = jwe.JWE()
+        check.deserialize(enc)
+
+        # with a low maximum ratio the decompression bomb is rejected
+        defrmax = jwe.default_max_compression_ratio
+        jwe.default_max_compression_ratio = 100
+        try:
+            with self.assertRaises(jwe.JWException):
+                check.decrypt(key)
+        finally:
+            jwe.default_max_compression_ratio = defrmax
+
+        # with the default ratio limit the token decrypts just fine
+        check.decrypt(key)
+        self.assertEqual(check.payload, payload)
+
+    def test_jwe_compression_roundtrip(self):
+        key = jwk.JWK.generate(kty='oct', size=128)
+        payload = b'compress me! ' * 100
+        protected_header = {
+            "alg": "A128KW",
+            "enc": "A128GCM",
+            "zip": "DEF",
+        }
+        token = jwe.JWE(payload, recipient=key,
+                        protected=protected_header).serialize(compact=True)
+        check = jwe.JWE()
+        check.deserialize(token)
+        check.decrypt(key)
+        self.assertEqual(check.payload, payload)
+
+    def test_jwe_alg_key_type_mismatch(self):
+        payload = b'test-mismatch'
+        rsa_key = jwk.JWK.generate(kty='RSA', size=2048)
+        oct_key = jwk.JWK.generate(kty='oct', size=128)
+
+        # Token produced for an RSA key management algorithm must not
+        # be decryptable with a symmetric key, and vice versa.
+        token = jwe.JWE(payload, recipient=rsa_key,
+                        protected={'alg': 'RSA-OAEP',
+                                   'enc': 'A128GCM'}).serialize(compact=True)
+        check = jwe.JWE()
+        check.deserialize(token)
+        with self.assertRaises(jwe.JWException):
+            check.decrypt(oct_key)
+        # sanity check: the right key still works
+        check.decrypt(rsa_key)
+        self.assertEqual(check.payload, payload)
+
+        token = jwe.JWE(payload, recipient=oct_key,
+                        protected={'alg': 'A128KW',
+                                   'enc': 'A128GCM'}).serialize(compact=True)
+        check = jwe.JWE()
+        check.deserialize(token)
+        with self.assertRaises(jwe.JWException):
+            check.decrypt(rsa_key)
+        check.decrypt(oct_key)
+        self.assertEqual(check.payload, payload)
+
+    def test_jwe_dir_key_length_mismatch(self):
+        payload = b'test-dir-mismatch'
+        # 128 bit key, but A256GCM requires a 256 bit CEK with 'dir'
+        key = jwk.JWK.generate(kty='oct', size=128)
+        token = jwe.JWE(payload, recipient=key,
+                        protected={'alg': 'dir',
+                                   'enc': 'A128GCM'}).serialize(compact=True)
+        check = jwe.JWE()
+        check.deserialize(token)
+        # Swap in a header that demands a 256 bit CEK; the AAD changes so
+        # decryption would fail anyway, but the key length check must
+        # reject it as a JWException before any unwrapping happens.
+        protected = base64url_encode(
+            json_encode({'alg': 'dir', 'enc': 'A256GCM'}))
+        parts = token.split('.')
+        parts[0] = protected
+        forged = '.'.join(parts)
+        check = jwe.JWE()
+        check.deserialize(forged)
+        with self.assertRaises(jwe.JWException):
+            check.decrypt(key)
 
     def test_jws_small_hmac_key_rejected(self):
         sign = jws.JWS(payload='message')
