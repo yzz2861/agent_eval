@@ -3,12 +3,18 @@ from __future__ import annotations
 import copy
 import re
 from itertools import chain
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from django.conf import settings
 from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
+from csp.reports import normalize_allowlist, validate_report_endpoints
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from django.http import HttpRequest
 
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
@@ -70,16 +76,20 @@ def build_policy(
     replace: DIRECTIVES_T | None = None,
     nonce: str | None = None,
     report_only: bool = False,
+    request: HttpRequest | None = None,
+    report_allowlist: Sequence[str] | frozenset[str] | None = None,
 ) -> str:
     """Builds the policy as a string from the settings."""
 
     if config is None:
         if report_only:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
+            report_setting = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
+            config = default_config(report_setting.get("DIRECTIVES", {})) if report_setting else None
         else:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
+            report_setting = getattr(settings, "CONTENT_SECURITY_POLICY", {})
+            config = default_config(report_setting.get("DIRECTIVES", {})) if report_setting else None
+        if report_allowlist is None and report_setting is not None:
+            report_allowlist = report_setting.get("REPORT_ALLOWLIST")
 
     # If config is still `None`, return empty policy.
     if config is None:
@@ -114,6 +124,12 @@ def build_policy(
                 csp[k] = v
             else:
                 csp[k] += tuple(v)
+
+    validate_report_endpoints(
+        csp,
+        request=request,
+        allowed_origins=normalize_allowlist(report_allowlist),
+    )
 
     report_uri = csp.pop("report-uri", None)
 

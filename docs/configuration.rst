@@ -119,6 +119,14 @@ policy.
        instead of ``csp.middleware.CSPMiddleware``.
        See :ref:`violation reporting <reports-chapter>` for more details.
 
+``REPORT_ALLOWLIST``
+    A ``list`` or ``tuple`` of absolute ``https`` origins that are allowed as ``report-uri`` /
+    ``report-to`` reporting endpoints in addition to the deployment own origin. Relative
+    endpoints are always same-origin and do not need to be listed. Entries that are not https
+    origins trigger the ``csp.E003`` system check, and an endpoint that is neither same-origin
+    nor allowlisted triggers the ``csp.E004`` system check (and raises
+    ``csp.exceptions.CSPReportEndpointError`` when supplied per view or per request).
+
 ``DIRECTIVES``
     A dictionary of policy directives. Each key in the dictionary is a directive and the value is a
     list of sources for that directive. The following is a list of all the directives that can be

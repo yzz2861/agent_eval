@@ -14,6 +14,17 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
+from csp.request_attrs import (
+    REQUEST_CONFIG,
+    REQUEST_CONFIG_RO,
+    REQUEST_EXEMPT,
+    REQUEST_EXEMPT_RO,
+    REQUEST_REPLACE,
+    REQUEST_REPLACE_RO,
+    REQUEST_REPORT_ONLY,
+    REQUEST_UPDATE,
+    REQUEST_UPDATE_RO,
+)
 from csp.utils import DIRECTIVES_T, build_policy
 
 if TYPE_CHECKING:
@@ -70,6 +81,21 @@ class CSPMiddleware(MiddlewareMixin):
         nonce = partial(self._make_nonce, request)
         setattr(request, "csp_nonce", CheckableLazyObject(nonce))
 
+    @staticmethod
+    def _is_exempt(request: HttpRequest, response: HttpResponseBase, response_attr: str, request_attr: str) -> bool:
+        return getattr(response, response_attr, False) is True or getattr(request, request_attr, False) is True
+
+    @staticmethod
+    def _is_excluded(request: HttpRequest, setting_name: str) -> bool:
+        policy = getattr(settings, setting_name, None) or {}
+        prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
+        return request.path_info.startswith(tuple(prefixes))
+
+    @staticmethod
+    def _report_allowlist(setting_name: str) -> list[str] | None:
+        policy = getattr(settings, setting_name, None) or {}
+        return policy.get("REPORT_ALLOWLIST")
+
     def process_response(self, request: HttpRequest, response: HttpResponseBase) -> HttpResponseBase:
         # Check for debug view
         exempted_debug_codes = (
@@ -79,29 +105,45 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
+        # A per-request switch routes the enforced policy through the
+        # report-only header. In that case the standalone report-only policy is
+        # suppressed so the effective policy is not emitted twice.
+        request_report_only = getattr(request, REQUEST_REPORT_ONLY, False) is True
+
         policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
+        csp = build_policy(
+            **asdict(policy_parts),
+            request=request,
+            report_allowlist=self._report_allowlist("CONTENT_SECURITY_POLICY"),
+        )
         if csp:
             # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt", False) is False
-            no_header = HEADER not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER] = csp
+            is_not_exempt = self._is_exempt(request, response, "_csp_exempt", REQUEST_EXEMPT) is False
+            is_not_excluded = self._is_excluded(request, "CONTENT_SECURITY_POLICY") is False
+            if request_report_only:
+                no_header = HEADER_REPORT_ONLY not in response
+                if no_header and is_not_exempt and is_not_excluded:
+                    response[HEADER_REPORT_ONLY] = csp
+            else:
+                no_header = HEADER not in response
+                if no_header and is_not_exempt and is_not_excluded:
+                    response[HEADER] = csp
 
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
-        if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
-            no_header = HEADER_REPORT_ONLY not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER_REPORT_ONLY] = csp_ro
+        if not request_report_only:
+            policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
+            csp_ro = build_policy(
+                **asdict(policy_parts_ro),
+                report_only=True,
+                request=request,
+                report_allowlist=self._report_allowlist("CONTENT_SECURITY_POLICY_REPORT_ONLY"),
+            )
+            if csp_ro:
+                # Only set header if not already set and not an excluded prefix and not exempted.
+                is_not_exempt = self._is_exempt(request, response, "_csp_exempt_ro", REQUEST_EXEMPT_RO) is False
+                is_not_excluded = self._is_excluded(request, "CONTENT_SECURITY_POLICY_REPORT_ONLY") is False
+                no_header = HEADER_REPORT_ONLY not in response
+                if no_header and is_not_exempt and is_not_excluded:
+                    response[HEADER_REPORT_ONLY] = csp_ro
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -114,12 +156,12 @@ class CSPMiddleware(MiddlewareMixin):
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts = self.get_policy_parts(request=request, response=response, report_only=False)
-        return build_policy(**asdict(policy_parts))
+        return build_policy(**asdict(policy_parts), request=request)
 
     def build_policy_ro(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        return build_policy(**asdict(policy_parts_ro), report_only=True)
+        return build_policy(**asdict(policy_parts_ro), report_only=True, request=request)
 
     def get_policy_parts(
         self,
@@ -131,10 +173,22 @@ class CSPMiddleware(MiddlewareMixin):
             config = getattr(response, "_csp_config_ro", None)
             update = getattr(response, "_csp_update_ro", None)
             replace = getattr(response, "_csp_replace_ro", None)
+            if config is None:
+                config = getattr(request, REQUEST_CONFIG_RO, None)
+            if update is None:
+                update = getattr(request, REQUEST_UPDATE_RO, None)
+            if replace is None:
+                replace = getattr(request, REQUEST_REPLACE_RO, None)
         else:
             config = getattr(response, "_csp_config", None)
             update = getattr(response, "_csp_update", None)
             replace = getattr(response, "_csp_replace", None)
+            if config is None:
+                config = getattr(request, REQUEST_CONFIG, None)
+            if update is None:
+                update = getattr(request, REQUEST_UPDATE, None)
+            if replace is None:
+                replace = getattr(request, REQUEST_REPLACE, None)
 
         nonce = getattr(request, "_csp_nonce", None)
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
+from csp.request_attrs import REQUEST_REPORT_ONLY
+
 if TYPE_CHECKING:
-    from django.http import HttpResponseBase
+    from django.http import HttpRequest, HttpResponseBase
 
     # A generic Django view function
     _VIEW_T = Callable[..., HttpResponseBase]
@@ -102,3 +104,20 @@ def csp(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwarg
         return _wrapped
 
     return decorator
+
+
+def csp_report_only(view: _VIEW_T) -> _VIEW_T:
+    """Emit the enforced policy through the report-only header for one view.
+
+    This sets a per-request flag consumed by ``CSPMiddleware``: the policy
+    that would normally be sent in ``Content-Security-Policy`` is instead
+    sent in ``Content-Security-Policy-Report-Only`` for this request, and the
+    standalone report-only policy is suppressed to avoid duplicate headers.
+    """
+
+    @wraps(view)
+    def _wrapped(request: HttpRequest, *a: Any, **kw: Any) -> HttpResponseBase:
+        setattr(request, REQUEST_REPORT_ONLY, True)
+        return view(request, *a, **kw)
+
+    return _wrapped

@@ -24,3 +24,38 @@ and set the ``REPORT_PERCENTAGE`` option:
     (0.0 = no reports at all, 100.0 = always report).  Ignored if ``report-uri`` isn't set.
 
 .. _report: http://www.w3.org/TR/CSP/#sample-violation-report
+
+Endpoint security
+------------------
+
+Reporting endpoints receive detailed information about violations (and the
+pages on which they occurred), so django-csp validates every ``report-uri`` and
+``report-to`` endpoint before it is written to a header. An endpoint is only
+accepted when it is one of:
+
+* a relative reference such as ``/csp-report/``, which is same-origin by
+  construction (including scheme-relative ``//host/path`` URLs on secure
+  requests);
+* a bare ``report-to`` group token (a non-URL identifier matching a
+  ``Reporting-Endpoints`` header), which is not an exfiltration URL;
+* an absolute ``https`` URL that is same-origin with the current request;
+* an absolute ``https`` URL whose origin is explicitly listed in the
+  ``REPORT_ALLOWLIST`` policy setting.
+
+Plain ``http`` URLs and cross-origin ``https`` URLs that are not allowlisted
+are rejected. At request time an invalid endpoint raises
+``csp.exceptions.CSPReportEndpointError``; the same problems in the global
+settings are reported by Django system checks (``csp.E003`` for a malformed
+allowlist and ``csp.E004`` for a disallowed endpoint).
+
+Configure trusted third-party report collectors per policy, for example:
+
+.. code-block:: python
+
+    CONTENT_SECURITY_POLICY = {
+        "REPORT_ALLOWLIST": ["https://reports.example.com"],
+        "DIRECTIVES": {
+            "default-src": ["example.com"],
+            "report-uri": ["https://reports.example.com/collect"],
+        },
+    }

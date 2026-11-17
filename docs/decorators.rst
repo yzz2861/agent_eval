@@ -149,3 +149,69 @@ are in use, as shown below.
     )
     def myview(request):
         return render(...)
+
+
+Per-request overrides
+======================
+
+All of the per-view decorators above work by setting attributes on the
+``HttpResponse``. The same overrides can also be applied directly to the
+``HttpRequest``, which is useful when the policy must be decided by another
+middleware or by logic that runs before the view returns a response.
+
+The request attributes mirror the response attributes used by the decorators:
+
+.. code-block:: python
+
+    from csp.request_attrs import (
+        REQUEST_CONFIG,
+        REQUEST_UPDATE,
+        REQUEST_REPLACE,
+        REQUEST_EXEMPT,
+        REQUEST_REPORT_ONLY,
+    )
+
+
+    def my_view(request):
+        # Replace the whole enforced policy for this request.
+        setattr(request, REQUEST_CONFIG, {"default-src": ["example.com"]})
+        # Or append / replace individual directives.
+        setattr(request, REQUEST_UPDATE, {"img-src": ["img.example.com"]})
+        setattr(request, REQUEST_REPLACE, {"font-src": ["font.example.com"]})
+        # Or exempt the request entirely.
+        setattr(request, REQUEST_EXEMPT, True)
+        return render(...)
+
+Each attribute also has a report-only counterpart suffixed with ``_RO``
+(``REQUEST_CONFIG_RO``, ``REQUEST_UPDATE_RO``, ``REQUEST_REPLACE_RO`` and
+``REQUEST_EXEMPT_RO``). When both a response attribute (set by a decorator)
+and a request attribute are present, the response attribute takes precedence.
+
+Switching enforcement to report-only per request
+-------------------------------------------------
+
+Setting ``REQUEST_REPORT_ONLY`` to ``True`` routes the *enforced* policy
+through the ``Content-Security-Policy-Report-Only`` header for that request
+instead of ``Content-Security-Policy``. The standalone report-only policy is
+suppressed while the switch is active so the effective policy is not emitted
+twice:
+
+.. code-block:: python
+
+    from csp.request_attrs import REQUEST_REPORT_ONLY
+
+
+    def my_view(request):
+        setattr(request, REQUEST_REPORT_ONLY, True)
+        return render(...)
+
+The equivalent decorator is ``csp.decorators.csp_report_only``:
+
+.. code-block:: python
+
+    from csp.decorators import csp_report_only
+
+
+    @csp_report_only
+    def my_view(request):
+        return render(...)
