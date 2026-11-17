@@ -41,7 +41,7 @@ from ._rfc7797.json import (
 )
 from ._rfc7797.json import extract_rfc7797_json as extract_flattened_json
 from ._rfc7797.util import is_rfc7797_enabled
-from .errors import BadSignatureError, MissingKeyError
+from .errors import BadSignatureError, DecodeError, MissingKeyError
 from .jwa import setup_jws_algorithms
 from .jwk import Key, KeyFlexible, guess_key
 from .registry import Header
@@ -296,6 +296,8 @@ def deserialize_json(
     def find_key(obj: HeaderMember) -> Key:
         return guess_key(public_key, obj, use="sig")
 
+    if not isinstance(value, dict):
+        raise DecodeError("Invalid JSON Serialization")
     if "signatures" in value:
         general_obj = extract_general_json(value, registry)
         if not verify_general_json(general_obj, registry, find_key):

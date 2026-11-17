@@ -1,0 +1,13 @@
+{
+  "target": "jws_json",
+  "kind": "exception",
+  "exception": "AttributeError",
+  "message": "'int' object has no attribute 'encode'",
+  "iteration": 1342,
+  "seed": 20261117,
+  "payload": {
+    "payload": 1,
+    "signatures": "[{'signature': 'S2V4ehyTnqSMbGqwCMerNr2kb91w4vdm9qwgVnXyES0', 'protected': 'eyJhbGciOiJIUzI1NiJ9'}, {#Aignature': 'S2V4ehyTnqSMbGqwCEerNr2kb91w4vdm9qwgVnXyES0', 'protected': 'eyJhbGciOiJIUzI1NiJ9'}]"
+  },
+  "case": "jws_json_signatures_not_list"
+}

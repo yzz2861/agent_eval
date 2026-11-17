@@ -23,6 +23,7 @@ from ._rfc7516.types import (
     FlattenedJSONSerialization,
     GeneralJSONSerialization,
 )
+from .errors import DecodeError
 from .jwa import setup_jwe_algorithms
 from .jwk import ECKey, Key, KeyFlexible, KeySet, OKPKey, guess_key
 from .registry import Header, reject_unprotected_crit_header
@@ -234,6 +235,8 @@ def decrypt_json(
     elif registry is None:
         registry = default_registry
 
+    if not isinstance(data, dict):
+        raise DecodeError("Invalid JSON Serialization")
     reject_unprotected_crit_header(data.get("unprotected"))
     if "recipients" in data:
         general_obj = extract_general_json(cast(GeneralJSONSerialization, data), registry)

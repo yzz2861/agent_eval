@@ -1,0 +1,15 @@
+{
+  "target": "jws_json",
+  "kind": "exception",
+  "exception": "AttributeError",
+  "message": "'int' object has no attribute 'encode'",
+  "iteration": 1670,
+  "seed": 20261117,
+  "payload": {
+    "payload": -1,
+    "signature": "S2V4ehyTnqSMbGqwCEerNr2kb91w4vdm9qwgVnXyES0",
+    "protected": "eyJhbGciOiJIUzI1NiJ9",
+    "77416": 1
+  },
+  "case": "jws_json_flattened_payload_wrong_type"
+}

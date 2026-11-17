@@ -1,0 +1,19 @@
+{
+  "target": "jwe_json",
+  "kind": "exception",
+  "exception": "TypeError",
+  "message": "iv/ciphertext/tag segment has wrong type",
+  "iteration": -1,
+  "seed": 20261117,
+  "payload": {
+    "protected": "eyJhbGciOiJBMTI4S1ciLCJlbmMiOiJBMTI4R0NNIn0",
+    "iv": null,
+    "ciphertext": "AA",
+    "tag": "AA",
+    "encrypted_key": "AA",
+    "header": {
+      "alg": "A128KW"
+    }
+  },
+  "case": "jwe_json_segment_wrong_type"
+}

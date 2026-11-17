@@ -1,0 +1,19 @@
+{
+  "target": "jwe_json",
+  "kind": "exception",
+  "exception": "AttributeError",
+  "message": "'str' object has no attribute 'get'",
+  "iteration": 1131,
+  "seed": 20261117,
+  "payload": {
+    "protected": "eyJlbmMiOiJBMTI4R0NNIn0",
+    "iv": "wwwLh_MqzqiRiJs_",
+    "ciphertext": "XwVe9is",
+    "tag": "jcB0hD7NznjPw67JvopBtg",
+    "recipients": [
+      "AA",
+      "AA"
+    ]
+  },
+  "case": "jwe_json_recipient_entry_not_dict"
+}

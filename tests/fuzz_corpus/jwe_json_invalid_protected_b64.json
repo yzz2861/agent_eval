@@ -1,0 +1,19 @@
+{
+  "target": "jwe_json",
+  "kind": "exception",
+  "exception": "Error",
+  "message": "Invalid base64url protected header",
+  "iteration": -1,
+  "seed": 20261117,
+  "payload": {
+    "protected": 1,
+    "iv": "AA",
+    "ciphertext": "AA",
+    "tag": "AA",
+    "encrypted_key": "AA",
+    "header": {
+      "alg": "A128KW"
+    }
+  },
+  "case": "jwe_json_invalid_protected_b64"
+}

@@ -1,0 +1,23 @@
+{
+  "target": "jws_json",
+  "kind": "exception",
+  "exception": "AttributeError",
+  "message": "'bool' object has no attribute 'encode'",
+  "iteration": 864,
+  "seed": 20261117,
+  "payload": {
+    "payload": false,
+    "signatures": [
+      "AA",
+      {
+        "signature": "S2V4ehyTnqSMbGqwCEerNr2kb91w4vdm9qwgVnXyES0",
+        "protected": "eyJhbGciOiJIUzI1NiJ9"
+      },
+      {
+        "signature": "S2V4ehyTnqSMbGqwCEerNr2kb91w4vdm9qwgVnXyES0",
+        "protected": "eyJhbGciOiJIUzI1NiJ9"
+      }
+    ]
+  },
+  "case": "jws_json_signature_entry_not_dict"
+}

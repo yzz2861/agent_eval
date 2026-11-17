@@ -14,6 +14,30 @@ from tests.base import load_key
 
 
 class TestJWEErrors(TestCase):
+    def test_malformed_json_serialization_raises_decode_error(self):
+        key = OctKey.import_key(b"0123456789abcdef")
+        valid_protected = "eyJlbmMiOiJBMTI4R0NNIn0"
+        for data in (
+            "not-a-dict",
+            None,
+            {
+                "protected": 1,
+                "iv": "AA",
+                "ciphertext": "AA",
+                "tag": "AA",
+                "recipients": "x",
+            },
+            {
+                "protected": valid_protected,
+                "iv": None,
+                "ciphertext": "AA",
+                "tag": "AA",
+                "recipients": ["x"],
+            },
+        ):
+            with self.subTest(data=data):
+                self.assertRaises(DecodeError, jwe.decrypt_json, data, key)
+
     def test_dir_with_invalid_key_type(self):
         key1 = load_key("ec-p256-private.pem")
         protected = {"alg": "dir", "enc": "A128CBC-HS256"}

@@ -1,0 +1,10 @@
+{
+  "target": "jwe_json",
+  "kind": "exception",
+  "exception": "AttributeError",
+  "message": "'str' object has no attribute 'get'",
+  "iteration": 1094,
+  "seed": 20261117,
+  "payload": "x",
+  "case": "jwe_json_scalar_input"
+}

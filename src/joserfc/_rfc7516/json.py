@@ -72,12 +72,17 @@ def __represent_json_serialization(obj: BaseJSONEncryption) -> Any:
 
 
 def extract_general_json(data: GeneralJSONSerialization, registry: JWERegistry) -> GeneralJSONEncryption:
-    protected_segment = to_bytes(data["protected"])
-    registry.validate_protected_header_size(protected_segment)
-    protected = json_b64decode(protected_segment)
+    try:
+        protected_segment = to_bytes(data["protected"])
+        registry.validate_protected_header_size(protected_segment)
+        protected = json_b64decode(protected_segment)
+    except (TypeError, ValueError) as err:
+        raise DecodeError("Invalid header") from err
 
     unprotected = data.get("unprotected")
-    recipients = data["recipients"]
+    recipients = data.get("recipients")
+    if not isinstance(recipients, list):
+        raise DecodeError("Invalid recipients")
     registry.validate_recipient_count(recipients)
     base64_segments, bytes_segments, aad = __extract_segments(data, registry)
 
@@ -91,9 +96,12 @@ def extract_general_json(data: GeneralJSONSerialization, registry: JWERegistry) 
 
 
 def extract_flattened_json(data: FlattenedJSONSerialization, registry: JWERegistry) -> FlattenedJSONEncryption:
-    protected_segment = to_bytes(data["protected"])
-    registry.validate_protected_header_size(protected_segment)
-    protected = json_b64decode(protected_segment)
+    try:
+        protected_segment = to_bytes(data["protected"])
+        registry.validate_protected_header_size(protected_segment)
+        protected = json_b64decode(protected_segment)
+    except (TypeError, ValueError) as err:
+        raise DecodeError("Invalid header") from err
     unprotected = data.get("unprotected")
     base64_segments, bytes_segments, aad = __extract_segments(data, registry)
     obj = FlattenedJSONEncryption(protected, None, unprotected, aad)
@@ -108,29 +116,34 @@ def __extract_segments(
     data: GeneralJSONSerialization | FlattenedJSONSerialization,
     registry: JWERegistry,
 ) -> tuple[dict[str, bytes], dict[str, bytes], bytes | None]:
-    base64_segments: dict[str, bytes] = {
-        "iv": to_bytes(data["iv"]),
-        "ciphertext": to_bytes(data["ciphertext"]),
-        "tag": to_bytes(data["tag"]),
-    }
-    registry.validate_initialization_vector_size(base64_segments["iv"])
-    registry.validate_ciphertext_size(base64_segments["ciphertext"])
-    registry.validate_auth_tag_size(base64_segments["tag"])
-    bytes_segments: dict[str, bytes] = {
-        "iv": urlsafe_b64decode(base64_segments["iv"]),
-        "ciphertext": urlsafe_b64decode(base64_segments["ciphertext"]),
-        "tag": urlsafe_b64decode(base64_segments["tag"]),
-    }
-    if "aad" in data:
-        aad_segment = to_bytes(data["aad"])
-        if not aad_segment:
-            raise DecodeError("AAD must be omitted when empty")
-        registry.validate_aad_size(aad_segment)
-        base64_segments["aad"] = aad_segment
-        aad = urlsafe_b64decode(base64_segments["aad"])
-        bytes_segments["aad"] = aad
-    else:
-        aad = None
+    try:
+        base64_segments: dict[str, bytes] = {
+            "iv": to_bytes(data["iv"]),
+            "ciphertext": to_bytes(data["ciphertext"]),
+            "tag": to_bytes(data["tag"]),
+        }
+        registry.validate_initialization_vector_size(base64_segments["iv"])
+        registry.validate_ciphertext_size(base64_segments["ciphertext"])
+        registry.validate_auth_tag_size(base64_segments["tag"])
+        bytes_segments: dict[str, bytes] = {
+            "iv": urlsafe_b64decode(base64_segments["iv"]),
+            "ciphertext": urlsafe_b64decode(base64_segments["ciphertext"]),
+            "tag": urlsafe_b64decode(base64_segments["tag"]),
+        }
+        if "aad" in data:
+            aad_segment = to_bytes(data["aad"])
+            if not aad_segment:
+                raise DecodeError("AAD must be omitted when empty")
+            registry.validate_aad_size(aad_segment)
+            base64_segments["aad"] = aad_segment
+            aad = urlsafe_b64decode(base64_segments["aad"])
+            bytes_segments["aad"] = aad
+        else:
+            aad = None
+    except DecodeError:
+        raise
+    except (TypeError, ValueError) as err:
+        raise DecodeError("Invalid JWE segments") from err
     return base64_segments, bytes_segments, aad
 
 
@@ -139,9 +152,14 @@ def __extract_recipient(
     data: FlattenedJSONSerialization | JSONRecipientDict,
     registry: JWERegistry,
 ) -> Recipient[Key]:
+    if not isinstance(data, dict):
+        raise DecodeError("Invalid recipient")
     recipient: Recipient[Key] = Recipient(obj, data.get("header"))
     if "encrypted_key" in data:
-        ek_segment = to_bytes(data["encrypted_key"])
-        registry.validate_encrypted_key_size(ek_segment)
-        recipient.encrypted_key = urlsafe_b64decode(ek_segment)
+        try:
+            ek_segment = to_bytes(data["encrypted_key"])
+            registry.validate_encrypted_key_size(ek_segment)
+            recipient.encrypted_key = urlsafe_b64decode(ek_segment)
+        except (TypeError, ValueError) as err:
+            raise DecodeError("Invalid encrypted key") from err
     return recipient

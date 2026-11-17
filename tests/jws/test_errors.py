@@ -3,6 +3,7 @@ from unittest import TestCase
 from joserfc import jws
 from joserfc.errors import (
     BadSignatureError,
+    DecodeError,
     InvalidHeaderValueError,
     InvalidKeyCurveError,
     InvalidKeyTypeError,
@@ -22,6 +23,34 @@ from tests.base import load_key
 
 
 class TestJWSErrors(TestCase):
+    def test_malformed_json_serialization_raises_decode_error(self):
+        key = OctKey.import_key("fuzz-secret-key-0123456789-abcdef")
+        protected = "eyJhbGciOiJIUzI1NiJ9"
+        signature = "AA"
+        for value in (
+            "not-a-dict",
+            None,
+            {
+                "payload": None,
+                "signature": signature,
+                "protected": protected,
+            },
+            {
+                "payload": "aGVsbG8",
+                "signatures": "x",
+            },
+            {
+                "payload": "aGVsbG8",
+                "signatures": [1, 2],
+            },
+            {
+                "payload": "aGVsbG8",
+                "signatures": [{"signature": signature, "protected": -1}],
+            },
+        ):
+            with self.subTest(value=value):
+                self.assertRaises(DecodeError, jws.deserialize_json, value, key)
+
     key = OctKey.import_key("secret")
 
     def test_without_alg(self):

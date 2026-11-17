@@ -100,11 +100,16 @@ def extract_general_json(value: GeneralJSONSerialization, registry: JWSRegistry)
 
 
 def __signature_to_member(sig: JSONSignatureDict, registry: JWSRegistry) -> HeaderMember:
+    if not isinstance(sig, dict):
+        raise DecodeError("Invalid signature")
     member = HeaderMember()
     if "protected" in sig:
-        protected_segment = to_bytes(sig["protected"])
-        registry.validate_header_size(protected_segment)
-        member.protected = json_b64decode(protected_segment)
+        try:
+            protected_segment = to_bytes(sig["protected"])
+            registry.validate_header_size(protected_segment)
+            member.protected = json_b64decode(protected_segment)
+        except (TypeError, ValueError) as err:
+            raise DecodeError("Invalid header") from err
     if "header" in sig:
         member.header = sig["header"]
     return member
@@ -141,14 +146,25 @@ def verify_signature(
     alg.check_key(key)
 
     if "protected" in signature:
-        protected_segment = to_bytes(signature["protected"])
+        try:
+            protected_segment = to_bytes(signature["protected"])
+        except TypeError as err:
+            raise DecodeError("Invalid header") from err
     else:
         protected_segment = b""
 
-    signature_segment = to_bytes(signature["signature"])
+    if "signature" not in signature:
+        raise DecodeError("Invalid signature")
+    try:
+        signature_segment = to_bytes(signature["signature"])
+    except TypeError as err:
+        raise DecodeError("Invalid signature") from err
     registry.validate_signature_size(signature_segment)
 
-    sig = urlsafe_b64decode(signature_segment)
+    try:
+        sig = urlsafe_b64decode(signature_segment)
+    except (TypeError, ValueError) as err:
+        raise DecodeError("Invalid signature") from err
     signing_input = b".".join([protected_segment, payload_segment])
     return alg.verify(signing_input, sig, key)
 
@@ -156,9 +172,14 @@ def verify_signature(
 def extract_general_json_parts(
     value: GeneralJSONSerialization, registry: JWSRegistry
 ) -> tuple[bytes, list[JSONSignatureDict], list[HeaderMember]]:
-    payload_segment = value["payload"].encode("utf-8")
+    try:
+        payload_segment = value["payload"].encode("utf-8")
+    except (AttributeError, KeyError, TypeError) as err:
+        raise DecodeError("Invalid payload") from err
     registry.validate_payload_size(payload_segment)
-    signatures = value["signatures"]
+    signatures = value.get("signatures")
+    if not isinstance(signatures, list):
+        raise DecodeError("Invalid signatures")
     members = [__signature_to_member(signature, registry) for signature in signatures]
     for member in members:
         check_json_member_headers(member, registry)

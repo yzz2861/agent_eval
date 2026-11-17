@@ -1,0 +1,13 @@
+{
+  "target": "jws_json",
+  "kind": "exception",
+  "exception": "TypeError",
+  "message": "argument of type int is not iterable (membership test on non-dict signature entry)",
+  "iteration": -1,
+  "seed": 20261117,
+  "payload": {
+    "payload": "aGVsbG8",
+    "signatures": [1, 2]
+  },
+  "case": "jws_json_signature_entry_integer"
+}

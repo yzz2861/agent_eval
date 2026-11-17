@@ -1,0 +1,18 @@
+{
+  "target": "jws_json",
+  "kind": "exception",
+  "exception": "Error",
+  "message": "Invalid base64url protected header",
+  "iteration": -1,
+  "seed": 20261117,
+  "payload": {
+    "payload": "aGVsbG8",
+    "signatures": [
+      {
+        "signature": "AA",
+        "protected": -1
+      }
+    ]
+  },
+  "case": "jws_json_invalid_protected_b64"
+}
