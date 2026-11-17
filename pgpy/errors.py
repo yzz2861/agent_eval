@@ -4,6 +4,7 @@
 __all__ = ('PGPError',
            'PGPEncryptionError',
            'PGPDecryptionError',
+           'PGPKeyIDCollisionError',
            'PGPIncompatibleECPointFormatError',
            'PGPOpenSSLCipherNotSupportedError',
            'PGPInsecureCipherError',
@@ -22,6 +23,11 @@ class PGPEncryptionError(Exception):
 
 class PGPDecryptionError(Exception):
     """Raised when decryption fails"""
+    pass
+
+
+class PGPKeyIDCollisionError(PGPError):
+    """Raised when a key ID or short key ID maps to more than one full fingerprint"""
     pass
 
 

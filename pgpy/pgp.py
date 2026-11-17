@@ -40,6 +40,7 @@ from .decorators import KeyAction
 
 from .errors import PGPDecryptionError
 from .errors import PGPError
+from .errors import PGPKeyIDCollisionError
 
 from .packet import Key
 from .packet import MDC
@@ -2429,10 +2430,19 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         if not isinstance(signature, (type(None), PGPSignature)):
             raise TypeError("Unexpected signature value: {:s}".format(str(type(signature))))
 
+        def _sig_matches(sig):
+            # Prefer the full issuer fingerprint: a forged key that merely reuses the 16-character key ID
+            # must never be treated as the signer. Fall back to the key ID only for signatures that omit it.
+            issuer_fingerprint = sig.signer_fingerprint
+            if issuer_fingerprint:
+                if issuer_fingerprint == self.fingerprint:
+                    return True
+                return any(issuer_fingerprint == subkey.fingerprint for subkey in self.subkeys.values())
+            return sig.signer in {self.fingerprint.keyid} | set(self.subkeys)
+
         def _filter_sigs(sigs):
-            _ids = {self.fingerprint.keyid} | set(self.subkeys)
             for sig in sigs:
-                if sig.signer in _ids:
+                if _sig_matches(sig):
                     yield sig
 
         # collect signature(s)
@@ -2459,7 +2469,7 @@ class PGPKey(Armorable, ParentRef, PGPObject):
                     for sig in _filter_sigs(subkey.__sig__):
                         sspairs.append((sig, subkey))
 
-        elif signature.signer in {self.fingerprint.keyid} | set(self.subkeys):
+        elif _sig_matches(signature):
             sspairs += [(signature, subject)]
 
         if len(sspairs) == 0:
@@ -2677,23 +2687,39 @@ class PGPKey(Armorable, ParentRef, PGPObject):
 
 
 class PGPKeyring(collections_abc.Container, collections_abc.Iterable, collections_abc.Sized):
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         """
         PGPKeyring objects represent in-memory keyrings that can contain any combination of supported private and public
         keys. It can not currently be conveniently exported to a format that can be understood by GnuPG.
+
+        By default, key selection only accepts full fingerprints (and User ID components). The ambiguous key ID and
+        short key ID aliases are only registered when ``lenient`` is ``True``.
+
+        :keyword lenient: If ``True``, keys can also be selected by their 16-character key ID or 8-character short key
+                          ID. Defaults to ``False``. Loading keys that share a key ID or short key ID with a different
+                          fingerprint always raises :py:exc:`~pgpy.errors.PGPKeyIDCollisionError`.
+        :type lenient: ``bool``
         """
         super(PGPKeyring, self).__init__()
+        self._lenient = bool(kwargs.pop("lenient", False))
+        if kwargs:
+            raise TypeError("Unexpected keyword arguments: {:s}".format(", ".join(sorted(kwargs))))
         self._keys = {}
         self._pubkeys = collections.deque()
         self._privkeys = collections.deque()
         self._aliases = collections.deque([{}])
         self.load(*args)
 
+    @property
+    def lenient(self):
+        """``True`` if key ID / short key ID aliases are enabled for key selection, otherwise ``False``."""
+        return self._lenient
+
     def __contains__(self, alias):
         aliases = set().union(*self._aliases)
 
         if isinstance(alias, str):
-            return alias in aliases or alias.replace(' ', '') in aliases
+            return alias in aliases or alias.replace(" ", "") in aliases
 
         return alias in aliases  # pragma: no cover
 
@@ -2709,13 +2735,45 @@ class PGPKeyring(collections_abc.Container, collections_abc.Iterable, collection
             if alias in m:
                 return self._keys[m[alias]]
 
-            if alias.replace(' ', '') in m:
-                return self._keys[m[alias.replace(' ', '')]]
+            if alias.replace(" ", "") in m:
+                return self._keys[m[alias.replace(" ", "")]]
 
         raise KeyError(alias)
 
     def _get_keys(self, alias):
         return [self._keys[m[alias]] for m in self._aliases if alias in m]
+
+    def _fprint_set(self):
+        return {pk.fingerprint for pk in self._keys.values()}
+
+    def _collision_error(self, identifier):
+        candidates = sorted(str(fp) for fp in self._fprint_set()
+                            if fp.keyid == identifier or fp.shortid == identifier)
+        raise PGPKeyIDCollisionError(
+            "Identifier {:s} is ambiguous; it matches multiple fingerprints: {:s}".format(
+                identifier, ", ".join(candidates)))
+
+    def _guard_identifier(self, identifier, fingerprint):
+        # A key ID or short key ID may only ever map to a single distinct fingerprint.
+        # Public/private halves (and re-loads) of the same key share a fingerprint and are not a collision.
+        existing = set()
+        for m in self._aliases:
+            if identifier in m:
+                existing.add(str(self._keys[m[identifier]].fingerprint))
+        existing.discard(str(fingerprint))
+        if existing:
+            self._collision_error(identifier)
+
+    def _resolve_keyid(self, identifier):
+        # Resolve a key ID/short key ID carried by a message or signature against full fingerprints.
+        # This never trusts truncated identifiers to silently pick a key when several match.
+        matches = sorted({str(fp) for fp in self._fprint_set()
+                          if fp.keyid == identifier or fp.shortid == identifier})
+        if len(matches) > 1:
+            self._collision_error(identifier)
+        if not matches:
+            raise KeyError(identifier)
+        return Fingerprint(matches[0])
 
     def _sort_alias(self, alias):
         # remove alias from all levels of _aliases, and sort by created time and key half
@@ -2770,9 +2828,14 @@ class PGPKeyring(collections_abc.Container, collections_abc.Iterable, collection
                     self._privkeys.append(pkid)
 
             # aliases
+            # full fingerprints are always registered; truncated key IDs/short IDs are only available in lenient
+            # mode and must never map to more than one distinct fingerprint
             self._add_alias(pgpkey.fingerprint, pkid)
-            self._add_alias(pgpkey.fingerprint.keyid, pkid)
-            self._add_alias(pgpkey.fingerprint.shortid, pkid)
+            if self._lenient:
+                self._guard_identifier(pgpkey.fingerprint.keyid, pgpkey.fingerprint)
+                self._add_alias(pgpkey.fingerprint.keyid, pkid)
+                self._guard_identifier(pgpkey.fingerprint.shortid, pgpkey.fingerprint)
+                self._add_alias(pgpkey.fingerprint.shortid, pkid)
             for uid in pgpkey.userids:
                 self._add_alias(uid.name, pkid)
                 if uid.comment:
@@ -2792,6 +2855,7 @@ class PGPKeyring(collections_abc.Container, collections_abc.Iterable, collection
         :param \*args: Each arg in ``args`` can be any of the formats supported by :py:meth:`PGPKey.from_file` and
                       :py:meth:`PGPKey.from_blob` or a :py:class:`PGPKey` instance, or a ``list`` or ``tuple`` of these.
         :type \*args: ``list``, ``tuple``, ``str``, ``unicode``, ``bytes``, ``bytearray``
+        :raises: :py:exc:`~pgpy.errors.PGPKeyIDCollisionError` if two distinct fingerprints share a key ID or short key ID.
         :returns: a ``set`` containing the unique fingerprints of all of the keys that were loaded during this operation.
         """
         def _preiter(first, iterable):
@@ -2816,23 +2880,45 @@ class PGPKeyring(collections_abc.Container, collections_abc.Iterable, collection
 
         return list(loaded)
 
+    def _select_signature_identifier(self, signature):
+        # Prefer the full issuer fingerprint carried by modern signatures over the truncated key ID.
+        signer_fingerprint = signature.signer_fingerprint
+        if signer_fingerprint and signer_fingerprint in self:
+            return signer_fingerprint
+        return self._resolve_keyid(signature.signer)
+
+    def _select_message_identifier(self, message):
+        # Signatures may carry the full issuer fingerprint; encrypted session key packets only carry a key ID,
+        # which is resolved through full fingerprints and rejected if it is ambiguous.
+        for signature in message._signatures:
+            signer_fingerprint = signature.signer_fingerprint
+            if signer_fingerprint and signer_fingerprint in self:
+                return signer_fingerprint
+
+        for issuer in message.issuers:
+            return self._resolve_keyid(issuer)
+
+        raise KeyError(message)
+
     @contextlib.contextmanager
     def key(self, identifier):
         """
         A context-manager method. Yields the first :py:obj:`PGPKey` object that matches the provided identifier.
 
+        :py:obj:`PGPMessage` and :py:obj:`PGPSignature` identifiers are matched using full fingerprints whenever the
+        fingerprint is available; otherwise the key ID carried by the message/signature is resolved against the full
+        fingerprints of loaded keys and an ambiguous key ID that matches several fingerprints is rejected.
+
         :param identifier: The identifier to use to select a loaded key.
         :type identifier: :py:exc:`PGPMessage`, :py:exc:`PGPSignature`, ``str``
         :raises: :py:exc:`KeyError` if there is no loaded key that satisfies the identifier.
+        :raises: :py:exc:`~pgpy.errors.PGPKeyIDCollisionError` if a key ID/short key ID matches several fingerprints.
         """
         if isinstance(identifier, PGPMessage):
-            for issuer in identifier.issuers:
-                if issuer in self:
-                    identifier = issuer
-                    break
+            identifier = self._select_message_identifier(identifier)
 
         if isinstance(identifier, PGPSignature):
-            identifier = identifier.signer
+            identifier = self._select_signature_identifier(identifier)
 
         yield self._get_key(identifier)
 

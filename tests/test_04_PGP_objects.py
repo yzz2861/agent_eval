@@ -161,16 +161,23 @@ class TestPGPKeyring(object):
 
         # __contains__
         #  RSA von TestKey
-        selectors = ["F429 4BC8 094A 7E05 85C8 5E86 3747 3B37 58C4 4F36", "37473B3758C44F36", "58C44F36",
+        selectors = ["F429 4BC8 094A 7E05 85C8 5E86 3747 3B37 58C4 4F36",
                      "RSA von TestKey", "rsa@test.key"]
         for selector in selectors:
             assert selector in keyring
 
         #  DSA von TestKey
-        selectors = ["EBC8 8A94 ACB1 10F1 BE3F E3C1 2B47 4BB0 2084 C712", "2B474BB02084C712", "2084C712",
+        selectors = ["EBC8 8A94 ACB1 10F1 BE3F E3C1 2B47 4BB0 2084 C712",
                      "DSA von TestKey", "dsa@test.key"]
         for selector in selectors:
             assert selector in keyring
+
+        # truncated key IDs/short IDs are only available in lenient mode
+        lenient_keyring = PGPKeyring(lenient=True)
+        lenient_keyring.load(glob.glob('tests/testdata/*test.asc'), glob.glob('tests/testdata/signatures/*.key.asc'))
+        for selector in ["37473B3758C44F36", "58C44F36", "2B474BB02084C712", "2084C712"]:
+            assert selector not in keyring
+            assert selector in lenient_keyring
 
         # fingerprints filtering
         #  we have 10 keys
@@ -217,18 +224,22 @@ class TestPGPKeyring(object):
                 assert key.fingerprint == fp
                 assert key.userids[0].name == name
 
-    def test_select_keyid(self, keyring):
-        with keyring.key("37473B3758C44F36") as rsa:
+    def test_select_keyid(self):
+        lenient_keyring = PGPKeyring(lenient=True)
+        lenient_keyring.load(glob.glob('tests/testdata/*test.asc'), glob.glob('tests/testdata/signatures/*.key.asc'))
+        with lenient_keyring.key("37473B3758C44F36") as rsa:
             assert rsa.userids[0].name == "RSA von TestKey"
 
-        with keyring.key("2B474BB02084C712") as dsa:
+        with lenient_keyring.key("2B474BB02084C712") as dsa:
             assert dsa.userids[0].name == "DSA von TestKey"
 
-    def test_select_shortid(self, keyring):
-        with keyring.key("58C44F36") as rsa:
+    def test_select_shortid(self):
+        lenient_keyring = PGPKeyring(lenient=True)
+        lenient_keyring.load(glob.glob('tests/testdata/*test.asc'), glob.glob('tests/testdata/signatures/*.key.asc'))
+        with lenient_keyring.key("58C44F36") as rsa:
             assert rsa.userids[0].name == "RSA von TestKey"
 
-        with keyring.key("2084C712") as dsa:
+        with lenient_keyring.key("2084C712") as dsa:
             assert dsa.userids[0].name == "DSA von TestKey"
 
     def test_select_name(self, keyring):
@@ -293,7 +304,9 @@ class TestPGPKeyring(object):
         # shortids
         assert "D0FDCA20" not in keyring
 
-    def test_unload_key_half(self, keyring):
+    def test_unload_key_half(self):
+        keyring = PGPKeyring(lenient=True)
+        keyring.load(glob.glob('tests/testdata/*test.asc'), glob.glob('tests/testdata/signatures/*.key.asc'))
         with keyring.key('RSA von TestKey') as key:
             keyring.unload(key)
 
