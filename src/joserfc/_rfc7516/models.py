@@ -3,7 +3,8 @@ from abc import ABCMeta, abstractmethod
 from typing import Any, ClassVar, Generic, Literal, TypeVar
 
 from .._keys import ECKey, Key, OctKey
-from ..errors import InvalidKeyLengthError, InvalidKeyTypeError
+from .._rfc7517.models import CurveKey
+from ..errors import InvalidKeyCurveError, InvalidKeyLengthError, InvalidKeyTypeError
 from ..registry import Header, HeaderRegistryDict
 
 __all__ = [
@@ -249,7 +250,23 @@ class KeyManagement:
 
     def check_key_type(self, key: Key) -> None:
         if key.key_type not in self.key_types:
-            raise InvalidKeyTypeError()
+            raise InvalidKeyTypeError(f"Algorithm '{self.name}' requires a key of type: {', '.join(self.key_types)}")
+
+    def check_key_length(self, key: Key) -> None:
+        """Validate that the key length satisfies the algorithm requirements.
+
+        Subclasses with fixed-length key requirements (e.g. AES key wrapping,
+        RSA key encryption) override this method to raise a controlled error
+        instead of producing an invalid encryption result.
+        """
+
+    def check_key(self, key: Key) -> None:
+        """Validate that the given JWK is compatible with this key management
+        algorithm: its ``kty`` MUST belong to the algorithm family, and when
+        applicable its ``crv`` and key length MUST satisfy the requirements.
+        """
+        self.check_key_type(key)
+        self.check_key_length(key)
 
     def prepare_recipient_header(self, recipient: Recipient[Any]) -> None:
         raise NotImplementedError()
@@ -285,6 +302,11 @@ class JWEKeyWrapping(KeyManagement, metaclass=ABCMeta):
     def direct_mode(self) -> bool:
         return False
 
+    def check_key_length(self, key: Key) -> None:
+        assert isinstance(key, OctKey)
+        if len(key.raw_value) * 8 != self.key_size:
+            raise InvalidKeyLengthError(f"A key of size {self.key_size} bits MUST be used")
+
     def check_op_key(self, op_key: bytes) -> None:
         if len(op_key) * 8 != self.key_size:
             raise InvalidKeyLengthError(f"A key of size {self.key_size} bits MUST be used")
@@ -311,10 +333,29 @@ class JWEKeyAgreement(KeyManagement, metaclass=ABCMeta):
     tag_aware: bool = False
     key_wrapping: JWEKeyWrapping | None
 
+    #: curves supporting ECDH key agreement; signature-only curves
+    #: (e.g. Ed25519, Ed448) can not be used with ECDH-ES
+    allowed_curves: ClassVar[dict[str, tuple[str, ...]]] = {
+        "EC": ("P-256", "P-384", "P-521", "secp256k1"),
+        "OKP": ("X25519", "X448"),
+    }
+
+    def check_key_curve(self, key: CurveKey) -> None:
+        allowed = self.allowed_curves.get(key.key_type, ())
+        if key.curve_name not in allowed:
+            raise InvalidKeyCurveError(
+                f"Key curve '{key.curve_name}' can not be used with '{self.name}', allowed: {', '.join(allowed)}"
+            )
+
+    def check_key(self, key: Key) -> None:
+        self.check_key_type(key)
+        if isinstance(key, CurveKey):
+            self.check_key_curve(key)
+
     def prepare_ephemeral_key(self, recipient: Recipient[ECKey]) -> None:
         recipient_key = recipient.recipient_key
         assert recipient_key is not None
-        self.check_key_type(recipient_key)
+        self.check_key(recipient_key)
         if recipient.ephemeral_key is None:
             recipient.ephemeral_key = recipient_key.generate_key(recipient_key.curve_name, private=True)
         recipient.add_header("epk", recipient.ephemeral_key.as_dict(private=False))

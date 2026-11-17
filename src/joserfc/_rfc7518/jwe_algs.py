@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.keywrap import (
     aes_key_wrap,
 )
 
+from .._keys import Key
 from .._rfc7516.models import (
     JWEAlgModel,
     JWEDirectEncryption,
@@ -62,6 +63,11 @@ class RSAAlgKeyEncryption(JWEKeyEncryption):
         self.description = description
         self.padding = pad_fn
         self.recommended = recommended
+
+    def check_key_length(self, key: Key) -> None:
+        assert isinstance(key, RSAKey)
+        if key.public_key.key_size < self.key_size:
+            raise InvalidKeyLengthError(f"A key of size {self.key_size} bits or larger MUST be used")
 
     def encrypt_cek(self, cek: bytes, recipient: Recipient[RSAKey]) -> bytes:
         key = recipient.recipient_key

@@ -12,6 +12,19 @@ Changelog
 .. module:: joserfc
     :noindex:
 
+1.8.1
+-----
+
+**Not released yet**
+
+- **JWE**: Validate the JWK against the key management algorithm family before
+  encryption and decryption: reject mismatched ``kty`` values (e.g. an RSA key
+  with ``dir`` or an ``oct`` key with ``ECDH-ES``), reject signature-only
+  curves such as Ed25519/Ed448 for key agreement, and enforce the key length
+  required by the ``alg``/``enc`` combination. Incompatible keys now raise
+  ``InvalidKeyTypeError``, ``InvalidKeyCurveError``, or
+  ``InvalidKeyLengthError`` instead of producing a faulty encryption result.
+
 1.8.0
 -----
 

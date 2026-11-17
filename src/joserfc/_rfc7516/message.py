@@ -121,6 +121,9 @@ def _perform_decrypt(obj: EncryptionData, registry: JWERegistry) -> None:
             # Step 6, Determine the Key Management Mode employed by the algorithm
             # specified by the "alg" (algorithm) Header Parameter.
             alg = registry.get_alg(headers["alg"])
+            recipient_key = recipient.recipient_key
+            assert recipient_key is not None
+            alg.check_key(recipient_key)
             cek = decrypt_recipient(alg, enc, recipient, tag)
             cek_set.add(cek)
         except (AssertionError, JoseError) as error:
@@ -197,6 +200,9 @@ def __prepare_recipient_algorithm(recipient: Recipient[Any], registry: JWERegist
 
     if isinstance(alg, JWEKeyAgreement):
         alg.prepare_ephemeral_key(recipient)
+    recipient_key = recipient.recipient_key
+    assert recipient_key is not None
+    alg.check_key(recipient_key)
     return alg
 
 
