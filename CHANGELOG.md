@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `DUO139`: lint for `str.format` and `str.format_map` format strings that traverse attributes outside a permitted capability summary, with separate reports for statically undeterminable format strings and object sources
+
 ## [0.10.2] - 2020-02-19
 ### Changed
 - Cache namespace results and minimize kwarg checks by grouping similar rules - ~500% speed up ([#18](https://github.com/dlint-py/dlint/issues/18))
