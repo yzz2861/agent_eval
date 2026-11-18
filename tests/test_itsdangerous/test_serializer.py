@@ -1,5 +1,6 @@
 import hashlib
 import pickle
+import random
 from functools import partial
 from io import BytesIO
 from io import StringIO
@@ -118,6 +119,59 @@ class TestSerializer:
         assert serializer.load(f) == value
         f.seek(0)
         assert serializer.load_unsafe(f) == (True, value)
+
+    def test_max_payload_size(self, serializer: Serializer, value: Any):
+        signed = serializer.dumps(value)
+        assert serializer.loads(signed, max_payload_size=len(signed)) == value
+
+        with pytest.raises(BadPayload):
+            serializer.loads(signed, max_payload_size=len(signed) - 1)
+
+    def test_max_payload_size_large_legal(self, serializer: Serializer):
+        value = {"data": "x" * 100_000}
+        signed = serializer.dumps(value)
+        assert serializer.loads(signed, max_payload_size=len(signed)) == value
+
+    def test_max_payload_size_before_deserialize(
+        self, serializer: Serializer, value: Any, monkeypatch
+    ):
+        signed = serializer.dumps(value)
+        calls = []
+
+        def spy_load_payload(payload, *args, **kwargs):
+            calls.append(payload)
+            raise AssertionError("deserialization should not happen")
+
+        monkeypatch.setattr(serializer, "load_payload", spy_load_payload)
+
+        with pytest.raises(BadPayload):
+            serializer.loads(signed, max_payload_size=len(signed) - 1)
+
+        assert calls == []
+
+    def test_load_max_payload_size(self, serializer: Serializer, value: Any):
+        signed = serializer.dumps(value)
+        stream = BytesIO if isinstance(signed, bytes) else StringIO
+        f = cast(IO, stream(signed))
+        assert serializer.load(f, max_payload_size=len(signed)) == value
+
+        f = cast(IO, stream(signed))
+
+        with pytest.raises(BadPayload):
+            serializer.load(f, max_payload_size=len(signed) - 1)
+
+    def test_load_max_payload_size_limits_read(self, serializer: Serializer):
+        rng = random.Random(42)
+        data = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=100_000))
+        signed = serializer.dumps({"data": data})
+        stream = BytesIO if isinstance(signed, bytes) else StringIO
+        budget = 1024
+        f = cast(IO, stream(signed))
+
+        with pytest.raises(BadPayload):
+            serializer.load(f, max_payload_size=budget)
+
+        assert f.tell() == budget + 1
 
     def test_alt_salt(self, serializer: Serializer, value: Any):
         signed = serializer.dumps(value, salt="other")

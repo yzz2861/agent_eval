@@ -5,6 +5,11 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add a ``max_payload_size`` parameter to ``Serializer.loads``,
+    ``Serializer.load``, and ``TimedSerializer.loads``. Oversized signed
+    data is rejected with ``BadPayload`` before signature verification
+    and deserialization, and ``load`` reads at most the budgeted number
+    of bytes from the file.
 
 
 Version 2.2.0

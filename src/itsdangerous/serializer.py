@@ -326,12 +326,26 @@ class Serializer(t.Generic[_TSerialized]):
         f.write(self.dumps(obj, salt))
 
     def loads(
-        self, s: str | bytes, salt: str | bytes | None = None, **kwargs: t.Any
+        self,
+        s: str | bytes,
+        salt: str | bytes | None = None,
+        max_payload_size: int | None = None,
+        **kwargs: t.Any,
     ) -> t.Any:
         """Reverse of :meth:`dumps`. Raises :exc:`.BadSignature` if the
         signature validation fails.
+
+        :param max_payload_size: If given, the signed value is rejected
+            with :exc:`.BadPayload` before any signature verification or
+            deserialization happens if its length exceeds this many
+            bytes. This limits the memory and work spent on untrusted
+            input.
+
+        .. versionchanged:: 2.3
+            Added the ``max_payload_size`` parameter.
         """
         s = want_bytes(s)
+        self._check_payload_size(s, max_payload_size)
         last_exception = None
 
         for signer in self.iter_unsigners(salt):
@@ -342,9 +356,38 @@ class Serializer(t.Generic[_TSerialized]):
 
         raise t.cast(BadSignature, last_exception)
 
-    def load(self, f: t.IO[t.Any], salt: str | bytes | None = None) -> t.Any:
-        """Like :meth:`loads` but loads from a file."""
-        return self.loads(f.read(), salt)
+    def _check_payload_size(
+        self, s: bytes, max_payload_size: int | None = None
+    ) -> None:
+        """Raise :exc:`.BadPayload` if ``s`` exceeds ``max_payload_size``
+        bytes. Called before signature verification and deserialization
+        to reject oversized untrusted input cheaply.
+        """
+        if max_payload_size is not None and len(s) > max_payload_size:
+            raise BadPayload(
+                f"The payload is {len(s)} bytes, which exceeds the maximum"
+                f" allowed size of {max_payload_size} bytes."
+            )
+
+    def load(
+        self,
+        f: t.IO[t.Any],
+        salt: str | bytes | None = None,
+        max_payload_size: int | None = None,
+    ) -> t.Any:
+        """Like :meth:`loads` but loads from a file. If
+        ``max_payload_size`` is given, at most that many bytes (plus one,
+        to detect the limit) are read from the file.
+
+        .. versionchanged:: 2.3
+            Added the ``max_payload_size`` parameter.
+        """
+        if max_payload_size is None:
+            return self.loads(f.read(), salt)
+
+        return self.loads(
+            f.read(max_payload_size + 1), salt, max_payload_size=max_payload_size
+        )
 
     def loads_unsafe(
         self, s: str | bytes, salt: str | bytes | None = None

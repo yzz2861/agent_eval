@@ -188,6 +188,7 @@ class TimedSerializer(Serializer[_TSerialized]):
         max_age: int | None = None,
         return_timestamp: bool = False,
         salt: str | bytes | None = None,
+        max_payload_size: int | None = None,
     ) -> t.Any:
         """Reverse of :meth:`dumps`, raises :exc:`.BadSignature` if the
         signature validation fails. If a ``max_age`` is provided it will
@@ -195,8 +196,17 @@ class TimedSerializer(Serializer[_TSerialized]):
         case the signature is outdated, :exc:`.SignatureExpired` is
         raised. All arguments are forwarded to the signer's
         :meth:`~TimestampSigner.unsign` method.
+
+        :param max_payload_size: If given, the signed value is rejected
+            with :exc:`.BadPayload` before any signature verification or
+            deserialization happens if its length exceeds this many
+            bytes.
+
+        .. versionchanged:: 2.3
+            Added the ``max_payload_size`` parameter.
         """
         s = want_bytes(s)
+        self._check_payload_size(s, max_payload_size)
         last_exception = None
 
         for signer in self.iter_unsigners(salt):
