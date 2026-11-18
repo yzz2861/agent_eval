@@ -23,11 +23,18 @@ from .exceptions import (
     CredentialsError,
     HeaderChecksumError,
     PayloadChecksumError,
+    PayloadLimitError,
     UnableToSendToRecycleBin,
 )
 from .group import Group
 from .kdbx_parsing import KDBX, kdf_uuids
-from .kdbx_parsing.common import rotate_seeds
+from .kdbx_parsing.common import (
+    MAX_BINARY_COUNT,
+    MAX_BINARY_SIZE,
+    MAX_TOTAL_BINARY_SIZE,
+    rotate_seeds,
+    safe_decompress,
+)
 from .xpath import attachment_xp, entry_xp, group_xp, path_xp
 
 logger = logging.getLogger(__name__)
@@ -786,21 +793,45 @@ class PyKeePass:
         """`list` of `bytes`: all attachment binaries in database.  The position
         within this list indicates the binary's ID"""
         if self.version >= (4, 0):
-            # first byte is a prepended flag
-            binaries = [a.data[1:] for a in self.payload.inner_header.binary]
+            # first byte is a prepended flag.  Inner header parsing already
+            # enforced count/size limits; re-check the decoded view defensively.
+            inner_binaries = self.payload.inner_header.binary
+            binaries = [a.data[1:] for a in inner_binaries]
         else:
+            elements = self._xpath('/KeePassFile/Meta/Binaries/Binary')
+            if len(elements) > MAX_BINARY_COUNT:
+                raise PayloadLimitError(
+                    "Binary count {} exceeds limit of {}".format(
+                        len(elements), MAX_BINARY_COUNT
+                    )
+                )
             binaries = []
-            for elem in self._xpath('/KeePassFile/Meta/Binaries/Binary'):
+            total_size = 0
+            for elem in elements:
                 if elem.text is not None:
                     if elem.get('Compressed') == 'True':
-                        data = zlib.decompress(
+                        data = safe_decompress(
                             base64.b64decode(elem.text),
-                            zlib.MAX_WBITS | 32
+                            zlib.MAX_WBITS | 32,
+                            max_size=MAX_BINARY_SIZE
                         )
                     else:
                         data = base64.b64decode(elem.text)
                 else:
                     data = b''
+                if len(data) > MAX_BINARY_SIZE:
+                    raise PayloadLimitError(
+                        "Binary of {} bytes exceeds limit of {} bytes".format(
+                            len(data), MAX_BINARY_SIZE
+                        )
+                    )
+                total_size += len(data)
+                if total_size > MAX_TOTAL_BINARY_SIZE:
+                    raise PayloadLimitError(
+                        "Total binary size {} bytes exceeds limit of {} bytes".format(
+                            total_size, MAX_TOTAL_BINARY_SIZE
+                        )
+                    )
                 binaries.insert(int(elem.attrib['ID']), data)
 
         return binaries

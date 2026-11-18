@@ -28,8 +28,31 @@ from Cryptodome.Util import Padding as CryptoPadding
 from lxml import etree
 
 from .twofish import Twofish
+from ..exceptions import PayloadLimitError, XMLSecurityError
 
 log = logging.getLogger(__name__)
+
+# -------------------- Hardening limits --------------------
+#
+# Bounds applied while parsing untrusted KDBX files so that malicious
+# databases cannot exhaust memory through entity expansion, oversized XML
+# documents or decompression bombs.  The values are deliberately generous
+# for legitimate databases; tests may monkeypatch them.
+
+# maximum number of elements allowed in a parsed XML document
+MAX_XML_NODES = 1_000_000
+# maximum nesting depth of elements in a parsed XML document
+MAX_XML_DEPTH = 1_000
+# maximum size (bytes) of a decompressed payload or binary blob
+MAX_DECOMPRESSED_SIZE = 1024 * 1024 * 1024
+# maximum number of binaries stored in a database
+MAX_BINARY_COUNT = 10_000
+# maximum total size (bytes) of all binaries after decompression
+MAX_TOTAL_BINARY_SIZE = 1024 * 1024 * 1024
+# maximum size (bytes) of a single decompressed binary
+MAX_BINARY_SIZE = 100 * 1024 * 1024
+# chunk size used when streaming decompression
+DECOMPRESSION_CHUNK_SIZE = 64 * 1024
 
 
 class HeaderChecksumError(Exception):
@@ -42,6 +65,70 @@ class CredentialsError(Exception):
 
 class PayloadChecksumError(Exception):
     pass
+
+
+
+class _LimitingTreeBuilder(etree.TreeBuilder):
+    """Tree builder that rejects DTDs and enforces node/depth limits.
+
+    Parsing untrusted KDBX payloads with a plain parser allows DTD-driven
+    entity expansion (e.g. billion laughs) and lets oversized documents
+    exhaust memory.  This builder records the first violation; the owning
+    parser is left in an error state and :func:`parse_safe_xml` converts the
+    recorded violation into a controlled :class:`XMLSecurityError` or
+    :class:`PayloadLimitError`.
+    """
+
+    def __init__(self, max_nodes=MAX_XML_NODES, max_depth=MAX_XML_DEPTH):
+        super().__init__()
+        self._max_nodes = max_nodes
+        self._max_depth = max_depth
+        self._depth = 0
+        self._node_count = 0
+        self.violation = None
+
+    def doctype(self, name, pubid, system):
+        if self.violation is None:
+            self.violation = XMLSecurityError(
+                "DTD and DOCTYPE declarations are not allowed"
+            )
+
+    def start(self, tag, attrs=None, nsmap=None):
+        self._depth += 1
+        self._node_count += 1
+        if self.violation is None:
+            if self._depth > self._max_depth:
+                self.violation = PayloadLimitError(
+                    "XML nesting depth {} exceeds limit {}".format(
+                        self._depth, self._max_depth
+                    )
+                )
+            elif self._node_count > self._max_nodes:
+                self.violation = PayloadLimitError(
+                    "XML element count {} exceeds limit {}".format(
+                        self._node_count, self._max_nodes
+                    )
+                )
+        # lxml invokes parser targets with a SAX-style nsmap that may
+        # contain an empty-string default namespace prefix; TreeBuilder.start
+        # rejects that, so drop the redundant entry (the tag is already
+        # namespace qualified).
+        if nsmap:
+            nsmap = {prefix: uri for prefix, uri in nsmap.items() if prefix}
+        element = super().start(tag, attrs, nsmap)
+        return element
+
+    def data(self, data):
+        # Parser targets do not honor remove_blank_text, so drop ignorable
+        # whitespace-only text nodes manually to match the plain parser
+        # behavior that the rest of the library relies on.
+        if data and not data.strip():
+            return None
+        return super().data(data)
+
+    def end(self, tag, *args, **kwargs):
+        self._depth -= 1
+        return super().end(tag, *args, **kwargs)
 
 
 class DynamicDict(Adapter):
@@ -137,7 +224,7 @@ def compute_key_composite(password=None, keyfile=None):
                 keyfile_bytes = f.read()
         # try to read XML keyfile
         try:
-            tree = etree.fromstring(keyfile_bytes)
+            tree = parse_safe_xml(keyfile_bytes)
             version = tree.find('Meta/Version').text
             data_element = tree.find('Key/Data')
             if version.startswith('1.0'):
@@ -152,7 +239,7 @@ def compute_key_composite(password=None, keyfile=None):
             else:
                 raise AttributeError("Invalid version in keyfile")
         # otherwise, try to read plain keyfile
-        except (etree.XMLSyntaxError, UnicodeDecodeError, AttributeError):
+        except (etree.XMLSyntaxError, XMLSecurityError, PayloadLimitError, UnicodeDecodeError, AttributeError):
             try:
                 try:
                     int(keyfile_bytes, 16)
@@ -239,12 +326,52 @@ def rotate_seeds(kdbx, rotate_kdf_salt=True):
 # -------------------- XML Processing --------------------
 
 
+
+
+def parse_safe_xml(data, max_nodes=MAX_XML_NODES, max_depth=MAX_XML_DEPTH):
+    """Parse XML from bytes with hardening against untrusted input.
+
+    The parser refuses DTD/DOCTYPE declarations and external entity
+    resolution, so XXE and entity-expansion (billion laughs) attacks cannot
+    fetch resources or inflate memory.  A custom tree builder additionally
+    bounds the number of elements and the nesting depth.
+
+    Args:
+        data (`bytes`): raw XML document
+        max_nodes (`int`): maximum number of elements allowed
+        max_depth (`int`): maximum element nesting depth allowed
+
+    Raises:
+        `XMLSecurityError`: DTD/DOCTYPE or external entity usage detected
+        `PayloadLimitError`: node count or nesting depth limit exceeded
+        `lxml.etree.XMLSyntaxError`: malformed XML
+    """
+    builder = _LimitingTreeBuilder(max_nodes=max_nodes, max_depth=max_depth)
+    parser = etree.XMLParser(
+        target=builder,
+        remove_blank_text=True,
+        resolve_entities=False,
+        no_network=True,
+        dtd_validation=False,
+        load_dtd=False,
+        huge_tree=False,
+    )
+    try:
+        etree.parse(io.BytesIO(data), parser)
+    except etree.XMLSyntaxError:
+        if builder.violation is not None:
+            raise builder.violation
+        raise
+    if builder.violation is not None:
+        raise builder.violation
+    return etree.ElementTree(builder.close())
+
+
 class XML(Adapter):
     """Bytes <---> lxml etree"""
 
     def _decode(self, data, con, path):
-        parser = etree.XMLParser(remove_blank_text=True)
-        return etree.parse(io.BytesIO(data), parser)
+        return parse_safe_xml(data)
 
     def _encode(self, tree, con, path):
         return etree.tostring(tree)
@@ -414,11 +541,48 @@ class TwoFishPayload(DecryptedPayload):
         return CryptoPadding.unpad(data, 16)
 
 
+def safe_decompress(data, wbits=16 + 15, max_size=MAX_DECOMPRESSED_SIZE):
+    """Streaming zlib decompression with an output size cap.
+
+    Decompression bombs (small compressed input that expands into huge
+    output) are stopped as soon as the decompressed size reaches
+    ``max_size`` instead of being allowed to exhaust memory.
+
+    Args:
+        data (`bytes`): compressed bytes
+        wbits (`int`): zlib window bits
+        max_size (`int`): maximum accepted decompressed size in bytes
+
+    Raises:
+        `PayloadLimitError`: decompressed output exceeds ``max_size``
+        `zlib.error`: malformed compressed data
+    """
+    decompressor = zlib.decompressobj(wbits)
+    output = io.BytesIO()
+    total = 0
+    for offset in range(0, len(data), DECOMPRESSION_CHUNK_SIZE):
+        chunk = decompressor.decompress(data[offset:offset + DECOMPRESSION_CHUNK_SIZE])
+        total += len(chunk)
+        if total > max_size:
+            raise PayloadLimitError(
+                "Decompressed data exceeds limit of {} bytes".format(max_size)
+            )
+        output.write(chunk)
+    tail = decompressor.flush()
+    total += len(tail)
+    if total > max_size:
+        raise PayloadLimitError(
+            "Decompressed data exceeds limit of {} bytes".format(max_size)
+        )
+    output.write(tail)
+    return output.getvalue()
+
+
 class Decompressed(Adapter):
     """Compressed Bytes <---> Decompressed Bytes"""
 
     def _decode(self, data, con, path):
-        return zlib.decompress(data, 16 + 15)
+        return safe_decompress(data, 16 + 15)
 
     def _encode(self, data, con, path):
         compressobj = zlib.compressobj(
@@ -431,6 +595,54 @@ class Decompressed(Adapter):
         data = compressobj.compress(data)
         data += compressobj.flush()
         return data
+
+
+def enforce_binary_limits(binaries):
+    """Validate the number and size of binaries against hardening limits.
+
+    KDBX4 stores binaries in the inner header with a one-byte protection
+    flag prepended to each entry.  A malicious database can declare a huge
+    number of binaries or oversized blobs, so both are bounded here.
+
+    Args:
+        binaries (`list` of `Container`): inner header binary entries
+
+    Raises:
+        `PayloadLimitError`: count or size limit exceeded
+    """
+    if len(binaries) > MAX_BINARY_COUNT:
+        raise PayloadLimitError(
+            "Binary count {} exceeds limit of {}".format(
+                len(binaries), MAX_BINARY_COUNT
+            )
+        )
+    total_size = 0
+    for item in binaries:
+        # first byte is the protection flag, the remainder is the binary
+        binary_size = max(len(item.data) - 1, 0)
+        if binary_size > MAX_BINARY_SIZE:
+            raise PayloadLimitError(
+                "Binary of {} bytes exceeds limit of {} bytes".format(
+                    binary_size, MAX_BINARY_SIZE
+                )
+            )
+        total_size += binary_size
+        if total_size > MAX_TOTAL_BINARY_SIZE:
+            raise PayloadLimitError(
+                "Total binary size {} bytes exceeds limit of {} bytes".format(
+                    total_size, MAX_TOTAL_BINARY_SIZE
+                )
+            )
+    return binaries
+
+
+class LimitedInnerHeader(DynamicDict):
+    """Inner header that enforces binary hardening limits while parsing."""
+
+    def _decode(self, obj, context, path):
+        result = super()._decode(obj, context, path)
+        enforce_binary_limits(result["binary"])
+        return result
 
 
 # -------------------- Cipher Enums --------------------

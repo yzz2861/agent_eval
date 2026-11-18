@@ -41,6 +41,7 @@ from .common import (
     Concatenated,
     Decompressed,
     DynamicDict,
+    LimitedInnerHeader,
     ProtectedStreamId,
     Reparsed,
     TwoFishPayload,
@@ -261,7 +262,7 @@ InnerHeaderItem = Struct(
 )
 
 # another binary header inside decrypted and decompressed Payload
-InnerHeader = DynamicDict(
+InnerHeader = LimitedInnerHeader(
     'type',
     RepeatUntil(lambda item, a, b: item.type == 'end', InnerHeaderItem),
     # FIXME - this is a hack because inner header is not truly a dict,
