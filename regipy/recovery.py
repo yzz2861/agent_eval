@@ -1,7 +1,9 @@
 import logging
 import os
 import struct
+from dataclasses import dataclass, field
 from io import BytesIO
+from typing import List, Optional  # noqa: UP035
 
 from construct import ConstructError, Int32ul
 
@@ -19,6 +21,110 @@ MARVIN32_SEED = 0x82EF4D887A4E55C5
 
 # A hive can grow at most to its 32-bit addressable size.
 MAX_HIVE_SIZE = 0x7FFFFFFF
+
+# Confidence levels assigned to records reconstructed from the transaction logs.
+# They describe how strongly the recovered byte image is backed by validated log
+# data, so forensic consumers can decide how much trust to put in a record.
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+
+# Provenance identifiers for the byte image a record was parsed from.
+SOURCE_PRIMARY_HIVE = "primary_hive"
+SOURCE_TRANSACTION_LOG = "transaction_log"
+
+
+@dataclass
+class LogPageProvenance:
+    """Provenance of a byte range of the merged hive image.
+
+    Offsets are absolute file offsets in the merged hive image (i.e. including
+    the 4096-byte REGF header). A range whose provenance is the primary hive
+    means no validated log page covered it; otherwise the range was written by
+    the dirty page of a hash-verified HvLE entry (or a DIRT bitmap page).
+    """
+
+    offset: int
+    size: int
+    source: str
+    log_path: Optional[str] = None
+    sequence_number: Optional[int] = None
+    dirty_page_offset: Optional[int] = None
+
+
+@dataclass
+class RecoveredRecord:
+    """A key (NK) or value (VK) record in the merged hive image, annotated
+    with where its bytes came from and how much trust to put in it.
+    """
+
+    record_type: str
+    path: str
+    value_name: Optional[str]
+    source: str
+    confidence: str
+    deleted_from_primary: bool
+    log_path: Optional[str] = None
+    sequence_number: Optional[int] = None
+    log_backed_offsets: List[int] = field(default_factory=list)  # noqa: UP006
+
+    def to_dict(self):
+        return {
+            "record_type": self.record_type,
+            "path": self.path,
+            "value_name": self.value_name,
+            "source": self.source,
+            "confidence": self.confidence,
+            "deleted_from_primary": self.deleted_from_primary,
+            "log_path": self.log_path,
+            "sequence_number": self.sequence_number,
+            "log_backed_offsets": self.log_backed_offsets,
+        }
+
+
+@dataclass
+class RecoveryDiagnostics:
+    """Diagnostic summary of a transaction-log recovery run.
+
+    Every log that could not be fully applied is reported with the reason
+    recovery stopped (a failed hash, a sequence gap, an out-of-bounds page...).
+    The primary hive itself is never modified, so a failed recovery never
+    pollutes the results of parsing the original hive.
+    """
+
+    primary_hive_path: str
+    log_paths: List[str]  # noqa: UP006
+    applied_entries: int
+    recovered_dirty_pages: int
+    recovered_records: int
+    recovered_deleted_records: int
+    warnings: List[str] = field(default_factory=list)  # noqa: UP006
+
+    def to_dict(self):
+        return {
+            "primary_hive_path": self.primary_hive_path,
+            "log_paths": self.log_paths,
+            "applied_entries": self.applied_entries,
+            "recovered_dirty_pages": self.recovered_dirty_pages,
+            "recovered_records": self.recovered_records,
+            "recovered_deleted_records": self.recovered_deleted_records,
+            "warnings": self.warnings,
+        }
+
+
+@dataclass
+class TransactionLogRecoveryResult:
+    """The result of an incremental transaction-log recovery.
+
+    ``registry_hive`` is a RegistryHive parsed from the merged in-memory image
+    (the on-disk primary hive is untouched). ``recovered_records`` annotates
+    every reachable key and value with its byte provenance and confidence.
+    """
+
+    registry_hive: RegistryHive
+    recovered_records: List[RecoveredRecord]  # noqa: UP006
+    diagnostics: RecoveryDiagnostics
+    merged_hive_bytes: bytes
 
 
 def _marvin32(buffer):
@@ -72,7 +178,8 @@ def _scan_hvle_entries(log_path):
 
     Returns a list of (sequence_number, hive_bin_size, pages) tuples, where
     pages is a list of (offset, data) tuples (offset relative to the REGF
-    header, data being the page image).
+    header, data being the page image). The owning log path is attached by the
+    caller when the entries are replayed with provenance.
 
     Scanning stops at the first invalid entry: per the registry file format
     specification, recovery stops and only the preceding log entries are
@@ -169,7 +276,7 @@ def _scan_hvle_entries(log_path):
     return entries
 
 
-def _apply_entries_to_buffer(entries, restored_hive_buffer, hive_file_size, hive_secondary_sequence_num):
+def _apply_entries_to_buffer(entries, restored_hive_buffer, hive_file_size, hive_secondary_sequence_num, provenance=None):
     """Apply a validated, ordered list of HvLE entries (already ordered with the
     earlier sequence chain first) to the hive in *restored_hive_buffer*.
 
@@ -184,11 +291,13 @@ def _apply_entries_to_buffer(entries, restored_hive_buffer, hive_file_size, hive
     the 32-bit addressable range, and no larger than the current hive plus
     the log's own footprint - a tiny log cannot claim a multi-gigabyte hive.
 
-    :param entries: list of (sequence_number, hive_bin_size, pages, log_file_size) tuples
+    :param entries: list of (sequence_number, hive_bin_size, pages, log_file_size, log_path) tuples
     :param restored_hive_buffer: BytesIO holding the hive being restored
     :param hive_file_size: original size of the hive
     :param hive_secondary_sequence_num: the hive's secondary sequence number,
         for reporting gaps between the hive and the first applied entry
+    :param provenance: optional list that, when given, collects one LogPageProvenance
+        per applied dirty page (absolute offsets in the merged hive image)
     :return: (recovered_dirty_pages_count, last_applied_sequence, last_applied_bin_size)
     """
     recovered_dirty_pages_count = 0
@@ -196,7 +305,7 @@ def _apply_entries_to_buffer(entries, restored_hive_buffer, hive_file_size, hive
     last_applied_sequence = None
     last_applied_bin_size = None
 
-    for sequence_number, hive_bin_size, pages, log_file_size in entries:
+    for sequence_number, hive_bin_size, pages, log_file_size, log_path in entries:
         if expected_sequence is not None and sequence_number != expected_sequence:
             logger.warning(
                 f"Log entry with sequence number {sequence_number} does not continue the recovered sequence "
@@ -243,6 +352,17 @@ def _apply_entries_to_buffer(entries, restored_hive_buffer, hive_file_size, hive
             restored_hive_buffer.seek(target_offset)
             restored_hive_buffer.write(page_data)
             logger.info(f"Restored {len(page_data)} bytes to offset {hex(target_offset)}")
+            if provenance is not None:
+                provenance.append(
+                    LogPageProvenance(
+                        offset=target_offset,
+                        size=len(page_data),
+                        source=SOURCE_TRANSACTION_LOG,
+                        log_path=log_path,
+                        sequence_number=sequence_number,
+                        dirty_page_offset=page_offset,
+                    )
+                )
             recovered_dirty_pages_count += 1
 
         expected_sequence = sequence_number + 1
@@ -294,7 +414,7 @@ def _order_and_chain(entries_by_path, hive_secondary_sequence_num):
     return first + second
 
 
-def _parse_dirt_block(hive_path, transaction_log, hbins_data_size):
+def _parse_dirt_block(hive_path, transaction_log, hbins_data_size, log_path=None, provenance=None):
     restored_hive_buffer = BytesIO(open(hive_path, "rb").read())
     recovered_dirty_pages_count = 0
 
@@ -350,6 +470,17 @@ def _parse_dirt_block(hive_path, transaction_log, hbins_data_size):
         transaction_log.seek(transaction_log_offset)
 
         restored_hive_buffer.write(transaction_log.read(512))
+        if provenance is not None:
+            provenance.append(
+                LogPageProvenance(
+                    offset=registry_offset,
+                    size=512,
+                    source=SOURCE_TRANSACTION_LOG,
+                    log_path=log_path,
+                    sequence_number=None,
+                    dirty_page_offset=registry_offset - REGF_HEADER_SIZE,
+                )
+            )
 
         recovered_dirty_pages_count += 1
     return restored_hive_buffer, recovered_dirty_pages_count
@@ -386,7 +517,7 @@ def _parse_transaction_log_legacy(registry_hive, hive_path, transaction_log_path
             if magic != HVLE_TRANSACTION_LOG_MAGIC:
                 raise RegistryRecoveryException(f"The transaction log vector magic was not expected: {magic}")
             entries = _scan_hvle_entries(transaction_log_path)
-            entries = [(sequence, bin_size, pages, log_size) for sequence, bin_size, pages in entries]
+            entries = [(sequence, bin_size, pages, log_size, transaction_log_path) for sequence, bin_size, pages in entries]
             restored_hive_buffer = BytesIO(open(hive_path, "rb").read())
             hive_file_size = restored_hive_buffer.getbuffer().nbytes
             recovered_dirty_pages_count, last_sequence, last_bin_size = _apply_entries_to_buffer(
@@ -464,7 +595,7 @@ def apply_transaction_logs(
         log_size = os.path.getsize(log_path)
         logger.info(f"Log Size: {log_size}")
         entries = _scan_hvle_entries(log_path)
-        entries = [(sequence, bin_size, pages, log_size) for sequence, bin_size, pages in entries]
+        entries = [(sequence, bin_size, pages, log_size, log_path) for sequence, bin_size, pages in entries]
         entries_by_log.append(entries)
 
     ordered_entries = _order_and_chain(entries_by_log, registry_hive.header.secondary_sequence_num)

@@ -144,7 +144,32 @@ class RegistryHive:
         self.hive_type = None
 
         with open(hive_path, "rb") as f:
-            self._stream = BytesIO(f.read())
+            hive_bytes = f.read()
+
+        self._init_from_bytes(hive_bytes, hive_type=hive_type, partial_hive_path=partial_hive_path)
+
+    @classmethod
+    def from_bytes(cls, hive_bytes, hive_type=None, partial_hive_path=None):
+        """
+        Build a RegistryHive directly from an in-memory hive image (bytes),
+        without touching the filesystem. This is used when a hive image is
+        reconstructed from transaction logs in memory: callers get a fully
+        functional RegistryHive over the merged image while the on-disk hive
+        stays untouched.
+        :param hive_bytes: the raw bytes of the hive (REGF header + hbins)
+        :param hive_type: The hive type can be specified if this is a partial hive,
+                          or for some other reason regipy cannot identify the hive type
+        :param partial_hive_path: The path from which the partial hive actually starts
+        """
+        hive = cls.__new__(cls)
+        hive._init_from_bytes(hive_bytes, hive_type=hive_type, partial_hive_path=partial_hive_path)
+        return hive
+
+    def _init_from_bytes(self, hive_bytes, hive_type=None, partial_hive_path=None):
+        """Shared initialization for the file-based constructor and from_bytes."""
+        self.partial_hive_path = None
+        self.hive_type = None
+        self._stream = BytesIO(hive_bytes)
 
         with boomerang_stream(self._stream) as s:
             self.header = REGF_HEADER.parse_stream(s)  # type: ignore[union-attr]
@@ -166,7 +191,7 @@ class RegistryHive:
             try:
                 self.hive_type = identify_hive_type(self.name)
             except UnidentifiedHiveException:
-                logger.info(f"Hive type for {hive_path} was not identified: {self.name}")
+                logger.info(f"Hive type could not be identified: {self.name}")
 
         if partial_hive_path:
             self.partial_hive_path = partial_hive_path
@@ -387,6 +412,9 @@ class NKRecord:
         stream.seek(cell.offset)
         self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
         self._stream = stream
+        # Absolute file offset of the NK body (the 4-byte signed cell size
+        # field sits at offset - 4). Retained for transaction-log provenance.
+        self.offset = cell.offset
 
         # Sometimes the key names are ASCII and sometimes UTF-16 little endian
         if self.header.flags.KEY_COMP_NAME:
