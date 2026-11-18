@@ -10,6 +10,7 @@ from .bad_kwarg_use import BadKwargUseLinter
 from .bad_module_use import BadModuleUseLinter
 from .bad_module_attribute_use import BadModuleAttributeUseLinter
 from .bad_name_attribute_use import BadNameAttributeUseLinter
+from .flow_analysis import FlowAnalysisLinter
 
 __all__ = [
     'BadBuiltinUseLinter',
@@ -17,4 +18,5 @@ __all__ = [
     'BadModuleUseLinter',
     'BadModuleAttributeUseLinter',
     'BadNameAttributeUseLinter',
+    'FlowAnalysisLinter',
 ]

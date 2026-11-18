@@ -43,6 +43,7 @@ from .bad_xmlrpc_use import BadXmlrpcUseLinter
 from .bad_xmlsec_module_attribute_use import BadXmlsecModuleAttributeUseLinter
 from .bad_yaml_use import BadYAMLUseLinter
 from .bad_zipfile_use import BadZipfileUseLinter
+from .unverified_filepath_read import UnverifiedFilepathReadLinter
 
 from .twisted.inlinecallbacks_yield_statement import InlineCallbacksYieldStatementLinter
 from .twisted.returnvalue_in_inlinecallbacks import ReturnValueInInlineCallbacksLinter
@@ -84,6 +85,7 @@ ALL = (
     BadXmlsecModuleAttributeUseLinter,
     BadYAMLUseLinter,
     BadZipfileUseLinter,
+    UnverifiedFilepathReadLinter,
     InlineCallbacksYieldStatementLinter,
     ReturnValueInInlineCallbacksLinter,
     YieldReturnStatementLinter,
