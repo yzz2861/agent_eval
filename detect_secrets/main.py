@@ -73,6 +73,14 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         root=args.custom_root,
         num_processors=args.num_cores,
     )
+
+    if args.derivation_report is not None:
+        _write_derivation_report(
+            secrets,
+            args.derivation_report,
+            tenant=args.derivation_tenant,
+        )
+
     if args.baseline is not None:
         # The pre-commit hook's baseline upgrade is to trim the supplied baseline for non-existent
         # secrets, and to upgrade the format to the latest version. This is because the pre-commit
@@ -152,3 +160,19 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 audit.audit_baseline(args.filename[0])
     except InvalidBaselineError:
         pass
+
+
+def _write_derivation_report(
+    secrets: SecretsCollection,
+    filename: str,
+    tenant: str,
+) -> None:
+    from .derivation import analyze_secrets_collection
+    from .derivation import clear_plaintext
+    from .derivation import save_report
+
+    analysis = analyze_secrets_collection(secrets, tenant=tenant)
+    save_report(analysis, filename)
+    # Plaintext only lives in the in-memory analysis during this scan.
+    clear_plaintext(analysis)
+

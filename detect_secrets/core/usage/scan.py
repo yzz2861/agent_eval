@@ -85,6 +85,25 @@ def _add_initialize_baseline_options(parser: argparse.ArgumentParser) -> None:
             'slim baselines will need to be remade to be audited.'
         ),
     )
+    group.add_argument(
+        "--derivation-report",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Write a derived-relationship report to FILE. The report contains only "
+            "domain-separated, irreversible identities (no plaintext secrets) and "
+            "merges candidates solely on verifiable decoding chains."
+        ),
+    )
+    group.add_argument(
+        "--derivation-tenant",
+        metavar="TENANT",
+        default="default",
+        help=(
+            "Tenant label used to domain-separate derivation identities. Candidates "
+            "from different tenants are never merged."
+        ),
+    )
 
 
 def parse_args(args: argparse.Namespace) -> None:
