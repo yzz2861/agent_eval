@@ -37,10 +37,17 @@ get() is requests.get() with two checks added:
 The second check does not apply when requests is using a proxy (HTTP_PROXY/HTTPS_PROXY).
 The socket is then connected to the proxy, and the proxy does its own name resolution,
 so only the first check stands in that setup.
+
+get() never follows a redirect, because a Location header names a destination nothing
+has checked. Code that does want to follow one should use follow_redirects(): every hop
+goes through both checks above before its request is sent, and the chain is bounded by
+a hop count and a total time budget, so a redirect that loops or crawls cannot make the
+request run forever.
 """
 
 import ipaddress
 import socket
+import time
 import urllib.parse
 
 import requests
@@ -50,10 +57,33 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
 DEFAULT_PORTS = {'http': 80, 'https': 443}
 
+# How many redirects follow_redirects() will follow by default. Five is requests' own
+# default, so chains that work with an ordinary client still work here.
+DEFAULT_MAX_REDIRECTS = 5
+
+# The default ceiling on the whole follow_redirects() call, every hop included. Keeps a
+# slow or looping redirect chain from tying up the request indefinitely.
+DEFAULT_MAX_TOTAL_TIME = 15.0
+
+REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
+
 
 class RefusedDestination(Exception):
     """The request was not made, because it would not have gone to a public address.
 
+    `reason` is a short phrase that reads after "because", for showing to the analyst.
+    """
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class RedirectChainError(Exception):
+    """Following a redirect chain had to stop for a reason other than a bad destination.
+
+    Raised when the chain runs past its hop count or total time budget. A hop aimed at
+    a non-public address raises RefusedDestination instead, just as get() would.
     `reason` is a short phrase that reads after "because", for showing to the analyst.
     """
 
@@ -213,3 +243,73 @@ def get(url, **kwargs):
 
     check_destination(url)
     return _send(url, **kwargs)
+
+
+def _clip_timeout(timeout, remaining):
+    """`timeout` with every value capped at the time the chain has left.
+
+    requests takes either a single number or a (connect, read) tuple, so both shapes
+    are handled. The cap keeps one slow hop from spending time the whole chain does not
+    have.
+    """
+
+    if timeout is None:
+        return remaining
+    if isinstance(timeout, tuple):
+        return tuple(min(value, remaining) for value in timeout)
+    return min(timeout, remaining)
+
+
+def follow_redirects(url, max_redirects=DEFAULT_MAX_REDIRECTS,
+                     max_total_time=DEFAULT_MAX_TOTAL_TIME, **kwargs):
+    """GET `url` and follow its redirect chain, with every hop destination-checked.
+
+    get() refuses to follow redirects because a Location header names a destination
+    nothing has checked. A caller that follows one itself would skip the check, so the
+    checked way to follow is here: each hop runs check_destination() before sending, and
+    the guarded connections repeat the check on the socket that actually connected, so
+    a DNS answer that changes between the check and the connect (DNS rebinding) is still
+    refused. Location headers that are relative, or that change the scheme, are resolved
+    and checked the same way.
+
+    The chain is bounded two ways: `max_redirects` redirect responses after the first
+    request, and `max_total_time` seconds for the whole call, measured across hops. Either
+    being exceeded raises RedirectChainError; a hop aimed off the public internet raises
+    RefusedDestination before anything is sent to it. The final response, redirect or
+    not, is returned.
+    """
+
+    kwargs['allow_redirects'] = False
+
+    deadline = time.monotonic() + max_total_time
+    redirects_followed = 0
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RedirectChainError(
+                f'the redirect chain used more than the {max_total_time:g} second total '
+                f'time limit')
+
+        # The lookup-time half of the guard. The connected-socket half runs inside
+        # _send(), on the real socket, for this hop only.
+        check_destination(url)
+
+        kwargs['timeout'] = _clip_timeout(kwargs.get('timeout'), remaining)
+        response = _send(url, **kwargs)
+
+        if response.status_code not in REDIRECT_STATUS_CODES:
+            return response
+
+        location = response.headers.get('Location')
+        if not location:
+            return response
+
+        redirects_followed += 1
+        if redirects_followed > max_redirects:
+            raise RedirectChainError(
+                f'the redirect chain was longer than the limit of {max_redirects} hops')
+
+        # urljoin resolves relative and scheme-relative Locations against the hop that
+        # issued them; the next loop iteration checks whatever destination that yields.
+        url = urllib.parse.urljoin(response.url or url, location)

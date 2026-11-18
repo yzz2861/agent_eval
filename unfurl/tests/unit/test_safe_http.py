@@ -184,5 +184,172 @@ class TestConnectedAddressIsChecked(unittest.TestCase):
         self.assertEqual(1, self.server.requests_seen)
 
 
+class TestFollowRedirects(unittest.TestCase):
+    """The checked redirect follower; the network it runs on is entirely fake."""
+
+    def test_each_hop_is_checked_before_it_is_sent_and_redirects_are_followed(self):
+        routes = [
+            FakeResponse(status_code=302, headers={'location': 'https://hop.example/two'},
+                         url='https://start.example/one'),
+            FakeResponse(status_code=200, url='https://hop.example/two'),
+        ]
+        sent = []
+
+        def fake_send(url, **kwargs):
+            sent.append(url)
+            self.assertFalse(kwargs['allow_redirects'])
+            return routes[len(sent) - 1]
+
+        checked = []
+        with mock.patch.object(safe_http, '_send', side_effect=fake_send), \
+                mock.patch.object(safe_http, 'check_destination',
+                                  side_effect=lambda url: checked.append(url)):
+            response = safe_http.follow_redirects('https://start.example/one', timeout=3)
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(['https://start.example/one', 'https://hop.example/two'], sent)
+        self.assertEqual(sent, checked)
+
+    def test_relative_location_is_resolved_before_the_next_hop_is_checked(self):
+        routes = [
+            FakeResponse(status_code=302, headers={'location': 'next?x=1'},
+                         url='https://start.example/one'),
+            FakeResponse(status_code=200, url='https://start.example/next?x=1'),
+        ]
+        sent = []
+
+        def fake_send(url, **kwargs):
+            sent.append(url)
+            return routes[len(sent) - 1]
+
+        with mock.patch.object(safe_http, '_send', side_effect=fake_send), \
+                mock.patch.object(safe_http, 'resolve_host', return_value=[PUBLIC_ADDRESS]):
+            safe_http.follow_redirects('https://start.example/one')
+
+        self.assertEqual(['https://start.example/one',
+                          'https://start.example/next?x=1'], sent)
+
+    def test_a_redirect_to_a_private_address_is_refused_without_a_request_to_it(self):
+        def fake_resolve(hostname, port):
+            if hostname == 'intranet.example':
+                return ['10.0.0.5']
+            return [PUBLIC_ADDRESS]
+
+        sent = []
+
+        def fake_send(url, **kwargs):
+            sent.append(url)
+            if 'start.example' in url:
+                return FakeResponse(
+                    status_code=302,
+                    headers={'location': 'https://intranet.example/admin'})
+            return FakeResponse(status_code=404)
+
+        with mock.patch.object(safe_http, '_send', side_effect=fake_send), \
+                mock.patch.object(safe_http, 'resolve_host', side_effect=fake_resolve):
+            with self.assertRaises(safe_http.RefusedDestination) as refused:
+                safe_http.follow_redirects('https://start.example/go')
+
+        self.assertIn('not on the public internet', refused.exception.reason)
+        self.assertEqual(['https://start.example/go'], sent)
+
+    def test_a_redirect_to_a_non_http_scheme_is_refused(self):
+        response = FakeResponse(status_code=302,
+                                headers={'location': 'file:///etc/passwd'})
+
+        with mock.patch.object(safe_http, '_send', return_value=response), \
+                mock.patch.object(safe_http, 'resolve_host', return_value=[PUBLIC_ADDRESS]):
+            with self.assertRaises(safe_http.RefusedDestination) as refused:
+                safe_http.follow_redirects('https://start.example/go')
+
+        self.assertIn('not a scheme', refused.exception.reason)
+
+    def test_the_redirect_chain_is_capped_at_the_hop_limit(self):
+        sent = []
+
+        def fake_send(url, **kwargs):
+            sent.append(url)
+            number = len(sent)
+            return FakeResponse(status_code=302,
+                                headers={'location': f"https://loop.example/{number + 1}"},
+                                url=url)
+
+        with mock.patch.object(safe_http, '_send', side_effect=fake_send), \
+                mock.patch.object(safe_http, 'resolve_host', return_value=[PUBLIC_ADDRESS]):
+            with self.assertRaises(safe_http.RedirectChainError) as exceeded:
+                safe_http.follow_redirects('https://loop.example/1', max_redirects=3)
+
+        self.assertIn('limit of 3 hops', exceeded.exception.reason)
+        self.assertEqual(4, len(sent))
+        self.assertEqual('https://loop.example/4', sent[-1])
+
+    def test_the_redirect_chain_is_capped_by_total_time(self):
+        response = FakeResponse(status_code=302,
+                                headers={'location': 'https://slow.example/two'})
+        monotonic_values = iter([0.0, 0.0, 20.0])
+
+        with mock.patch.object(safe_http, '_send', return_value=response), \
+                mock.patch.object(safe_http, 'resolve_host', return_value=[PUBLIC_ADDRESS]), \
+                mock.patch.object(safe_http.time, 'monotonic',
+                                  side_effect=monotonic_values):
+            with self.assertRaises(safe_http.RedirectChainError) as exceeded:
+                safe_http.follow_redirects('https://slow.example/one', max_total_time=10)
+
+        self.assertIn('10 second total time limit', exceeded.exception.reason)
+
+    def test_clip_timeout_caps_each_value_at_the_remaining_budget(self):
+        self.assertEqual(2.0, safe_http._clip_timeout(3, 2.0))
+        self.assertEqual(1.0, safe_http._clip_timeout(1, 2.0))
+        self.assertEqual(2.0, safe_http._clip_timeout(None, 2.0))
+        self.assertEqual((2.0, 1.5), safe_http._clip_timeout((5, 1.5), 2.0))
+
+
+class TestRedirectChainConnectedAddressIsChecked(unittest.TestCase):
+    """DNS rebinding on a redirect hop, exercised through the real guarded connection.
+
+    The lookup-time check sees a public address, but the socket the guarded connection
+    opens reports a private peer. A real loopback server cannot be bound in every
+    environment the tests run in, so the base connection _new_conn is replaced with a
+    fake socket whose peer address is private. The guard under test is the production
+    code in _GuardedHTTP(Connection), not a mock.
+    """
+
+    def test_a_hop_that_connects_to_a_private_address_is_dropped(self):
+        for scheme in ('http', 'https'):
+            with self.subTest(scheme=scheme):
+                first_url = f"{scheme}://start.example/one"
+                redirect_url = f"{scheme}://rebind.example/two"
+                response = FakeResponse(status_code=302,
+                                        headers={'location': redirect_url}, url=first_url)
+
+                real_send = safe_http._send
+
+                def fake_send(url, **kwargs):
+                    if url == first_url:
+                        return response
+                    return real_send(url, **kwargs)
+
+                fake_socket = mock.Mock()
+                fake_socket.getpeername.return_value = ('127.0.0.1', 443)
+                no_proxy = mock.patch.dict(
+                    os.environ,
+                    {'NO_PROXY': 'start.example,rebind.example',
+                     'no_proxy': 'start.example,rebind.example'})
+
+                with no_proxy, \
+                        mock.patch.object(safe_http, 'resolve_host',
+                                          return_value=[PUBLIC_ADDRESS]), \
+                        mock.patch.object(safe_http, '_send', side_effect=fake_send), \
+                        mock.patch.object(safe_http.HTTPConnection, '_new_conn',
+                                          return_value=fake_socket) as new_conn:
+                    with self.assertRaises(safe_http.RefusedDestination) as refused:
+                        safe_http.follow_redirects(first_url)
+
+                self.assertIn('connection went to an address',
+                              refused.exception.reason)
+                new_conn.assert_called_once()
+                fake_socket.close.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()
