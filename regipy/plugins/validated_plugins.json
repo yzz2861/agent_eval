@@ -37,6 +37,7 @@
     "routes",
     "safeboot_configuration",
     "samparse",
+    "service_hijack",
     "services",
     "shimcache",
     "shutdown",

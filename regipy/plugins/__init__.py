@@ -31,6 +31,7 @@ from .system.host_domain_name import HostDomainNamePlugin
 from .system.routes import RoutesPlugin
 from .system.safeboot_configuration import SafeBootConfigurationPlugin
 from .system.services import ServicesPlugin
+from .system.service_hijack import ServiceHijackPlugin
 from .system.shimcache import ShimCachePlugin
 from .system.timezone_data import TimezoneDataPlugin
 from .system.usbstor import USBSTORPlugin
