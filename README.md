@@ -105,6 +105,55 @@ By default, all structures are compiled into classes that provide optimised perf
 
 More examples can be found in the `examples` directory.
 
+### Discriminating version-less binary records
+
+When a record carries no version tag and several structure definitions plausibly parse it, picking the first
+definition that decodes successfully mis-translates fields. The `dissect.cstruct.discriminator` subpackage decides
+between candidate `SchemaSpec` definitions using the structural invariants you declare and the bytes that are
+actually readable, never candidate order or mere parse success.
+
+Each candidate is evaluated independently against a shared, read-only byte cache. A result is one of
+`UNIQUE_MATCH`, `AMBIGUOUS` or `ALL_FAILED`; ambiguous results carry the minimum field-evidence set that can
+separate the candidates plus the byte ranges that still need to be fetched, while failed results report the exact
+constraint or invariant violation per candidate.
+
+```python
+from dissect.cstruct.discriminator import (
+    ByteWindow,
+    FieldSpec,
+    PayloadChecksum,
+    RecordLengthEquals,
+    SchemaSpec,
+    discriminate,
+    equal_to,
+    masked_equals,
+    one_of,
+)
+
+layout_a = SchemaSpec(
+    name="layout_a",
+    fields=(
+        FieldSpec("magic", 0, 1, constraint=equal_to(0xA5)),
+        FieldSpec("version", 2, 1, constraint=one_of(1, 2)),
+        FieldSpec("flags", 3, 1, constraint=masked_equals(0xF0, 0)),
+        FieldSpec("payload_len", 4, 2),
+        FieldSpec("total_size", 6, 2),
+        FieldSpec("checksum", 12, 4),
+    ),
+    invariants=(
+        RecordLengthEquals(size_field="total_size"),
+        PayloadChecksum(checksum_field="checksum", start=16, end="payload_len", end_base=16),
+    ),
+)
+
+# A truncated window yields AMBIGUOUS with PENDING candidates and concrete gap ranges;
+# pass window_size to model partial reads, or feed the full record for a final verdict.
+result = discriminate([layout_a, layout_b], record_bytes, window_size=12)
+if result.evidence_plan:
+    for item in result.evidence_plan.items:
+        print(item.key, item.span, item.missing_ranges)
+```
+
 ## Features
 ### Structure parsing
 Write simple C-like structures and use them to parse binary data, as can be seen in the examples.
