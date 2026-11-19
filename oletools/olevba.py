@@ -83,6 +83,15 @@ from __future__ import print_function
 
 #------------------------------------------------------------------------------
 # CHANGELOG:
+# 2024-xx-xx condcomp:
+#                      - new --cond-comp option: static, non-executing view of
+#                        VBA #If/#ElseIf/#Else conditional compilation, with
+#                        #Const and --define CONST=VALUE environment values
+#                      - unknown conditions are enumerated as separate scenarios
+#                        instead of being collapsed into one flat keyword report
+#                      - auto-exec entry points are linked to suspicious calls
+#                        only through condition-compatible chains (module + line)
+#                      - syntax damage only makes the affected region uncertain
 # 2014-08-05 v0.01 PL: - first version based on officeparser code
 # 2014-08-14 v0.02 PL: - fixed bugs in code, added license from officeparser
 # 2014-08-15       PL: - fixed incorrect value check in projecthelpfilepath Record
@@ -345,6 +354,7 @@ from oletools import crypto
 from oletools.common.io_encoding import ensure_stdout_handles_unicode
 from oletools.common import codepages
 from oletools import ftguess
+from oletools import condcomp
 from oletools.common.log_helper import log_helper
 
 # === PYTHON 2+3 SUPPORT ======================================================
@@ -3698,6 +3708,26 @@ class VBA_Parser(object):
         return self.analysis_results
 
 
+    def conditional_compilation_analysis(self, env=None):
+        '''
+        Static, non-executing conditional-compilation view of every module.
+
+        Models #If/#ElseIf/#Else regions and #Const / supplied environment
+        values, enumerates every still-possible branch when a condition is
+        unknown, and binds auto-exec entry points to suspicious calls only
+        through condition-compatible chains. No macro is ever executed.
+
+        :param dict env: explicit constant values, e.g. {'VBA7': 1,
+            'Win64': 1}. Constants left out stay unknown.
+        :return: condcomp.ConditionalReport
+        '''
+        modules = []
+        for (_subfile, _stream, vba_filename, vba_code) in \
+                self.extract_all_macros():
+            modules.append((vba_filename, vba_code))
+        return condcomp.analyze_vba_modules(modules, env=env)
+
+
     def reveal(self):
         # we only want printable strings:
         analysis = self.analyze_macros(show_decoded_strings=False)
@@ -4448,6 +4478,12 @@ def parse_args(cmd_line_args=None):
                         help='Disable extraction and analysis of pcode')
     parser.add_argument('--no-xlm', dest="no_xlm", action="store_true", default=False,
                             help="Do not extract XLM Excel macros. This may speed up analysis of large files.")
+    parser.add_argument('--cond-comp', dest='cond_comp', action='store_true',
+                        default=False,
+                        help='Static conditional-compilation view of #If branches: enumerate unknown conditions and bind auto-exec to suspicious calls only through compatible chains. Macros are not executed.')
+    parser.add_argument('--define', dest='defines', action='append',
+                        default=[], metavar='CONST=VALUE',
+                        help='Provide a conditional constant such as VBA7=1. Repeatable. Unsupplied constants stay unknown and are enumerated.')
 
     options = parser.parse_args(cmd_line_args)
 
@@ -4467,6 +4503,33 @@ def parse_args(cmd_line_args=None):
     return options
 
 
+
+def parse_cond_defines(defines):
+    '''
+    Parse repeated CONST=VALUE command-line definitions into an env dict.
+
+    :param defines: list of 'NAME=VALUE' strings
+    :return: dict NAME(upper) -> int/bool/str value
+    '''
+    env = {}
+    for definition in defines or []:
+        if '=' not in definition:
+            raise ValueError('Invalid --define %r, expected CONST=VALUE'
+                             % definition)
+        name, value = definition.split('=', 1)
+        name = name.strip().upper()
+        text = value.strip()
+        if text.lower() in ('true', '-1'):
+            env[name] = condcomp.TRUE
+        elif text.lower() in ('false', '0'):
+            env[name] = condcomp.FALSE
+        else:
+            try:
+                env[name] = int(text, 0)
+            except ValueError:
+                env[name] = text
+    return env
+
 def process_file(filename, data, container, options, crypto_nesting=0):
     """
     Part of main function that processes a single file.
@@ -4483,6 +4546,17 @@ def process_file(filename, data, container, options, crypto_nesting=0):
         vba_parser = VBA_Parser_CLI(filename, data=data, container=container,
                                     relaxed=options.relaxed,
                                     disable_pcode=options.no_pcode)
+        if getattr(options, 'cond_comp', False):
+            env = parse_cond_defines(options.defines)
+            cc_report = vba_parser.conditional_compilation_analysis(env=env)
+            if options.output_mode == 'json':
+                print_json(conditional_compilation=cc_report.to_dict())
+            else:
+                print(condcomp.render_text_report(cc_report))
+            vba_parser.close()
+            if not crypto.is_encrypted(filename):
+                return RETURN_OK
+
 
         if options.output_mode == 'detailed':
             # fully detailed output
