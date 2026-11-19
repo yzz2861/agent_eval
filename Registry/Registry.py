@@ -23,6 +23,8 @@ import ntpath
 from enum import Enum
 
 from . import RegistryParse
+from . import NameAudit
+from . import NameQuery
 
 RegSZ = 0x0001
 RegExpandSZ = 0x0002
@@ -119,6 +121,19 @@ class RegistryValue(object):
             return self._vkrecord.name()
         else:
             return  "(default)"
+
+    def name_identity(self):
+        """
+        Get the audited NameIdentity for this value name.
+        The display rendering never alters the bytes used for lookup.
+        """
+        return self._vkrecord.name_identity()
+
+    def display_name(self):
+        """
+        Get an escaped, unambiguous rendering of the value name.
+        """
+        return self._vkrecord.name_identity().display_name()
 
     def value_type(self):
         """
@@ -277,6 +292,36 @@ class RegistryKey(object):
         See RegistryKey.path() to get the complete key name.
         """
         return self._nkrecord.name()
+
+    def name_identity(self):
+        """
+        Get the audited NameIdentity for this key name, preserving the
+        compressed/UTF-16 raw bytes, code point sequence and display view.
+        """
+        return self._nkrecord.name_identity()
+
+    def display_name(self):
+        """
+        Get an escaped, unambiguous rendering of the key name.  This is a
+        display artifact and must never be used as a lookup identity.
+        """
+        return self._nkrecord.name_identity().display_name()
+
+    def subkey_name_view(self):
+        """
+        Get the explicit, audited lookup view for this key's subkeys.
+        Unlike subkey(), the view never collapses equivalent-but-distinct
+        names into a single, arbitrarily chosen result.
+        @rtype: Registry.NameQuery.KeyNameView
+        """
+        return NameQuery.KeyNameView(self._nkrecord)
+
+    def value_name_view(self):
+        """
+        Get the explicit, audited lookup view for this key's values.
+        @rtype: Registry.NameQuery.ValueNameView
+        """
+        return NameQuery.ValueNameView(self._nkrecord)
 
     def path(self):
         """

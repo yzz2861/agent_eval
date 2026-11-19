@@ -30,6 +30,7 @@ from ctypes import c_uint32
 from enum import Enum
 from collections import namedtuple
 from Registry import SettingsParse
+from Registry import NameAudit
 
 # Constants
 RegSZ = 0x0001
@@ -973,6 +974,26 @@ class VKRecord(Record):
         """
         return self.unpack_word(0x10) & 1 == 1
 
+    def raw_name(self):
+        """
+        Return the exact, unmodified name bytes stored in the record.
+        A nameless (default) value yields an empty byte string.
+        @return: byte string
+        """
+        if not self.has_name():
+            return b""
+        name_length = self.unpack_word(0x2)
+        return self.unpack_string(0x14, name_length)
+
+    def name_identity(self):
+        """
+        Return the audited NameIdentity for this value name, preserving the
+        compressed/UTF-16 raw bytes, code point sequence and display view.
+        @rtype: Registry.NameAudit.NameIdentity
+        """
+        return NameAudit.make_name_identity(self.raw_name(),
+                                            self.has_ascii_name())
+
     def name(self):
         """
         Get the name, if it exists. If not, the empty string is returned.
@@ -1529,6 +1550,23 @@ class NKRecord(Record):
 
     def has_ascii_name(self):
         return self.unpack_word(0x2) & 0x0020 > 0
+
+    def raw_name(self):
+        """
+        Return the exact, unmodified name bytes stored in the record.
+        @return: byte string
+        """
+        name_length = self.unpack_word(0x48)
+        return self.unpack_string(0x4C, name_length)
+
+    def name_identity(self):
+        """
+        Return the audited NameIdentity for this key name, preserving the
+        compressed/UTF-16 raw bytes, code point sequence and display view.
+        @rtype: Registry.NameAudit.NameIdentity
+        """
+        return NameAudit.make_name_identity(self.raw_name(),
+                                            self.has_ascii_name())
 
     def name(self):
         """

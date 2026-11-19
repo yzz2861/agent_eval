@@ -83,6 +83,34 @@ As of version 0.2.0, python-registry is released under the Apache 2.0 license.
 Before that, python-registry was released under the GPLv3.
 
 
+Name Auditing and Explicit Lookup
+---------------------------------
+Two registry keys can display the same name while their on-disk bytes
+differ (case only, invisible code points, or compressed vs. UTF-16LE
+storage).  De-duplicating such names with a plain lower() hides one of
+the artifacts.  The Registry.NameAudit module therefore models three
+deliberately separate identities:
+
+1. the raw identity: exact bytes, encoding and code point sequence;
+2. the lookup identity: equivalence under a named Windows collation rule,
+   reported as unknown when the rule cannot be reproduced portably
+   (Python casefold is never used to approximate Windows behavior);
+3. the display identity: an escaped rendering that cannot alter the
+   bytes used for querying.
+
+RegistryKey.subkey_name_view() and RegistryKey.value_name_view() expose
+the explicit lookup view.  An equivalence class with several candidates
+returns LookupOutcome.AMBIGUOUS together with every candidate offset,
+instead of silently picking one::
+
+    result = key.subkey_name_view().lookup("persistence")
+    if result.is_ambiguous():
+        print(result.offsets())  # inspect every matching record
+
+The legacy subkey()/value()/name() browsing API is unchanged.  Synthetic
+hives for testing can be produced in memory with Registry.SyntheticHive;
+no live system registry is required.
+
 Sources
 -------
 Nearly all structure definitions used in python-registry
