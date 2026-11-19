@@ -29,6 +29,7 @@ basic repository using Metadata API.
 
    tuf.api
    tuf.ngclient
+   tuf.analysis
 
 .. _client update workflow: https://theupdateframework.github.io/specification/latest/#detailed-client-workflow
 .. _document formats: https://theupdateframework.github.io/specification/latest/#document-formats
