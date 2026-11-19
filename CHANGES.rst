@@ -4,7 +4,13 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add an instrumentation audit API (``audit_restricted`` and
+  ``audit_compiled_code``). It builds an independent expected-guard list for
+  attribute read/write, subscript read/write, iteration and guarded calls
+  from the source, then verifies the transformed AST and every nested code
+  object, reporting missing, duplicate and unprovable guard sites. Audits on
+  unreviewed bytecode versions are returned as inconclusive instead of a
+  clean verdict.
 
 
 9.0 (2026-11-04)

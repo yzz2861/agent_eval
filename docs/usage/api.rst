@@ -110,6 +110,32 @@ API overview
     ...     compiled_function.__defaults__ or ())
     >>> result = new_function(*[], **{})
 
+Guard instrumentation audit
++++++++++++++++++++++++++
+
+.. py:method:: audit_restricted(source, filename, mode, policy)
+    :module: RestrictedPython
+
+    Transforms and compiles ``source`` without executing it and audits the
+    resulting instrumentation. The source is re-parsed independently to build
+    the expected list of guard calls (``_getattr_``, ``_getitem_``,
+    ``_write_``, ``_getiter_``, ``_apply_`` and the unpacking guards), so the
+    policy transformer is never used as the audit oracle.
+
+    :return: AuditResult with ``missing``, ``duplicate`` and ``unprovable``
+             guard sites, the counted bytecode loads and an ``inconclusive``
+             flag. Call ``assert_guarded()`` to raise on a failed or
+             inconclusive audit.
+
+.. py:method:: audit_compiled_code(source, code, transformed_tree, mode, filename)
+    :module: RestrictedPython
+
+    Audit an already compiled code object together with its transformed AST.
+    Every nested code object is inspected. When the running bytecode version
+    is not reviewed for the audit rules, the result is marked inconclusive
+    instead of producing a possibly wrong clean verdict.
+
+
 restricted builtins
 +++++++++++++++++++
 

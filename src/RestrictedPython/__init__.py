@@ -40,3 +40,10 @@ from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:ski
 
 #
 from RestrictedPython.Eval import RestrictionCapableEval
+
+# Instrumentation audit:
+from RestrictedPython.audit import audit_restricted  # isort:skip
+from RestrictedPython.audit import audit_compiled_code  # isort:skip
+from RestrictedPython.audit import AuditResult  # isort:skip
+from RestrictedPython.audit import GuardAuditError  # isort:skip
+from RestrictedPython.audit import InconclusiveAuditError  # isort:skip
