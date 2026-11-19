@@ -1,0 +1,82 @@
+Offline Mount View for Evidence Registry Hives
+===============================================
+
+Problem
+-------
+Merging SYSTEM, SOFTWARE and user hives into one logical registry tree
+is dangerous when symbolic links (RegLink values) cross from one piece
+of case material into another. A naive resolver can attribute a key to
+the wrong evidence item, or silently complete a target from the host
+machine registry. Registry.mountview is a read-only, fully offline view
+that keeps every result attributable to its source file.
+
+It never imports or consults a host operating system registry; the only
+hives that can be reached are the ones explicitly mounted by the caller.
+
+Registration
+------------
+Each hive is registered with an explicit evidence identity and a virtual
+mount point. Duplicate evidence ids, duplicate mount points, and mount
+points nested inside an existing one raise MountConflictError; a mount is
+never silently replaced. Optional aliases translate host-style target
+prefixes (for example "\\HKLM\\SOFTWARE") into virtual view paths; the
+mapping is fixed at registration time.
+
+    from Registry.mountview import MountView, ResolutionStatus
+
+    view = MountView()
+    view.mount("EV-SYSTEM", r"HKLM\\SYSTEM", "mini_system.hive")
+    view.mount("EV-SOFTWARE", r"HKLM\\SOFTWARE", "mini_software.hive",
+                aliases={r"\\HKLM\\SOFTWARE": r"HKLM\\SOFTWARE"})
+
+Two query modes
+---------------
+get(path, follow_links=False) is a direct read: it stays inside the hive
+that owns the matching mount point and reports RegLink values as links
+instead of dereferencing them. get(path, follow_links=True) resolves link
+values hop by hop and records every hop. The two options are deliberately
+distinct; no query ever changes the mounted case boundaries.
+
+Structured statuses
+-------------------
+Every query returns a ResolutionResult rather than raising for forensic
+outcomes. status is one of:
+
+  OK                 resolved inside a mounted hive
+  NAME_SHADOWED      resolved, but a same-name ordinary key exists in
+                     another evidence hive, so attribution is ambiguous
+  LINK_CYCLE         link chain revisits a physical (hive, offset) node
+  UNMOUNTED_TARGET   link names a path no mounted hive covers; the host
+                     registry is never used to complete it
+  MALFORMED_LINK     RegLink data cannot be decoded
+  NOT_FOUND          path or value does not exist in the named hive
+
+open() and get_value() wrap get() for callers that prefer exceptions.
+
+Provenance and traceability
+---------------------------
+Each MountedKey carries a Location with evidence_id, the original key path
+inside the hive (source_path), the absolute NK record byte offset
+(record_offset) and the virtual mount_point. Every Hop preserves the link
+source Location, the link value name, the declared target view path and,
+once resolved, the target Location. MountedValue additionally exposes the
+VK and NK record offsets, so any result can be traced back to byte offsets
+in the original evidence file. ResolutionResult.as_dict() emits the whole
+chain as plain data for reporting.
+
+Miniature test hives
+--------------------
+tests/reg_samples/mountview/build_mountview_fixtures.py generates three
+valid, single-HBIN hives through Registry.hivebuild (no Windows host and
+no third-party generator required):
+
+  mini_system.hive    legal cross-mount link into the SOFTWARE hive plus
+                      an ordinary RegSZ value for contrast
+  mini_software.hive  legal cross-mount target, a link to an unmounted
+                      target, and an intra-hive link cycle (CycleA/B)
+  mini_ntuser.hive    a local same-name key plus a same-name impostor
+                      link, another unmounted target, and a user-hive
+                      link cycle (LoopA/B)
+
+All three hives parse through the unchanged Registry API, and the full
+behaviour matrix is exercised by tests/test_mountview.py. The original

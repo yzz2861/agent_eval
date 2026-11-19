@@ -67,6 +67,17 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Offline mount view
+------------------
+For multi-hive case work, `Registry.mountview` provides an offline, read-only
+view over explicitly registered evidence hives. Each hive is mounted with an
+evidence identity and a virtual mount point, direct reads and link following
+are separate options, and every result keeps its source hive, original path and
+record offset. Link cycles, unmounted link targets and same-name shadowing are
+returned as structured statuses; a host registry is never consulted. See
+`documentation/mountview.txt` for the full API and the miniature hives under
+`tests/reg_samples/mountview/` for a worked example.
+
 Wanted
 ------
   - Bug reports.
