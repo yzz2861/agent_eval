@@ -121,6 +121,14 @@ class CVSS4MandatoryError(CVSS4Error):
     pass
 
 
+class CVSS4UnsatisfiableError(CVSS4Error):
+    """
+    Exception for CVSS4 range constraints which leave no valid metric combination.
+    """
+
+    pass
+
+
 class CVSS4RHScoreDoesNotMatch(CVSS4Error):
     """
     Exception when parsing CVSS4 vectors in Red Hat notation, which have score not matching the

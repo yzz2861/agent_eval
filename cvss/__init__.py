@@ -7,5 +7,6 @@ from .cvss3 import CVSS3
 from .cvss4 import CVSS4
 from .exceptions import CVSS2Error, CVSS3Error, CVSS4Error, CVSSError
 from .interactive import ask_interactively
+from .range4 import score_range as cvss4_score_range
 
 __version__ = "3.6"
