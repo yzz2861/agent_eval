@@ -1,0 +1,7 @@
+# 运维侧 overlay：与 base.yaml 深度合并，rules 列表按文件顺序拼接。
+rules:
+  - id: allow-all-external
+    description: 活动期临时放宽生产环境外部流量（事发规则）
+    action: allow
+    priority: 200
+    environments: [prod]

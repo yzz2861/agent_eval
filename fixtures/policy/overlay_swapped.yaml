@@ -1,0 +1,8 @@
+# 与 overlay.yaml 的唯一差异：allow-all-external 的优先级从 200 换成 90，
+# 与 base 中 deny-prod-debug 的优先级互换。
+rules:
+  - id: allow-all-external
+    description: 活动期临时放宽生产环境外部流量（事发规则）
+    action: allow
+    priority: 90
+    environments: [prod]

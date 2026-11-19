@@ -1,0 +1,37 @@
+# 基础安全策略：评审时按这份文件内容签字。
+# 注意 deny-prod-debug 看着写得很明确，但合并后是否生效取决于 overlay。
+policy:
+  name: edge-ingress
+  owner: security-team
+
+environments: [dev, staging, prod]
+
+rules:
+  - id: allow-internal
+    description: 内网流量放行
+    action: allow
+    priority: 100
+    tags:
+      network: internal
+
+  - id: deny-prod-debug
+    description: 生产环境禁止调试器组件，评审重点关注的一条
+    action: deny
+    priority: 90
+    environments: [prod]
+    tags:
+      component: debugger
+
+  - id: allow-health
+    description: 健康检查探针放行
+    action: allow
+    priority: 10
+    tags:
+      component: healthcheck
+
+  - id: deny-crypto-export
+    description: 禁止导出级加密套件
+    action: deny
+    priority: 300
+    tags:
+      component: crypto-export
