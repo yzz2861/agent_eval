@@ -1,0 +1,14 @@
+# Example project configuration for the sensitive logging checks.
+sensitive_log:
+  local_only: true
+  local_paths:
+    - examples
+  sensitive_sources:
+    - name: fake_api.read_request
+      fields: [fake_card_no]
+  trusted_sanitizers:
+    - fake_sec.mask_card
+  log_sinks:
+    - logging.Logger.info
+    - logging.Logger.error
+    - logging.Logger.exception

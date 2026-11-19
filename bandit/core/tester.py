@@ -8,6 +8,7 @@ import warnings
 
 from bandit.core import constants
 from bandit.core import context as b_context
+from bandit.core import issue as bandit_issue
 from bandit.core import utils
 
 warnings.formatwarning = utils.warnings_formatter
@@ -22,6 +23,55 @@ class BanditTester:
         self.debug = debug
         self.nosec_lines = nosec_lines
         self.metrics = metrics
+
+    def _store_result(self, result, temp_context, name, test, scores):
+        """Normalize, filter and score a single plugin Issue.
+
+        Returns False when the issue is suppressed by a nosec comment,
+        True otherwise. Plugins may return one Issue or a list of Issues.
+        """
+        nosec_tests_to_skip = self._get_nosecs_from_contexts(
+            temp_context, test_result=result
+        )
+
+        if isinstance(temp_context["filename"], bytes):
+            result.fname = temp_context["filename"].decode("utf-8")
+        else:
+            result.fname = temp_context["filename"]
+        result.fdata = temp_context["file_data"]
+
+        if result.lineno is None:
+            result.lineno = temp_context["lineno"]
+        if result.linerange == []:
+            result.linerange = temp_context["linerange"]
+        if result.col_offset == -1:
+            result.col_offset = temp_context["col_offset"]
+        result.end_col_offset = temp_context.get("end_col_offset", 0)
+        result.test = name
+        if result.test_id == "":
+            result.test_id = test._test_id
+
+        if nosec_tests_to_skip is not None:
+            if not nosec_tests_to_skip:
+                LOG.debug("skipped, nosec without test number")
+                self.metrics.note_nosec()
+                return False
+            if result.test_id in nosec_tests_to_skip:
+                LOG.debug(
+                    f"skipped, nosec for test {result.test_id}"
+                )
+                self.metrics.note_skipped_test()
+                return False
+
+        self.results.append(result)
+        LOG.debug("Issue identified by %s: %s", name, result)
+        sev = constants.RANKING.index(result.severity)
+        val = constants.RANKING_VALUES[result.severity]
+        scores["SEVERITY"][sev] += val
+        con = constants.RANKING.index(result.confidence)
+        val = constants.RANKING_VALUES[result.confidence]
+        scores["CONFIDENCE"][con] += val
+        return True
 
     def run_tests(self, raw_context, checktype):
         """Runs all tests for a certain type of check, for example
@@ -53,55 +103,16 @@ class BanditTester:
                     result = test(context)
 
                 if result is not None:
-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
-                        temp_context, test_result=result
-                    )
-
-                    if isinstance(temp_context["filename"], bytes):
-                        result.fname = temp_context["filename"].decode("utf-8")
+                    if isinstance(result, bandit_issue.Issue):
+                        result_list = [result]
                     else:
-                        result.fname = temp_context["filename"]
-                    result.fdata = temp_context["file_data"]
-
-                    if result.lineno is None:
-                        result.lineno = temp_context["lineno"]
-                    if result.linerange == []:
-                        result.linerange = temp_context["linerange"]
-                    if result.col_offset == -1:
-                        result.col_offset = temp_context["col_offset"]
-                    result.end_col_offset = temp_context.get(
-                        "end_col_offset", 0
-                    )
-                    result.test = name
-                    if result.test_id == "":
-                        result.test_id = test._test_id
-
-                    # don't skip the test if there was no nosec comment
-                    if nosec_tests_to_skip is not None:
-                        # If the set is empty then it means that nosec was
-                        # used without test number -> update nosecs counter.
-                        # If the test id is in the set of tests to skip,
-                        # log and increment the skip by test count.
-                        if not nosec_tests_to_skip:
-                            LOG.debug("skipped, nosec without test number")
-                            self.metrics.note_nosec()
+                        result_list = list(result)
+                    for issue_item in result_list:
+                        stored = self._store_result(
+                            issue_item, temp_context, name, test, scores
+                        )
+                        if stored is False:
                             continue
-                        if result.test_id in nosec_tests_to_skip:
-                            LOG.debug(
-                                f"skipped, nosec for test {result.test_id}"
-                            )
-                            self.metrics.note_skipped_test()
-                            continue
-
-                    self.results.append(result)
-
-                    LOG.debug("Issue identified by %s: %s", name, result)
-                    sev = constants.RANKING.index(result.severity)
-                    val = constants.RANKING_VALUES[result.severity]
-                    scores["SEVERITY"][sev] += val
-                    con = constants.RANKING.index(result.confidence)
-                    val = constants.RANKING_VALUES[result.confidence]
-                    scores["CONFIDENCE"][con] += val
                 else:
                     nosec_tests_to_skip = self._get_nosecs_from_contexts(
                         temp_context
