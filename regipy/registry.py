@@ -52,6 +52,7 @@ from regipy.utils import (
     boomerang_stream,
     convert_wintime,
     identify_hive_type,
+    normalize_registry_path,
     trim_registry_data_for_error_msg,
     try_decode_binary,
 )
@@ -142,6 +143,7 @@ class RegistryHive:
 
         self.partial_hive_path = None
         self.hive_type = None
+        self._read_observer = None
 
         with open(hive_path, "rb") as f:
             self._stream = BytesIO(f.read())
@@ -153,6 +155,7 @@ class RegistryHive:
             root_hbin = self.get_hbin_at_offset()
             root_hbin_cell = next(root_hbin.iter_cells(s))
             self.root = NKRecord(root_hbin_cell, s)
+            self.root._certificate_path = "\\"
         self.name = self.header.file_name
 
         if hive_type:
@@ -170,6 +173,22 @@ class RegistryHive:
 
         if partial_hive_path:
             self.partial_hive_path = partial_hive_path
+
+    def set_read_observer(self, observer):
+        """
+        Install a read observer that is notified whenever a key or value is read.
+
+        This is used by the derivation-certificate machinery. Passing None
+        removes the observer. Observers are intentionally opt-in so the default
+        parsing behavior is unchanged.
+        """
+        self._read_observer = observer
+        if hasattr(self, "root"):
+            self.root._read_observer = observer
+
+    def _notify_key_read(self, path, exists, key=None):
+        if self._read_observer is not None:
+            self._read_observer.on_key_read(path=normalize_registry_path(path), exists=exists, key=key)
 
     def recurse_subkeys(
         self,
@@ -277,6 +296,18 @@ class RegistryHive:
         return HBin(self._stream)
 
     def get_key(self, key_path):
+        try:
+            key = self._get_key(key_path)
+        except RegistryKeyNotFoundException:
+            self._notify_key_read(key_path, False)
+            raise
+
+        key._read_observer = self._read_observer
+        key._certificate_path = normalize_registry_path(key_path)
+        self._notify_key_read(key_path, True, key)
+        return key
+
+    def _get_key(self, key_path):
         if self.partial_hive_path:
             if key_path.startswith(self.partial_hive_path):
                 key_path = key_path.partition(self.partial_hive_path)[-1]
@@ -387,6 +418,8 @@ class NKRecord:
         stream.seek(cell.offset)
         self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
         self._stream = stream
+        self._read_observer = None
+        self._certificate_path = None
 
         # Sometimes the key names are ASCII and sometimes UTF-16 little endian
         if self.header.flags.KEY_COMP_NAME:
@@ -542,6 +575,23 @@ class NKRecord:
         buffer.seek(0)
         return buffer.read()
 
+    def _raw_value_for_certificate(self, vk, value, stream):
+        """
+        Return the original value bytes whose digest is recorded in a certificate.
+
+        Resident values keep their bytes inline in the VK data_offset field, and
+        big-data values are spread over segment blocks. Both are reconstructed
+        here so the digest covers the actual value, not just its decoded form.
+        """
+        if vk.data_size >= 0x80000000:
+            return Int32ul.build(vk.data_offset)[: vk.data_size - 0x80000000]
+        if vk.data_size > 0x3FD8 and value.value[:2] == b"db":
+            try:
+                return self._parse_indirect_block(stream, value)
+            except ConstError:
+                return value.value
+        return value.value
+
     def iter_values(self, as_json=False, max_len=MAX_LEN, trim_values=True):
         """
         Get the values of a subkey. Will raise if no values exist
@@ -665,6 +715,18 @@ class NKRecord:
                     actual_value = convert_wintime(Int64ul.parse(value.value), as_json=as_json)  # type: ignore[union-attr]
                 else:
                     actual_value = try_decode_binary(value.value, as_json=as_json, trim_values=trim_values)
+
+                if self._read_observer is not None:
+                    raw_value = self._raw_value_for_certificate(vk, value, substream)
+                    self._read_observer.on_value_read(
+                        path=self._certificate_path or f"\\{self.name}",
+                        name=value_name,
+                        value_type=data_type,
+                        raw_value=raw_value,
+                        size=vk.data_size,
+                        is_corrupted=is_corrupted,
+                    )
+
                 yield Value(
                     name=value_name,
                     value_type=data_type,

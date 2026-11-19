@@ -39,6 +39,27 @@ MAX_LEN: int = 256
 MAX_LEN_ERR_MSG_REGVALUE: int = 20
 
 
+def normalize_registry_path(path):
+    """
+    Normalize a registry key path for evidence identity comparisons.
+
+    Registry paths are case-insensitive, may use forward slashes, may omit the
+    leading backslash and may contain a trailing backslash.
+    """
+    if path is None:
+        return "\\"
+    normalized = str(path).replace("/", "\\").strip()
+    if not normalized:
+        return "\\"
+    if not normalized.startswith("\\"):
+        normalized = "\\" + normalized
+    while "\\\\" in normalized:
+        normalized = normalized.replace("\\\\", "\\")
+    if len(normalized) > 1:
+        normalized = normalized.rstrip("\\")
+    return normalized
+
+
 def calculate_sha1(file_path):
     sha1 = hashlib.sha1()
     with open(file_path, "rb") as f:

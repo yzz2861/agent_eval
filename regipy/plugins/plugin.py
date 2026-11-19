@@ -12,6 +12,10 @@ class Plugin:
     NAME: Optional[str] = None
     DESCRIPTION: Optional[str] = None
     COMPATIBLE_HIVE: Optional[str] = None
+    # Optional derivation-certificate metadata. Plugins that opt in bump this
+    # whenever their extraction rule changes and describe the rule in
+    # certificate_rule(). Plugins without it still run unchanged.
+    CERTIFICATE_RULE_VERSION: Optional[str] = None
 
     def __init_subclass__(cls) -> None:
         PLUGINS.add(cls)
@@ -39,6 +43,16 @@ class Plugin:
         Execute the plugin
         :return:
         """
+
+    def certificate_rule(self):
+        """
+        Return a JSON-serializable description of the rule that turns registry
+        evidence into this plugin's conclusion.
+
+        This is only used when a derivation certificate is requested; the
+        default implementation keeps existing plugins certificate-free.
+        """
+        return None
 
     def generate_timeline_artifacts(self):
         """

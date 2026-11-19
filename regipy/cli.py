@@ -9,6 +9,7 @@ from typing import Optional
 import click
 from tabulate import tabulate
 
+from regipy.certificate import verify_certificate
 from regipy.cli_utils import _normalize_subkey_fields, get_filtered_subkeys
 from regipy.exceptions import RegistryKeyNotFoundException
 from regipy.plugins.plugin import PLUGINS
@@ -238,7 +239,23 @@ def registry_dump(
     help="Continue running the remaining plugins when a plugin fails, "
     'recording the failure in the result as {"error": "<message>"} instead of aborting.',
 )
-def run_plugins(hive_path, output_path, plugins, hive_type, partial_hive_path, verbose, include_unvalidated, continue_on_error):
+@click.option(
+    "--certificate-output",
+    type=click.Path(exists=False, dir_okay=False, resolve_path=True),
+    required=False,
+    help="Write one derivation certificate per executed plugin to this JSON file.",
+)
+def run_plugins(
+    hive_path,
+    output_path,
+    plugins,
+    hive_type,
+    partial_hive_path,
+    verbose,
+    include_unvalidated,
+    continue_on_error,
+    certificate_output,
+):
     _setup_logging(verbose=verbose)
     registry_hive = RegistryHive(hive_path, hive_type=hive_type, partial_hive_path=partial_hive_path)
     click.secho(f"Loaded {len(PLUGINS)} plugins", fg="white")
@@ -265,12 +282,14 @@ def run_plugins(hive_path, output_path, plugins, hive_type, partial_hive_path, v
         )
 
     # Run relevant plugins
+    certificate_store = {} if certificate_output else None
     plugin_results = run_relevant_plugins(
         registry_hive,
         as_json=True,
         plugins=plugins,
         include_unvalidated=include_unvalidated,
         continue_on_error=continue_on_error,
+        certificate_store=certificate_store,
     )
 
     # If output path was set, dump results to disk
@@ -283,10 +302,44 @@ def run_plugins(hive_path, output_path, plugins, hive_type, partial_hive_path, v
             return
     else:
         print(json.dumps(plugin_results, indent=4))
+
+    if certificate_output:
+        try:
+            with open(certificate_output, "w") as f:
+                f.write(json.dumps(certificate_store, indent=4))
+        except OSError as e:
+            logger.error(f"Failed to write certificate output file {certificate_output}: {e}")
+            return
+
     click.secho(
         f"Finished: {len(plugin_results)}/{len(PLUGINS)} plugins matched the hive type",
         fg="green",
     )
+
+
+@click.command()
+@click.argument(
+    "hive_path",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=True,
+)
+@click.argument(
+    "certificate_path",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=True,
+)
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Verbosity")
+def verify_derivation_certificate(hive_path, certificate_path, verbose):
+    """Verify a derivation certificate against a registry hive."""
+    _setup_logging(verbose=verbose)
+    with open(certificate_path) as f:
+        certificate = json.load(f)
+
+    registry_hive = RegistryHive(hive_path)
+    result = verify_certificate(certificate, registry_hive)
+    click.secho(json.dumps(result.to_dict(), indent=4))
+    if not result.verified:
+        raise click.exceptions.Exit(1)
 
 
 @click.command()

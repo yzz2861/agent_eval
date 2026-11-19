@@ -3,6 +3,7 @@ import logging
 from typing import Any, Callable, Union
 
 from regipy import NKRecord
+from regipy.certificate import run_plugin_with_certificate
 from regipy.plugins.plugin import PLUGINS
 from regipy.plugins.validation_status import (
     is_plugin_validated,
@@ -91,6 +92,7 @@ def run_relevant_plugins(
     plugins=None,
     include_unvalidated=False,
     continue_on_error=False,
+    certificate_store=None,
 ):
     """
     Execute the relevant plugins on the hive
@@ -106,6 +108,9 @@ def run_relevant_plugins(
                               {"error": "<message>"} and the run continues. If False (default),
                               the original behavior applies: ModuleNotFoundError is logged and
                               the plugin is skipped, and any other exception propagates.
+    :param certificate_store: Optional dict. When provided, each successfully executed
+                              plugin gets a derivation certificate stored under its name.
+                              The default (None) keeps the original behavior and return type.
     :return: The result, as dict
     """
     plugin_results = {}
@@ -126,7 +131,10 @@ def run_relevant_plugins(
 
         if plugin.can_run():
             try:
-                plugin.run()
+                if certificate_store is not None:
+                    certificate_store[plugin.NAME] = run_plugin_with_certificate(plugin)
+                else:
+                    plugin.run()
                 plugin_results[plugin.NAME] = plugin.entries
             except ModuleNotFoundError as e:
                 logger.error(f"Plugin {plugin.NAME} has missing dependencies")

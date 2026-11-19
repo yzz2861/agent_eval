@@ -1,5 +1,6 @@
 import logging
 
+from regipy.certificate import key_evidence_id, value_evidence_id
 from regipy.hive_types import NTUSER_HIVE_TYPE
 from regipy.plugins.plugin import Plugin
 from regipy.utils import get_subkey_values_from_list
@@ -30,6 +31,13 @@ class NTUserPersistencePlugin(Plugin):
     NAME = "ntuser_persistence"
     DESCRIPTION = "Retrieve values from known persistence subkeys in NTUSER hive"
     COMPATIBLE_HIVE = NTUSER_HIVE_TYPE
+    CERTIFICATE_RULE_VERSION = "1"
+
+    def certificate_rule(self):
+        return {
+            "kind": "known_persistence_subkeys",
+            "paths": list(PERSISTENCE_ENTRIES),
+        }
 
     def run(self):
         self.entries = get_subkey_values_from_list(
@@ -38,3 +46,29 @@ class NTUserPersistencePlugin(Plugin):
             as_json=self.as_json,
             trim_values=False,
         )
+
+        recorder = getattr(self, "certificate_recorder", None)
+        if recorder is None:
+            return
+
+        for path in PERSISTENCE_ENTRIES:
+            entry = self.entries.get(path)
+            key_id = key_evidence_id(path)
+            if entry is None:
+                recorder.record_decision(
+                    step="persistence_path",
+                    outcome={"path": path, "decision": "skip", "reason": "key_missing_or_empty"},
+                    evidence_ids=[key_id],
+                )
+                continue
+
+            value_ids = [value_evidence_id(path, value["name"]) for value in entry["values"]]
+            recorder.record_decision(
+                step="persistence_path",
+                outcome={
+                    "path": path,
+                    "decision": "include",
+                    "values_count": len(entry["values"]),
+                },
+                evidence_ids=[key_id, *value_ids],
+            )

@@ -63,6 +63,7 @@ regipy-parse-header = "regipy.cli:parse_header"
 regipy-dump = "regipy.cli:registry_dump"
 regipy-plugins-run = "regipy.cli:run_plugins"
 regipy-plugins-list = "regipy.cli:list_plugins"
+regipy-verify-certificate = "regipy.cli:verify_derivation_certificate"
 regipy-diff = "regipy.cli:reg_diff"
 regipy-process-transaction-logs = "regipy.cli:parse_transaction_log"
 
