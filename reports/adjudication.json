@@ -1,0 +1,239 @@
+{
+  "generated_at": "2026-11-19T16:54:03Z",
+  "gate_failed": true,
+  "summary": {
+    "legacy_debt": 2,
+    "escalated": 2,
+    "cross_boundary_unaccepted": 1,
+    "new_finding": 1,
+    "resolved_legacy": 1,
+    "unknown_risk_directories": 2,
+    "blocking": 4
+  },
+  "adjudications": [
+    {
+      "fingerprint": "f3ce6772b534babc",
+      "test_id": "B105",
+      "test_name": "hardcoded_password_string",
+      "filename": "svc/portal/auth.py",
+      "line_number": 14,
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_text": "Possible hardcoded password: \"hunter2\"",
+      "issue_cwe": {
+        "id": 259
+      },
+      "disposition": "legacy_debt",
+      "blocks_gate": false,
+      "owner": "portal-team",
+      "legacy_severity": "LOW",
+      "legacy_confidence": "HIGH",
+      "legacy_filename": "monolith/portal/auth.py",
+      "handoff_record": {
+        "record_id": "HO-2026-0117",
+        "old_path": "monolith/portal",
+        "new_path": "svc/portal",
+        "from_team": "platform-team",
+        "to_team": "portal-team",
+        "date": "2026-11-17",
+        "ticket": "SEC-4821",
+        "note": "portal extraction accepted by portal-team, existing findings carried as debt"
+      },
+      "reasons": [
+        "matched legacy finding from previous report at monolith/portal/auth.py",
+        "ownership moved via handoff record HO-2026-0117 (platform-team -> portal-team)"
+      ]
+    },
+    {
+      "fingerprint": "0be21c52a57d8432",
+      "test_id": "B608",
+      "test_name": "django_markup_safe",
+      "filename": "svc/portal/views.py",
+      "line_number": 51,
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "Use of mark_safe() may expose cross-site scripting vulnerabilities",
+      "issue_cwe": {
+        "id": 80
+      },
+      "disposition": "escalated",
+      "blocks_gate": true,
+      "owner": "portal-team",
+      "legacy_severity": "MEDIUM",
+      "legacy_confidence": "MEDIUM",
+      "legacy_filename": "monolith/portal/views.py",
+      "handoff_record": {
+        "record_id": "HO-2026-0117",
+        "old_path": "monolith/portal",
+        "new_path": "svc/portal",
+        "from_team": "platform-team",
+        "to_team": "portal-team",
+        "date": "2026-11-17",
+        "ticket": "SEC-4821",
+        "note": "portal extraction accepted by portal-team, existing findings carried as debt"
+      },
+      "reasons": [
+        "matched legacy finding from previous report at monolith/portal/views.py",
+        "ownership moved via handoff record HO-2026-0117 (platform-team -> portal-team)",
+        "severity escalated MEDIUM -> HIGH",
+        "confidence escalated MEDIUM -> HIGH"
+      ]
+    },
+    {
+      "fingerprint": "ac2b684d453a2650",
+      "test_id": "B321",
+      "test_name": "blacklist_calls",
+      "filename": "svc/portal/api.py",
+      "line_number": 33,
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "Using xml to parse untrusted XML data is known to be vulnerable to XML attacks",
+      "issue_cwe": {
+        "id": 20
+      },
+      "disposition": "new_finding",
+      "blocks_gate": true,
+      "owner": "portal-team",
+      "legacy_severity": null,
+      "legacy_confidence": null,
+      "legacy_filename": null,
+      "handoff_record": {
+        "record_id": "HO-2026-0117",
+        "old_path": "monolith/portal",
+        "new_path": "svc/portal",
+        "from_team": "platform-team",
+        "to_team": "portal-team",
+        "date": "2026-11-17",
+        "ticket": "SEC-4821",
+        "note": "portal extraction accepted by portal-team, existing findings carried as debt"
+      },
+      "reasons": [
+        "no matching finding in the legacy report",
+        "directory moved under handoff HO-2026-0117 but the finding was not part of the accepted legacy backlog"
+      ]
+    },
+    {
+      "fingerprint": "b1e395b2855eadb7",
+      "test_id": "B324",
+      "test_name": "hashlib_insecure_hash_func",
+      "filename": "svc/billing/payments.py",
+      "line_number": 21,
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "Use of weak MD5 hash for security. Consider usedforsecurity=False",
+      "issue_cwe": {
+        "id": 327
+      },
+      "disposition": "legacy_debt",
+      "blocks_gate": false,
+      "owner": "billing-team",
+      "legacy_severity": "MEDIUM",
+      "legacy_confidence": "HIGH",
+      "legacy_filename": "svc/billing/payments.py",
+      "handoff_record": null,
+      "reasons": [
+        "matched legacy finding from previous report at svc/billing/payments.py"
+      ]
+    },
+    {
+      "fingerprint": "3b3806f581e1f070",
+      "test_id": "B106",
+      "test_name": "hardcoded_password_funcarg",
+      "filename": "svc/billing/payments.py",
+      "line_number": 58,
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "Possible hardcoded password used as function argument",
+      "issue_cwe": {
+        "id": 259
+      },
+      "disposition": "escalated",
+      "blocks_gate": true,
+      "owner": "billing-team",
+      "legacy_severity": "LOW",
+      "legacy_confidence": "HIGH",
+      "legacy_filename": "svc/billing/payments.py",
+      "handoff_record": null,
+      "reasons": [
+        "matched legacy finding from previous report at svc/billing/payments.py",
+        "severity escalated LOW -> HIGH"
+      ]
+    },
+    {
+      "fingerprint": "2bd18de2679d7e17",
+      "test_id": "B602",
+      "test_name": "subprocess_popen_with_shell_equals_true",
+      "filename": "svc/billing/payments.py",
+      "line_number": 77,
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "subprocess call with shell=True identified, security issue.",
+      "issue_cwe": {
+        "id": 78
+      },
+      "disposition": "cross_boundary_unaccepted",
+      "blocks_gate": true,
+      "owner": "billing-team",
+      "legacy_severity": "HIGH",
+      "legacy_confidence": "HIGH",
+      "legacy_filename": "tools/admin/runner.py",
+      "handoff_record": null,
+      "reasons": [
+        "matched legacy finding from previous report at tools/admin/runner.py",
+        "ownership changed from sre-team to billing-team without a handoff record; legacy debt cannot carry over"
+      ]
+    }
+  ],
+  "resolved_legacy": [
+    {
+      "fingerprint": "9094bb00a373262c",
+      "test_id": "B110",
+      "test_name": "try_except_pass",
+      "filename": "monolith/portal/auth.py",
+      "line_number": 88,
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_text": "Try, Except, Pass detected.",
+      "issue_cwe": {
+        "id": 703
+      },
+      "owner": "portal-team",
+      "note": "legacy finding absent from the current scan; treat as resolved or verify before closing"
+    }
+  ],
+  "coverage": [
+    {
+      "directory": "svc/portal",
+      "status": "scanned",
+      "risk_unknown": false,
+      "scanned_file_count": 3,
+      "failed_file_count": 0,
+      "failed_files": [],
+      "reasons": []
+    },
+    {
+      "directory": "svc/billing",
+      "status": "partial",
+      "risk_unknown": true,
+      "scanned_file_count": 2,
+      "failed_file_count": 1,
+      "failed_files": [
+        "svc/billing/reports.py"
+      ],
+      "reasons": [
+        "svc/billing/reports.py: exception while scanning file: SyntaxError (source tree mid-refactor)"
+      ]
+    },
+    {
+      "directory": "tools/admin",
+      "status": "not_scanned",
+      "risk_unknown": true,
+      "scanned_file_count": 0,
+      "failed_file_count": 0,
+      "failed_files": [],
+      "reasons": [
+        "directory listed in scan manifest but absent from this run"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+BANDIT TAKEOVER ADJUDICATION - APPROVAL DETAIL
+Generated at: 2026-11-19T16:54:03Z
+Gate decision: FAIL
+
+Summary:
+  - blocking: 4
+  - cross_boundary_unaccepted: 1
+  - escalated: 2
+  - legacy_debt: 2
+  - new_finding: 1
+  - resolved_legacy: 1
+  - unknown_risk_directories: 2
+
+Findings by responsible owner:
+
+Owner: billing-team
+  accepted from backlog: 1, must fix now: 2
+  Accepted legacy debt (non-blocking):
+  - [MEDIUM/HIGH] B324 hashlib_insecure_hash_func @ svc/billing/payments.py:21
+    fingerprint: b1e395b2855eadb7
+    issue: Use of weak MD5 hash for security. Consider usedforsecurity=False
+    reason: matched legacy finding from previous report at svc/billing/payments.py
+  Escalated legacy finding - fix now:
+  - [HIGH/HIGH] B106 hardcoded_password_funcarg @ svc/billing/payments.py:58
+    fingerprint: 3b3806f581e1f070
+    issue: Possible hardcoded password used as function argument
+    reason: matched legacy finding from previous report at svc/billing/payments.py
+    reason: severity escalated LOW -> HIGH
+  Cross-boundary move without handoff record - fix now:
+  - [HIGH/HIGH] B602 subprocess_popen_with_shell_equals_true @ svc/billing/payments.py:77
+    fingerprint: 2bd18de2679d7e17
+    issue: subprocess call with shell=True identified, security issue.
+    reason: matched legacy finding from previous report at tools/admin/runner.py
+    reason: ownership changed from sre-team to billing-team without a handoff record; legacy debt cannot carry over
+
+Owner: portal-team
+  accepted from backlog: 1, must fix now: 2
+  Accepted legacy debt (non-blocking):
+  - [LOW/HIGH] B105 hardcoded_password_string @ svc/portal/auth.py:14
+    fingerprint: f3ce6772b534babc
+    issue: Possible hardcoded password: "hunter2"
+    reason: matched legacy finding from previous report at monolith/portal/auth.py
+    reason: ownership moved via handoff record HO-2026-0117 (platform-team -> portal-team)
+    handoff: HO-2026-0117 (platform-team -> portal-team, 2026-11-17)
+  Escalated legacy finding - fix now:
+  - [HIGH/HIGH] B608 django_markup_safe @ svc/portal/views.py:51
+    fingerprint: 0be21c52a57d8432
+    issue: Use of mark_safe() may expose cross-site scripting vulnerabilities
+    reason: matched legacy finding from previous report at monolith/portal/views.py
+    reason: ownership moved via handoff record HO-2026-0117 (platform-team -> portal-team)
+    reason: severity escalated MEDIUM -> HIGH
+    reason: confidence escalated MEDIUM -> HIGH
+    handoff: HO-2026-0117 (platform-team -> portal-team, 2026-11-17)
+  New finding - fix now:
+  - [MEDIUM/HIGH] B321 blacklist_calls @ svc/portal/api.py:33
+    fingerprint: ac2b684d453a2650
+    issue: Using xml to parse untrusted XML data is known to be vulnerable to XML attacks
+    reason: no matching finding in the legacy report
+    reason: directory moved under handoff HO-2026-0117 but the finding was not part of the accepted legacy backlog
+    handoff: HO-2026-0117 (platform-team -> portal-team, 2026-11-17)
+
+Directories with unknown risk (rescanning required):
+  - svc/billing [partial]
+      svc/billing/reports.py: exception while scanning file: SyntaxError (source tree mid-refactor)
+  - tools/admin [not_scanned]
+      directory listed in scan manifest but absent from this run
+
+Legacy findings absent from this scan (verify before close):
+  - B110 @ monolith/portal/auth.py (owner: portal-team)

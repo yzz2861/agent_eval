@@ -1,0 +1,34 @@
+# Ownership and handoff policy for the takeover gate example.
+# Team boundaries after the repository split.
+ownership:
+  - directory: svc/portal
+    team: portal-team
+  - directory: svc/billing
+    team: billing-team
+  - directory: tools/admin
+    team: sre-team
+  - directory: svc
+    team: platform-team
+
+# Historical prefixes that were renamed during the split.
+path_moves:
+  monolith/portal: svc/portal
+
+# Explicit, accepted handoff records. A finding may keep its legacy-debt
+# status across an ownership boundary only when a record exists here.
+handoffs:
+  - record_id: HO-2026-0117
+    old_path: monolith/portal
+    new_path: svc/portal
+    from_team: platform-team
+    to_team: portal-team
+    date: "2026-11-17"
+    ticket: SEC-4821
+    note: portal extraction accepted by portal-team, existing findings carried as debt
+
+# What this scan is supposed to cover. Directories missing from the run are
+# reported as unknown risk rather than implicitly clean.
+scan_manifest:
+  - svc/portal
+  - svc/billing
+  - tools/admin

@@ -1,0 +1,141 @@
+{
+  "generated_at": "2026-11-10T08:00:00Z",
+  "errors": [],
+  "metrics": {
+    "_totals": {
+      "SEVERITY.HIGH": 1,
+      "SEVERITY.MEDIUM": 2,
+      "SEVERITY.LOW": 2,
+      "CONFIDENCE.HIGH": 4,
+      "CONFIDENCE.MEDIUM": 1,
+      "loc": 120,
+      "nosec": 0
+    },
+    "monolith/portal/auth.py": {
+      "loc": 30,
+      "nosec": 0
+    },
+    "monolith/portal/views.py": {
+      "loc": 40,
+      "nosec": 0
+    },
+    "svc/billing/payments.py": {
+      "loc": 25,
+      "nosec": 0
+    },
+    "tools/admin/runner.py": {
+      "loc": 25,
+      "nosec": 0
+    }
+  },
+  "results": [
+    {
+      "filename": "monolith/portal/auth.py",
+      "line_number": 12,
+      "line_range": [
+        12
+      ],
+      "test_id": "B105",
+      "test_name": "hardcoded_password_string",
+      "issue_text": "Possible hardcoded password: \"hunter2\"",
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 259,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "12 password = \"hunter2\"",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "monolith/portal/views.py",
+      "line_number": 44,
+      "line_range": [
+        44
+      ],
+      "test_id": "B608",
+      "test_name": "django_markup_safe",
+      "issue_text": "Use of mark_safe() may expose cross-site scripting vulnerabilities",
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 80,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "44 html = mark_safe(user_input)",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/billing/payments.py",
+      "line_number": 21,
+      "line_range": [
+        21
+      ],
+      "test_id": "B324",
+      "test_name": "hashlib_insecure_hash_func",
+      "issue_text": "Use of weak MD5 hash for security. Consider usedforsecurity=False",
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 327,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "21 digest = hashlib.md5(payload).hexdigest()",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/billing/payments.py",
+      "line_number": 58,
+      "line_range": [
+        58
+      ],
+      "test_id": "B106",
+      "test_name": "hardcoded_password_funcarg",
+      "issue_text": "Possible hardcoded password used as function argument",
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 259,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "58 connect(password=\"changeme\")",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "tools/admin/runner.py",
+      "line_number": 9,
+      "line_range": [
+        9
+      ],
+      "test_id": "B602",
+      "test_name": "subprocess_popen_with_shell_equals_true",
+      "issue_text": "subprocess call with shell=True identified, security issue.",
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "9 subprocess.Popen(cmd, shell=True)",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "monolith/portal/auth.py",
+      "line_number": 88,
+      "line_range": [
+        88
+      ],
+      "test_id": "B110",
+      "test_name": "try_except_pass",
+      "issue_text": "Try, Except, Pass detected.",
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 703,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "88 except Exception: pass",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    }
+  ]
+}

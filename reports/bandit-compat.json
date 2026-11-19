@@ -1,0 +1,150 @@
+{
+  "errors": [
+    {
+      "filename": "svc/billing/reports.py",
+      "reason": "exception while scanning file: SyntaxError (source tree mid-refactor)"
+    }
+  ],
+  "results": [
+    {
+      "filename": "svc/portal/auth.py",
+      "line_number": 14,
+      "line_range": [
+        14
+      ],
+      "test_id": "B105",
+      "test_name": "hardcoded_password_string",
+      "issue_text": "Possible hardcoded password: \"hunter2\"",
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 259,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "14 password = \"hunter2\"",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/portal/views.py",
+      "line_number": 51,
+      "line_range": [
+        51
+      ],
+      "test_id": "B608",
+      "test_name": "django_markup_safe",
+      "issue_text": "Use of mark_safe() may expose cross-site scripting vulnerabilities",
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 80,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "51 html = mark_safe(user_input)",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/portal/api.py",
+      "line_number": 33,
+      "line_range": [
+        33
+      ],
+      "test_id": "B321",
+      "test_name": "blacklist_calls",
+      "issue_text": "Using xml to parse untrusted XML data is known to be vulnerable to XML attacks",
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 20,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "33 tree = xml.etree.parse(upload)",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/billing/payments.py",
+      "line_number": 21,
+      "line_range": [
+        21
+      ],
+      "test_id": "B324",
+      "test_name": "hashlib_insecure_hash_func",
+      "issue_text": "Use of weak MD5 hash for security. Consider usedforsecurity=False",
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 327,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "21 digest = hashlib.md5(payload).hexdigest()",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/billing/payments.py",
+      "line_number": 58,
+      "line_range": [
+        58
+      ],
+      "test_id": "B106",
+      "test_name": "hardcoded_password_funcarg",
+      "issue_text": "Possible hardcoded password used as function argument",
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 259,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "58 connect(password=\"changeme\")",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    },
+    {
+      "filename": "svc/billing/payments.py",
+      "line_number": 77,
+      "line_range": [
+        77
+      ],
+      "test_id": "B602",
+      "test_name": "subprocess_popen_with_shell_equals_true",
+      "issue_text": "subprocess call with shell=True identified, security issue.",
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://bandit.readthedocs.io/en/latest/"
+      },
+      "code": "77 subprocess.Popen(cmd, shell=True)",
+      "more_info": "https://bandit.readthedocs.io/en/latest/"
+    }
+  ],
+  "metrics": {
+    "_totals": {
+      "SEVERITY.HIGH": 2,
+      "SEVERITY.MEDIUM": 2,
+      "SEVERITY.LOW": 2,
+      "CONFIDENCE.HIGH": 5,
+      "CONFIDENCE.MEDIUM": 1,
+      "loc": 150,
+      "nosec": 0
+    },
+    "svc/portal/auth.py": {
+      "loc": 30,
+      "nosec": 0
+    },
+    "svc/portal/views.py": {
+      "loc": 40,
+      "nosec": 0
+    },
+    "svc/portal/api.py": {
+      "loc": 20,
+      "nosec": 0
+    },
+    "svc/billing/payments.py": {
+      "loc": 25,
+      "nosec": 0
+    },
+    "svc/billing/reports.py": {
+      "loc": 10,
+      "nosec": 0
+    }
+  },
+  "generated_at": "2026-11-20T02:00:00Z"
+}
