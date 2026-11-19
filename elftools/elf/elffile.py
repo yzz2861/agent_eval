@@ -39,6 +39,7 @@ from .sections import (
     SymbolTableSection,
 )
 from .segments import InterpSegment, NoteSegment, Segment
+from .sparse import SparseAddressSpace
 from .structs import ELFStructs
 
 if TYPE_CHECKING:
@@ -273,6 +274,17 @@ class ELFFile:
             if (start >= seg['p_vaddr'] and
                 end <= seg['p_vaddr'] + seg['p_filesz']):
                 yield start - seg['p_vaddr'] + seg['p_offset']
+
+    def sparse_address_space(self) -> SparseAddressSpace:
+        """ Sparse virtual address space built from the PT_LOAD segments.
+
+            The returned object reads the core (or other ELF) file lazily and
+            distinguishes captured file bytes, loader-guaranteed zero fill and
+            ranges the dump did not capture, instead of presenting unmapped
+            memory as zero. Overlapping segments with disagreeing contents are
+            reported as conflicts rather than resolved by guessing.
+        """
+        return SparseAddressSpace.from_elf(self)
 
     def has_dwarf_info(self, strict: bool = False) -> bool:
         """ Check whether this file appears to have debugging information.

@@ -1,0 +1,8 @@
+Processing file: ./examples/sample_exe64.elf
+  PT_LOAD segments:
+    #0: vaddr=0x400000 memsz=0x6c4 file offset 0x0
+    #1: vaddr=0x600e18 memsz=0x218 file offset 0xe18
+  pointer chain from 0x0:
+    [0x0] -> ? (unknown (missing 0x0-0x8))
+  stop reason: unknown
+  proven hops: 1
