@@ -1,0 +1,26 @@
+{
+  "description": "Only a file-presence trace exists (AmCache). AmCache alone must never prove execution.",
+  "windows": {
+    "amcache": {"start": "2020-01-01T00:00:00+00:00", "end": "2020-02-01T00:00:00+00:00", "source_name": "amcache"}
+  },
+  "volume_mappings": {},
+  "plugin_outputs": {
+    "amcache": [
+      {
+        "full_path": "C:\\\\Tools\\\\onlyfile.exe",
+        "timestamp": "2020-01-20T00:00:00+00:00",
+        "sha1": "0123456789abcdef0123456789abcdef01234567"
+      }
+    ]
+  },
+  "expected": [
+    {
+      "path": "c:\\\\tools\\\\onlyfile.exe",
+      "identity_key": null,
+      "verdict": "present",
+      "minimal_support": ["amcache:0"],
+      "counter_reasons": [],
+      "coverage_gap_sources": []
+    }
+  ]
+}

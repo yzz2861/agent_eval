@@ -1,0 +1,49 @@
+{
+  "description": "Execution evidence is compatible across hives: UserAssist positive run counter plus machine-wide AmCache file presence, same user, overlapping acquisition windows and equivalent paths.",
+  "windows": {
+    "user_assist": {"start": "2020-01-01T00:00:00+00:00", "end": "2020-02-01T00:00:00+00:00", "source_name": "ntuser-alice"},
+    "amcache": {"start": "2020-01-15T00:00:00+00:00", "end": "2020-02-15T00:00:00+00:00", "source_name": "amcache"}
+  },
+  "identities": {
+    "user_assist": {"sid": "S-1-5-21-1-1001", "username": "alice", "hive_origin": "NTUSER-alice"}
+  },
+  "volume_mappings": {},
+  "plugin_outputs": {
+    "user_assist": [
+      {
+        "name": "%SYSTEM32%\\cmd.exe",
+        "run_counter": 4,
+        "focus_count": 2,
+        "total_focus_time_ms": 12000,
+        "session_id": 0,
+        "timestamp": "2020-01-25T00:00:00+00:00"
+      }
+    ],
+    "amcache": [
+      {
+        "full_path": "C:\\Windows\\System32\\cmd.exe",
+        "timestamp": "2020-01-20T00:00:00+00:00",
+        "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "expected": [
+    {
+      "path": "c:\\windows\\system32\\cmd.exe",
+      "identity_key": "sid:S-1-5-21-1-1001",
+      "verdict": "execution_evidenced",
+      "minimal_support": ["user_assist:0"],
+      "supporting_includes": ["amcache:0"],
+      "counter_reasons": [],
+      "coverage_gap_sources": []
+    },
+    {
+      "path": "c:\\windows\\system32\\cmd.exe",
+      "identity_key": null,
+      "verdict": "present",
+      "minimal_support": ["amcache:0"],
+      "counter_reasons": ["identity_mismatch"],
+      "coverage_gap_sources": ["user_assist"]
+    }
+  ]
+}

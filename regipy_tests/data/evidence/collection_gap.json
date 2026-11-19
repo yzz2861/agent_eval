@@ -1,0 +1,42 @@
+{
+  "description": "Acquisition gaps: AmCache and BAM describe disjoint windows and ShimCache has no recorded window, so the facts cannot be spliced across hives. Unknown subjects must remain insufficient rather than being ruled out as not executed.",
+  "windows": {
+    "amcache": {"start": "2020-01-01T00:00:00+00:00", "end": "2020-02-01T00:00:00+00:00", "source_name": "amcache-early"},
+    "background_activity_moderator": {"start": "2021-06-01T00:00:00+00:00", "end": "2021-07-01T00:00:00+00:00", "source_name": "bam-late"},
+    "shimcache": {"start": null, "end": null, "source_name": "shimcache-no-window"}
+  },
+  "volume_mappings": {"\\Device\\HarddiskVolume2": "C:"},
+  "plugin_outputs": {
+    "amcache": [
+      {
+        "full_path": "C:\\Tools\\gap.exe",
+        "timestamp": "2020-01-20T00:00:00+00:00"
+      }
+    ],
+    "background_activity_moderator": [
+      {
+        "executable": "\\Device\\HarddiskVolume2\\Tools\\gap.exe",
+        "sid": "S-1-5-21-1-1001",
+        "timestamp": "2021-06-20T00:00:00+00:00"
+      }
+    ],
+    "shimcache": [
+      {
+        "path": "\\??\\C:\\Tools\\gap.exe",
+        "last_mod_date": "2020-01-10T00:00:00+00:00",
+        "exec_flag": "True"
+      }
+    ]
+  },
+  "unobserved_query": {
+    "path": "C:\\Never\\Observed.exe"
+  },
+  "expected_conclusions": [
+    {"path": "c:\\tools\\gap.exe", "identity_key": null, "verdict": "present"},
+    {"path": "c:\\tools\\gap.exe", "identity_key": null, "verdict": "possibly_executed"},
+    {"path": "c:\\tools\\gap.exe", "identity_key": "sid:S-1-5-21-1-1001", "verdict": "present"},
+    {"path": "c:\\tools\\gap.exe", "identity_key": "sid:S-1-5-21-1-1001", "verdict": "execution_evidenced"},
+    {"path": "c:\\tools\\gap.exe", "identity_key": "sid:S-1-5-21-1-1001", "verdict": "possibly_executed"}
+  ],
+  "expected_counter_reasons": ["window_disjoint", "window_unknown", "identity_mismatch"]
+}

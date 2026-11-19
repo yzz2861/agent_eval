@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in execution evidence adjudication API (`regipy.evidence`)**
+  Normalizes existing plugin output into conservative facts that support explicit propositions (`file_present`, `execution_possible`, `execution_occurred`) and combines them under fixed rules into four verdicts: 证据不足/`insufficient_evidence`, 存在/`present`, 可能执行/`possibly_executed`, 已获执行证据/`execution_evidenced`.
+  - Four trace sources are supported: AmCache (machine-wide file presence only, never execution on its own), UserAssist (strong only with a positive `run_counter`; zero counters stay weak), BAM (strong per-SID execution), and ShimCache (weak machine-wide).
+  - Cross-hive facts are only spliced when user identity, normalized path and acquisition window all align. Device paths require an explicit volume mapping, per-user placeholders such as `%APPDATA%` never match, and disjoint or unrecorded windows produce `window_disjoint`/`window_unknown` counter-evidence instead of being merged. Same-name programs observed under different SIDs always produce separate conclusions.
+  - Every conclusion exposes a minimal support set, the full supporting fact ids, explicit counter-evidence with reasons, coverage gaps, and retained conflicts (contradictions are never collapsed by timestamp). Unobserved subjects remain `insufficient_evidence`; absence is never treated as negation.
+  - Plugin output is unchanged: adjudication is a separate opt-in API and all existing plugins keep their deterministic entries. Offline JSON fixtures in `regipy_tests/data/evidence/` cover file-presence-only, compatible execution evidence, same-name/different-user, and collection-gap scenarios.
+
 ## [6.5.2] - 2026-10-17
 
 ### Fixed

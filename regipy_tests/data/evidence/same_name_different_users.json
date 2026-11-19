@@ -1,0 +1,45 @@
+{
+  "description": "The same executable name is observed for two distinct SIDs. Facts must never be spliced into one process: each user gets an independent conclusion with the other SID held as identity counter-evidence.",
+  "windows": {
+    "background_activity_moderator": {"start": "2020-01-01T00:00:00+00:00", "end": "2020-02-01T00:00:00+00:00", "source_name": "SYSTEM"}
+  },
+  "volume_mappings": {"\\Device\\HarddiskVolume2": "C:"},
+  "plugin_outputs": {
+    "background_activity_moderator": [
+      {
+        "executable": "\\Device\\HarddiskVolume2\\Windows\\System32\\cmd.exe",
+        "sid": "S-1-5-21-1-1001",
+        "timestamp": "2020-01-27T00:00:00+00:00",
+        "sequence_number": 9,
+        "version": 1,
+        "key_path": "\\ControlSet001\\Services\\bam\\state\\UserSettings\\S-1-5-21-1-1001"
+      },
+      {
+        "executable": "\\Device\\HarddiskVolume2\\Windows\\System32\\cmd.exe",
+        "sid": "S-1-5-21-1-1002",
+        "timestamp": "2020-01-28T00:00:00+00:00",
+        "sequence_number": 9,
+        "version": 1,
+        "key_path": "\\ControlSet001\\Services\\bam\\state\\UserSettings\\S-1-5-21-1-1002"
+      }
+    ]
+  },
+  "expected": [
+    {
+      "path": "c:\\windows\\system32\\cmd.exe",
+      "identity_key": "sid:S-1-5-21-1-1001",
+      "verdict": "execution_evidenced",
+      "minimal_support": ["background_activity_moderator:0"],
+      "counter_reasons": ["identity_mismatch"],
+      "coverage_gap_sources": []
+    },
+    {
+      "path": "c:\\windows\\system32\\cmd.exe",
+      "identity_key": "sid:S-1-5-21-1-1002",
+      "verdict": "execution_evidenced",
+      "minimal_support": ["background_activity_moderator:1"],
+      "counter_reasons": ["identity_mismatch"],
+      "coverage_gap_sources": []
+    }
+  ]
+}
