@@ -40,3 +40,12 @@ from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:ski
 
 #
 from RestrictedPython.Eval import RestrictionCapableEval
+
+# Revocable host capabilities (integration layer)
+from RestrictedPython.Capabilities import CapabilityDomain  # isort:skip
+from RestrictedPython.Capabilities import CapabilityRevokedError  # isort:skip
+from RestrictedPython.Capabilities import RevocableCapability  # isort:skip
+from RestrictedPython.Capabilities import RevocableDict  # isort:skip
+from RestrictedPython.Capabilities import RevocableList  # isort:skip
+from RestrictedPython.Capabilities import guarded_getitem  # isort:skip
+from RestrictedPython.Capabilities import revocable_generator  # isort:skip

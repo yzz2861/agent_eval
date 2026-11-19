@@ -4,8 +4,18 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
-
+- Add the ``RestrictedPython.Capabilities`` integration layer for revocable
+  host capabilities.  A ``CapabilityDomain`` owns a generation counter; host
+  callables shared with restricted code are wrapped in
+  ``RevocableCapability`` and re-validated against the current generation
+  on every call, so references saved through aliases, closures, guarded
+  containers (``RevocableDict`` / ``RevocableList``) or generators
+  (``revocable_generator`` / ``guarded_iter``) fail with
+  ``CapabilityRevokedError`` after ``revoke()``.  Revocation is scoped to
+  one domain, is linearized through the optional ``before_revoke`` hook
+  and never rolls back side effects of calls that already passed the check.
+  The default compile API is unchanged and the layer does not claim to
+  sandbox arbitrary Python on its own.
 
 9.0 (2026-11-04)
 ----------------

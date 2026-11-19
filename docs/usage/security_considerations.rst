@@ -46,6 +46,12 @@ You gain more by auditing what you put into ``globals`` and ``__builtins__``
 than by relying on the guards.
 The guards are a second line of defence, not the boundary.
 
+Once a host does share a callable, plain Python references (aliases, closure
+cells, containers, suspended generators) cannot be taken back by themselves.
+The :ref:`revocable_capabilities` integration layer wraps such callables in
+generation-checked capabilities so a host can revoke them within one execution
+domain without disabling closures or method calls.
+
 .. _builtins_that_iterate:
 
 Builtins that iterate bypass ``_getiter_``

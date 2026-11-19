@@ -8,3 +8,5 @@ Usage of RestrictedPython
    framework_usage
    policy
    security_considerations
+   revocable_capabilities
+
