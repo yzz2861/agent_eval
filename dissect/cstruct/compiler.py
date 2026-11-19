@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import struct
+import unicodedata
 from enum import Enum
 from itertools import groupby, repeat
 from keyword import iskeyword
@@ -1214,16 +1215,42 @@ def _int_to_bytes(type_: type[Int], value: str) -> str:
     return f"{value}.to_bytes({type_.__size__}, _byteorder[endian], signed={bool(type_.signed)})"
 
 
+# Trust boundary for generated code
+#
+# Definitions are untrusted input: field, type and constant names must never become executable
+# source code. The generators in this module uphold that with two mechanisms:
+#
+# 1. A symbol table (_SourceGenerator._add_symbol): every value the generated code needs is bound
+#    to a generated identifier (_type0, _unpack1, ...) that can never collide with a name from a
+#    definition. Field values are read into generated locals (_value0, ...) for the same reason.
+# 2. Safe identifier mapping (is_safe_identifier): a name from a definition is only emitted into
+#    the source as an attribute reference if it is a valid, NFC-normalized, non-keyword Python
+#    identifier. Everywhere else the original name is emitted as a repr() string literal and
+#    resolved through _getattr/_setattr at runtime, so the original name is preserved for
+#    reading results (__values__, __dynamic_sizes__) and error messages.
+
+
+def is_safe_identifier(name: str) -> bool:
+    """Return whether a name from a definition can be emitted as an identifier in generated code.
+
+    The name must be a valid Python identifier that is not a keyword and is stable under NFC
+    normalization, because the Python parser normalizes identifiers in source to NFC (PEP 3131)
+    while ``setattr`` and friends keep the original string. Emitting a non-normalized name as
+    source would make the compiled code use a different attribute than the interpreted code.
+    """
+    return name.isidentifier() and not iskeyword(name) and unicodedata.normalize("NFC", name) == name
+
+
 def _get_attribute(var: str, name: str) -> str:
     """Return the code to get an attribute."""
-    if name.isidentifier() and not iskeyword(name):
+    if is_safe_identifier(name):
         return f"{var}.{name}"
     return f"_getattr({var}, {name!r})"
 
 
 def _set_attribute(var: str, name: str, value: str) -> str:
     """Return the code to set an attribute."""
-    if name.isidentifier() and not iskeyword(name):
+    if is_safe_identifier(name):
         return f"{var}.{name} = {value}"
     return f"_setattr({var}, {name!r}, {value})"
 

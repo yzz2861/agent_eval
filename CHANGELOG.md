@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Support for Unicode names (e.g. `名前`) for types, fields, enum members and constants in definitions.
+- `Expression.validate` to validate the syntax of an expression without resolving identifiers or generating code.
+- `compiler.is_safe_identifier` as the single policy for emitting names from definitions into generated code.
 
 ### Changed
 
@@ -34,6 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - `dumpstruct` colors the right bytes of structures with padding and unions.
+- The lexer no longer hangs on non-ASCII characters in definitions.
+- Names from definitions that are not NFC-normalized no longer make compiled structures diverge from interpreted ones.
+- Invalid array size expressions that reference unknown identifiers are now rejected while parsing, before any code is generated or executed.
 - Structures and unions no longer share nested structures and arrays between their default values.
 - Unions can be created with default values and read if they have doubly nested structures or nested unions.
 - Writing a `bytearray` to a `char` array no longer modifies the `bytearray`.

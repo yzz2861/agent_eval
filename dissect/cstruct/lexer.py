@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 from dissect.cstruct.exception import LexerError
@@ -123,11 +124,27 @@ _SINGLE_CHARS = {
     "~": TokenType.TILDE,
 }
 
-_RE_IDENTIFIER = re.compile(r"[a-zA-Z_.][a-zA-Z0-9_.]*")
 _RE_WHITESPACE = re.compile(r"[ \t\r\n]+")
 _RE_DEFINE_LITERAL = re.compile(r"""(["'])(?:\\.|(?!\1)[^\\\n])*\1""")
 
 IDENTIFIER_TYPES = set(_C_KEYWORDS.values()) | {TokenType.IDENTIFIER}
+
+
+def _is_identifier_start(ch: str) -> bool:
+    """Return whether a character can start an identifier: a letter (any script), underscore or dot."""
+    return ch.isalpha() or ch in "_."
+
+
+def _is_identifier_part(ch: str) -> bool:
+    """Return whether a character can continue an identifier.
+
+    Follows PEP 3131 (letters, numbers, underscores and combining marks), plus dots for
+    qualified names like ``Enum.MEMBER``. This character set can never produce executable
+    Python source: names are only ever emitted into generated code as repr() string literals
+    or, if they are valid Python identifiers, as attribute references (see
+    :func:`dissect.cstruct.compiler.is_safe_identifier`).
+    """
+    return ch.isalnum() or ch in "_." or unicodedata.category(ch) in ("Mn", "Mc", "Pc")
 
 
 def tokenize(data: str) -> list[Token]:
@@ -323,10 +340,15 @@ class Lexer:
                 break
 
     def _read_identifier(self) -> str:
-        """Read an identifier starting with a letter or underscore, followed by letters, digits, or underscores."""
-        if match := _RE_IDENTIFIER.match(self.data, self._pos):
-            return self._take(match.end() - self._pos)
-        return ""
+        """Read an identifier, returning an empty string if the current character can't start one."""
+        if self.eof or not _is_identifier_start(self._current()):
+            return ""
+
+        start = self._pos
+        self._take()
+        while not self.eof and _is_identifier_part(self._current()):
+            self._take()
+        return self._get(start, self._pos)
 
     def _read_number(self) -> str:
         """Read a numeric literal, supporting decimal, hex (0x), octal (0, 0o), binary (0b), and C-style suffixes."""
@@ -494,6 +516,9 @@ class Lexer:
 
             elif ch.isalpha() or ch == "_":
                 ident = self._read_identifier()
+                if not ident:
+                    # Defensive: never loop forever on a character the identifier pattern rejects
+                    raise self._error(f"unexpected character {ch!r}", lineno=line)
                 token_type = _C_KEYWORDS.get(ident, TokenType.IDENTIFIER)
                 self._emit(token_type, ident, line, col)
 

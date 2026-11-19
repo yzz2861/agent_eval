@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 # A string or the name of a constant in the value of a define
-_RE_DEFINE_STRING = re.compile(r"""\s*(?:([bB]?)(["'])((?:\\.|(?!\2)[^\\\n])*)\2|([a-zA-Z_.][a-zA-Z0-9_.]*))""")
+_RE_DEFINE_STRING = re.compile(r"""\s*(?:([bB]?)(["'])((?:\\.|(?!\2)[^\\\n])*)\2|((?:[^\W\d]|\.)[\w.]*))""")
 
 
 class Parser(TokenCursor):
@@ -523,8 +523,13 @@ class CStyleParser(Parser):
                 try:
                     count = count.evaluate(self.cs)
                 except UnknownIdentifierError:
-                    # The size refers to a field, so it's evaluated when reading the structure
-                    pass
+                    # The size refers to a field, so it's evaluated when reading the structure.
+                    # Validate the remaining syntax now, so that invalid expressions are rejected
+                    # here, before any code is generated or executed for the structure.
+                    try:
+                        count.validate()
+                    except ExpressionParserError as e:
+                        raise self._error(str(e), token=tokens[0]) from None
                 except ExpressionParserError as e:
                     raise self._error(str(e), token=tokens[0]) from None
 

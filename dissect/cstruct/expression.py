@@ -163,6 +163,25 @@ class _SourceBuilder:
         return f"{FUNCTIONS[operator].__name__}(cs, {', '.join(map(repr, args))})"
 
 
+class _Validator:
+    """Validates the syntax of an expression without resolving identifiers or generating code."""
+
+    def number(self, value: int) -> int:
+        return 0
+
+    def identifier(self, ident: str) -> int:
+        return 0
+
+    def unary(self, operator: TokenType, value: int) -> int:
+        return 0
+
+    def binary(self, operator: TokenType, left: int, right: int) -> int:
+        return 0
+
+    def function(self, operator: TokenType, args: list[str]) -> int:
+        return 0
+
+
 def precedence(o1: TokenType, o2: TokenType) -> bool:
     # Unary (prefix) operators are right-associative, so use strict greater-than
     if o2 in UNARY_OPERATORS:
@@ -227,6 +246,14 @@ class Expression(TokenCursor):
             context: The context to evaluate against.
         """
         return self._evaluate(_Evaluator(cs, context or {}))
+
+    def validate(self) -> None:
+        """Validate the syntax of the expression without resolving identifiers or generating code.
+
+        Raises:
+            ExpressionParserError: If the expression is not in the supported subset.
+        """
+        self._evaluate(_Validator())
 
     def source(self, variables: dict[str, str] | None = None, context: str = "context") -> str:
         """Return the Python source code of this expression.
