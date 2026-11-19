@@ -103,6 +103,7 @@ packages=[
     'oletools.thirdparty.xglob',
     'oletools.thirdparty.tablestream',
     'oletools.thirdparty.oledump',
+    "oletools.rtf_fuzz",
 ]
 ##setupdir = '.'
 ##package_dir={'': setupdir}
