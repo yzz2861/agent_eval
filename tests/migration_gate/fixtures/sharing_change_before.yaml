@@ -1,0 +1,6 @@
+app:
+  database:
+    primary: &db
+      host: db.internal
+      port: 5432
+    replica: *db

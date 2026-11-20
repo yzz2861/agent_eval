@@ -1,0 +1,10 @@
+service:
+  defaults:
+    limits:
+      cpu: 2
+  primary:
+    limits:
+      cpu: 2
+  secondary:
+    limits:
+      cpu: 2

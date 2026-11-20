@@ -1,0 +1,11 @@
+service:
+  defaults: &shared_cfg
+    retries: 3
+    timeout: 30
+    limits:
+      cpu: 2
+      mem: 512
+  primary:
+    <<: *shared_cfg
+    timeout: 60
+  secondary: *shared_cfg

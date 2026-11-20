@@ -1,0 +1,5 @@
+node:
+  name: n1
+  peer: &loop
+    name: n2
+    back: *loop

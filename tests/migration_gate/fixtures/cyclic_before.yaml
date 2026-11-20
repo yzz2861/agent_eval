@@ -1,0 +1,5 @@
+node:
+  name: n1
+  peer: &p
+    name: n2
+    back: *p

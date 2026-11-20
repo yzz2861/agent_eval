@@ -1,0 +1,8 @@
+service:
+  defaults: &d
+    limits:
+      cpu: 2
+  primary:
+    <<: *d
+  secondary:
+    <<: *d
