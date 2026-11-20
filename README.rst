@@ -71,6 +71,66 @@ Sample output:
    (9.9,)
    ('Critical',)
 
+Product-line vulnerability cases
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A single advisory can affect several product lines, each with its own
+environment vector and its own remediation plan. One shared score cannot
+represent all of them. The ``cvss.case`` module keeps one immutable,
+independently reviewable ``Assessment`` per (CVSS version, vector, evidence)
+combination, groups them per product in a ``VulnerabilityCase``, and applies
+caller-supplied disposition rules to build a reviewable queue.
+
+Assessment identity is a content hash of the CVSS version, the raw vector, and
+the evidence basis. Two assessments that produce the same numeric score from
+different vectors or CVSS versions therefore stay distinct, while products that
+reference the same assessment resolve to the same id. Assessments are
+immutable: fixing one environment appends a new revision instead of changing
+history, and every queue ticket snapshots the assessment that caused it, so a
+ticket remains explainable after later remediation.
+
+.. code-block:: python
+
+    from cvss import VulnerabilityCase, ThresholdRule, CallableRule
+
+    case = VulnerabilityCase("CVE-2026-0001", title="multi-product advisory")
+
+    # Each product line brings its own vector and evidence basis.
+    case.add_product(
+        "product-a",
+        vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/CR:H/IR:H/AR:H",
+        basis={"environment": "product-a runtime", "ticket": "TA-1"},
+    )
+    case.add_product(
+        "product-b",
+        vector="CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+        basis={"environment": "product-b runtime", "ticket": "TB-2"},
+    )
+
+    # One product can reference another product assessment. Both point at the
+    # same immutable assessment id, but can be revised independently later.
+    case.share_assessment("product-b", "product-c", note="shared base image")
+
+    # Caller-supplied disposition rules decide which products enter the queue.
+    tickets = case.apply_disposition(ThresholdRule(9.0, score_kind="base"))
+
+    # A ticket links back to the product line own vector, evidence basis, and
+    # the exact disposition condition, even after later remediation.
+    explanation = case.explain_ticket(tickets[0].ticket_id)
+
+    # Fixing one environment appends a revision; other products and existing
+    # tickets stay reviewable.
+    case.remediate_environment(
+        "product-a",
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
+        basis={"environment": "product-a rebuilt"},
+        reason="container image rebuilt",
+    )
+
+Callables are supported through ``CallableRule``; both plain booleans and
+``(queued, reason)`` tuples are accepted. Use ``case.audit_log()`` and
+``case.as_dict()`` for JSON-serializable provenance.
+
 Interactive calculator
 ~~~~~~~~~~~~~~~~~~~~~~
 

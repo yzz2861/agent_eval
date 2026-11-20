@@ -136,3 +136,27 @@ class CVSS4RHMalformedError(CVSS4Error):
     """
 
     pass
+
+
+class CVSSCaseError(CVSSError):
+    """
+    General exception for product-level vulnerability case handling.
+    """
+
+    pass
+
+
+class CVSSCaseInvalid(CVSSCaseError):
+    """
+    Exception for malformed or semantically invalid case input.
+    """
+
+    pass
+
+
+class CVSSCaseNotFound(CVSSCaseError):
+    """
+    Exception when a referenced product, assessment, or ticket does not exist.
+    """
+
+    pass
