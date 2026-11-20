@@ -29,6 +29,50 @@ class Flake8Extension(object):
 
     @classmethod
     def add_options(cls, parser):
+        option_groups = (
+            (
+                ('--dlint-sensitive-keys', '--dlint-sensitive-fields',
+                 '--dlint-log-sensitive-keys',
+                 '--dlint-sensitive-log-keys'),
+                'sensitive_keys',
+                'Comma-separated sensitive dictionary keys for DUO139.',
+            ),
+            (
+                ('--dlint-log-calls', '--dlint-log-sinks',
+                 '--dlint-logging-calls', '--dlint-sinks',
+                 '--dlint-log-call'),
+                'log_calls',
+                'Comma-separated calls which submit log records for DUO139.',
+            ),
+            (
+                ('--dlint-adapter-calls', '--dlint-log-adapters'),
+                'adapter_calls',
+                'Comma-separated logging adapter calls for DUO139.',
+            ),
+            (
+                ('--dlint-log-config', '--dlint-sensitive-log-config',
+                 '--dlint-log-sensitive-config'),
+                'log_config',
+                'JSON configuration for the DUO139 logging rule.',
+            ),
+            (
+                ('--dlint-config', '--dlint-config-file'),
+                'dlint_config',
+                'Path or JSON blob configuring the DUO139 logging rule.',
+            ),
+        )
+        for option_strings, dest, help_text in option_groups:
+            try:
+                parser.add_option(
+                    *option_strings,
+                    action='append',
+                    dest=dest,
+                    default=None,
+                    help=help_text
+                )
+            except optparse.OptionConflictError:
+                pass
+
         try:
             parser.add_option(
                 '--print-dlint-linters',
@@ -45,7 +89,7 @@ class Flake8Extension(object):
 
     @classmethod
     def parse_options(cls, options):
-        if options.print_dlint_linters:
+        if getattr(options, 'print_dlint_linters', False):
             code_prefix_len = 7
             linters = cls.get_linter_classes()
             output_lines = [
