@@ -23,6 +23,7 @@ Contents:
    model
    install
    examples
+   offline_review
    issues
    bugtracker
    todo
