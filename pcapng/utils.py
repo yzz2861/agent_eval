@@ -1,5 +1,6 @@
 import socket
 import struct
+from fractions import Fraction
 
 
 def pack_ipv4(data):
@@ -65,6 +66,33 @@ def unpack_timestamp_resolution(data):
     base = 2 if (num >> 7 & 1) else 10
     exponent = num & 0b01111111
     return base ** (-exponent)
+
+
+def unpack_timestamp_resolution_exact(data):
+    """
+    Unpack a timestamp resolution without going through ``float``.
+
+    pcap-ng stores a 64 bit timestamp as an integer count of clock ticks.
+    The resolution is only a scale factor (10**-n or 2**-n), so it can be
+    represented exactly as a :py:class:`fractions.Fraction`.  Keeping it
+    exact matters when two adjacent ticks are indistinguishable as IEEE-754
+    doubles (which happens beyond 2**53).
+
+    :param data: the one-byte value of an ``if_tsresol`` option.
+    :return: a :py:class:`fractions.Fraction` resolution in seconds.
+    """
+    if isinstance(data, int):
+        if not 0 <= data <= 255:
+            raise ValueError("Resolution byte must be in range 0..255")
+        num = data
+    else:
+        if len(data) != 1:
+            raise ValueError("Data must be exactly one byte")
+        num = data[0]
+
+    base = 2 if (num >> 7 & 1) else 10
+    exponent = num & 0b01111111
+    return Fraction(1, base**exponent)
 
 
 def pack_timestamp_resolution(base, exponent):

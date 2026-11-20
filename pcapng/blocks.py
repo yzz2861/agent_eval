@@ -12,6 +12,7 @@ better access to decoded information, ...
 
 import io
 import itertools
+from fractions import Fraction
 
 from pcapng import strictness as strictness
 from pcapng.constants import link_types
@@ -29,6 +30,7 @@ from pcapng.structs import (
     write_int,
 )
 from pcapng.utils import unpack_timestamp_resolution
+from pcapng.utils import unpack_timestamp_resolution_exact
 
 KNOWN_BLOCKS = {}
 
@@ -314,6 +316,23 @@ class InterfaceDescription(SectionMemberBlock):
         return 1e-6
 
     @property
+    def timestamp_resolution_exact(self):
+        """
+        Exact timestamp resolution as a :py:class:`fractions.Fraction`.
+
+        This is the lossless counterpart of :py:attr:`timestamp_resolution`.
+        """
+        if "if_tsresol" in self.options:
+            return unpack_timestamp_resolution_exact(self.options["if_tsresol"])
+
+        return Fraction(1, 1000000)
+
+    @property
+    def timestamp_offset(self):
+        """The ``if_tsoffset`` value, in seconds (zero when absent)."""
+        return self.options.get("if_tsoffset", 0)
+
+    @property
     def statistics(self):
         # todo: ensure we always have an interface id -> how??
         return self.section.interface_stats.get(self.interface_id)
@@ -335,6 +354,20 @@ class BlockWithTimestampMixin(object):
     __slots__ = []
 
     @property
+    def has_timestamp(self):
+        return True
+
+    @property
+    def timestamp_provenance(self):
+        """
+        Machine-readable origin of the timestamp.
+
+        The detailed forensic representation adds the section, interface and
+        stream position; this small property is also useful on raw blocks.
+        """
+        return "block:timestamp_high/timestamp_low"
+
+    @property
     def timestamp(self):
         # First, get the accuracy from the ts_resol option
         return (
@@ -342,8 +375,44 @@ class BlockWithTimestampMixin(object):
         ) * self.timestamp_resolution
 
     @property
+    def raw_tick(self):
+        """
+        The unmodified 64 bit tick value stored in the block.
+
+        This is an integer and never passes through a floating point
+        conversion.
+        """
+        return (self.timestamp_high << 32) + self.timestamp_low
+
+    @property
+    def timestamp_exact(self):
+        """
+        The block timestamp as an exact :py:class:`fractions.Fraction`.
+
+        ``if_tsoffset`` is added, as required by the pcap-ng specification.
+        """
+        return (
+            self.raw_tick * self.timestamp_resolution_exact
+            + self.interface.timestamp_offset
+        )
+
+    @property
+    def timestamp_fraction(self):
+        """Alias of :attr:`timestamp_exact`."""
+        return self.timestamp_exact
+
+    @property
+    def raw_timestamp(self):
+        """Alias of :attr:`raw_tick`."""
+        return self.raw_tick
+
+    @property
     def timestamp_resolution(self):
         return self.interface.timestamp_resolution
+
+    @property
+    def timestamp_resolution_exact(self):
+        return self.interface.timestamp_resolution_exact
 
     # todo: add some property returning a datetime() with timezone..
 
@@ -475,6 +544,47 @@ class SimplePacket(BasePacketBlock):
             super(SimplePacket, self).__init__(section, **kwargs)
 
     readonly_fields = set(("captured_len", "interface_id"))
+
+    @property
+    def has_timestamp(self):
+        """Simple Packet Blocks do not carry a timestamp field."""
+        return False
+
+    @property
+    def timestamp(self):
+        """Simple Packet Blocks have no timestamp; never invent one."""
+        return None
+
+    @property
+    def raw_tick(self):
+        """Simple Packet Blocks have no raw tick."""
+        return None
+
+    @property
+    def timestamp_resolution(self):
+        """The (display) resolution of the interface the Simple Packet came from."""
+        return self.interface.timestamp_resolution
+
+    @property
+    def timestamp_resolution_exact(self):
+        """The exact resolution of the interface the Simple Packet came from."""
+        return self.interface.timestamp_resolution_exact
+
+    @property
+    def timestamp_offset(self):
+        """The ``if_tsoffset`` of the interface, even though the SPB has no time."""
+        return self.interface.timestamp_offset
+
+    @property
+    def timestamp_provenance(self):
+        """
+        Explain that the time is absent rather than silently fabricating one.
+
+        The returned string is intentionally stable and machine-readable; the
+        forensic API expands it into a richer provenance object that also
+        records the section, interface and capture-stream position.
+        """
+        return "simple-packet:no-timestamp-field"
 
     @property
     def interface_id(self):
