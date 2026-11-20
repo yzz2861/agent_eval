@@ -39,7 +39,7 @@ from typing import (
 )
 
 from ._configuration import get_configuration
-from ._encryption import Encryption
+from ._encryption import Encryption, PermissionView
 from ._page import PageObject, _VirtualList
 from ._page_labels import index2labels
 from ._utils import (
@@ -1660,6 +1660,42 @@ class PdfDocCommon(ABC):
         if not self._encryption.is_decrypted():
             return None
         return self._encryption._are_permissions_valid
+
+    @property
+    def permission_view(self) -> PermissionView | None:
+        """
+        Structured permission evidence for the password identity in use.
+
+        This is deliberately separate from
+        :meth:`decrypt()<pypdf.PdfReader.decrypt>`: the return value of
+        ``decrypt`` remains :class:`PasswordType`, while callers that need to
+        audit print, copy, or accessibility rights can inspect this view.
+
+        The view records the password identity, the applicable encryption
+        revision, and the raw ``/P`` bits. Its effective flags include only
+        permission bits defined by that revision. Owner credentials grant all
+        rights defined by the revision; user credentials are limited by
+        ``/P``.
+
+        Returns ``None`` if the document is not encrypted or no password has
+        matched yet.
+        """
+        if self._encryption is None:
+            return None
+        return self._encryption.permission_view
+
+    @property
+    def permissions(self) -> PermissionView | None:
+        """Alias for :attr:`permission_view`."""
+        return self.permission_view
+
+    def get_permissions(self) -> PermissionView | None:
+        """Return :attr:`permission_view` for callers that prefer a method."""
+        return self.permission_view
+
+    def get_permission_view(self) -> PermissionView | None:
+        """Return :attr:`permission_view` for callers that prefer a method."""
+        return self.permission_view
 
     @property
     @abstractmethod

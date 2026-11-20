@@ -16,6 +16,7 @@ from pypdf import PasswordType, PdfReader, PdfWriter
 from pypdf._crypt_providers import crypt_provider
 from pypdf._crypt_providers._fallback import _DEPENDENCY_ERROR_STR
 from pypdf._encryption import AlgV5, CryptAES, CryptRC4, EncryptAlgorithm, Encryption, _saslprep
+from pypdf.constants import UserAccessPermissions
 from pypdf.errors import DependencyError, PdfReadError, PdfStreamError, WrongPasswordError
 from pypdf.generic import ByteStringObject, DictionaryObject, NameObject, NullObject, NumberObject
 from tests import RESOURCE_ROOT, SAMPLE_ROOT, get_data_from_url
@@ -506,6 +507,97 @@ def test_are_permissions_valid_false_when_tampered():
     reader = PdfReader(tampered)
     reader.decrypt("user")
     assert reader.are_permissions_valid is False
+
+
+def _encrypted_permission_document(
+    algorithm: str,
+    permissions: UserAccessPermissions,
+    *,
+    user_password: str = "reader",
+    owner_password: str = "owner",
+) -> bytes:
+    writer = PdfWriter()
+    writer.add_blank_page(72, 72)
+    writer.encrypt(
+        user_password=user_password,
+        owner_password=owner_password,
+        permissions_flag=permissions,
+        algorithm=algorithm,
+    )
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+@pytest.mark.skipif(not HAS_AES, reason="No AES implementation")
+def test_permission_view_distinguishes_user_and_owner():
+    permissions = (
+        UserAccessPermissions.PRINT
+        | UserAccessPermissions.EXTRACT_TEXT_AND_GRAPHICS
+    )
+
+    data = _encrypted_permission_document("AES-256", permissions)
+    reader = PdfReader(BytesIO(data), password="reader")
+    assert reader.decrypt("reader") == PasswordType.USER_PASSWORD
+    user_view = reader.permission_view
+    assert user_view is not None
+    assert user_view.password_type == PasswordType.USER_PASSWORD
+    assert user_view.identity == PasswordType.USER_PASSWORD
+    assert user_view.revision == 6
+    assert user_view.encryption_revision == 6
+    assert user_view.raw_permission_bits == int(permissions)
+    assert user_view.raw_permissions == permissions
+    assert user_view.can_print is True
+    assert user_view.can_copy is False
+    assert user_view.can_accessibility is True
+    assert user_view.can_assemble_doc is False
+
+    owner = PdfReader(BytesIO(data), password="owner")
+    assert owner.decrypt("owner") == PasswordType.OWNER_PASSWORD
+    owner_view = owner.permission_view
+    assert owner_view is not None
+    assert owner_view.password_type == PasswordType.OWNER_PASSWORD
+    assert owner_view.is_owner is True
+    assert owner_view.raw_permission_bits == int(permissions)
+    assert owner_view.can_print is True
+    assert owner_view.can_copy is True
+    assert owner_view.can_accessibility is True
+    assert owner_view.can_assemble_doc is True
+
+
+def test_permission_view_ignores_bits_undefined_by_revision():
+    # Bit 11 (assemble document) only exists from revision 3 onwards.
+    raw_permissions = UserAccessPermissions.PRINT | UserAccessPermissions.ASSEMBLE_DOC
+
+    data = _encrypted_permission_document("RC4-40", raw_permissions)
+    reader = PdfReader(BytesIO(data), password="reader")
+    view = reader.permission_view
+    assert view is not None
+    assert view.revision == 2
+    assert view.raw_permission_bits == int(raw_permissions)
+    assert view.raw_permissions & UserAccessPermissions.ASSEMBLE_DOC
+    assert view.can_print is True
+    assert view.can_assemble_doc is False
+    assert view.can_accessibility is False
+    assert view.allows(UserAccessPermissions.ASSEMBLE_DOC) is False
+
+    data = _encrypted_permission_document("RC4-128", raw_permissions)
+    reader = PdfReader(BytesIO(data), password="reader")
+    view = reader.permission_view
+    assert view is not None
+    assert view.revision == 3
+    assert view.can_print is True
+    assert view.can_assemble_doc is True
+
+
+@pytest.mark.skipif(not HAS_AES, reason="No AES implementation")
+def test_permission_view_is_only_available_after_decryption():
+    reader = PdfReader(RESOURCE_ROOT / "encryption" / "r6-both-passwords.pdf")
+    assert reader.permission_view is None
+    assert reader.get_permissions() is None
+
+    reader.decrypt("foo")
+    assert reader.permissions is not None
 
 
 @pytest.mark.skipif(not HAS_AES, reason="No AES implementation")

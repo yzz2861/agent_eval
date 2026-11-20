@@ -46,6 +46,7 @@ from pypdf._crypt_providers import (
 )
 
 from ._utils import logger_warning
+from .constants import UserAccessPermissions
 from .errors import PdfReadError
 from .generic import (
     ArrayObject,
@@ -787,6 +788,179 @@ class PasswordType(IntEnum):
     OWNER_PASSWORD = 2
 
 
+class PermissionView:
+    """
+    A revision-aware view of the permissions that apply to an open document.
+
+    ``raw_permission_bits`` keeps the complete ``/P`` value from the
+    encryption dictionary.  ``permissions`` is the effective set of rights
+    for the password identity that was used: owner credentials grant every
+    right defined by the revision, while user credentials are limited by the
+    defined ``/P`` bits.
+
+    Bits that are not defined by the document's encryption revision are
+    deliberately excluded from ``permissions``.  In particular, older
+    revisions commonly have those bits set even though they do not grant the
+    corresponding operation.
+    """
+
+    _R2_MASK = (
+        UserAccessPermissions.PRINT
+        | UserAccessPermissions.MODIFY
+        | UserAccessPermissions.EXTRACT
+        | UserAccessPermissions.ADD_OR_MODIFY
+    )
+    _R3_PLUS_MASK = (
+        _R2_MASK
+        | UserAccessPermissions.FILL_FORM_FIELDS
+        | UserAccessPermissions.EXTRACT_TEXT_AND_GRAPHICS
+        | UserAccessPermissions.ASSEMBLE_DOC
+        | UserAccessPermissions.PRINT_TO_REPRESENTATION
+    )
+
+    def __init__(
+        self,
+        password_type: PasswordType,
+        revision: int,
+        raw_permission_bits: int,
+        permissions_valid: bool = True,
+    ) -> None:
+        self.password_type = password_type
+        self.revision = revision
+        self.raw_permission_bits = raw_permission_bits & 0xFFFFFFFF
+        self.permissions_valid = permissions_valid
+
+        defined = self._defined_permissions(revision)
+        if password_type == PasswordType.OWNER_PASSWORD:
+            effective = int(defined)
+        else:
+            effective = self.raw_permission_bits & int(defined)
+        self.permissions = UserAccessPermissions(effective)
+
+    @classmethod
+    def _defined_permissions(cls, revision: int) -> UserAccessPermissions:
+        """Return the permission bits defined by the encryption revision."""
+        return cls._R3_PLUS_MASK if revision >= 3 else cls._R2_MASK
+
+    @property
+    def encryption_revision(self) -> int:
+        """The standard security handler revision (``/R``)."""
+        return self.revision
+
+    @property
+    def identity(self) -> PasswordType:
+        """The password identity used to open the document."""
+        return self.password_type
+
+    @property
+    def is_owner(self) -> bool:
+        """Whether the document was opened with owner credentials."""
+        return self.password_type == PasswordType.OWNER_PASSWORD
+
+    @property
+    def effective_permissions(self) -> UserAccessPermissions:
+        """The permissions after applying the identity and revision rules."""
+        return self.permissions
+
+    @property
+    def raw_permissions(self) -> UserAccessPermissions:
+        """The unfiltered ``/P`` value as a 32-bit permission set."""
+        return UserAccessPermissions(self.raw_permission_bits)
+
+    @property
+    def permission_bits(self) -> int:
+        """Alias for the raw 32-bit ``/P`` bit pattern."""
+        return self.raw_permission_bits
+
+    @property
+    def raw_permission_value(self) -> int:
+        """The unfiltered ``/P`` value as a signed 32-bit integer."""
+        if self.raw_permission_bits >= 2**31:
+            return self.raw_permission_bits - 2**32
+        return self.raw_permission_bits
+
+    @property
+    def are_permissions_valid(self) -> bool:
+        """Whether the ``/Perms`` integrity check passed, when applicable."""
+        return self.permissions_valid
+
+    def allows(self, permission: UserAccessPermissions) -> bool:
+        """
+        Check whether ``permission`` is granted by the effective view.
+
+        A permission containing undefined bits for the document's revision is
+        never reported as granted.
+        """
+        permission_bits = int(permission)
+        return (int(self.permissions) & permission_bits) == permission_bits
+
+    @property
+    def can_print(self) -> bool:
+        return self.allows(UserAccessPermissions.PRINT)
+
+    @property
+    def can_modify(self) -> bool:
+        return self.allows(UserAccessPermissions.MODIFY)
+
+    @property
+    def can_copy(self) -> bool:
+        return self.allows(UserAccessPermissions.EXTRACT)
+
+    @property
+    def can_extract(self) -> bool:
+        return self.can_copy
+
+    @property
+    def can_add_or_modify_annotations(self) -> bool:
+        return self.allows(UserAccessPermissions.ADD_OR_MODIFY)
+
+    @property
+    def can_fill_form_fields(self) -> bool:
+        if self.revision >= 3:
+            return self.allows(UserAccessPermissions.ADD_OR_MODIFY) or self.allows(
+                UserAccessPermissions.FILL_FORM_FIELDS
+            )
+        # Revision 2 combines form filling with annotations in bit 6.
+        return self.allows(UserAccessPermissions.ADD_OR_MODIFY)
+
+    @property
+    def can_extract_text_and_graphics(self) -> bool:
+        return self.allows(UserAccessPermissions.EXTRACT_TEXT_AND_GRAPHICS)
+
+    @property
+    def can_accessibility(self) -> bool:
+        """Whether accessibility extraction is permitted for this identity."""
+        return self.can_extract_text_and_graphics
+
+    @property
+    def can_assemble_doc(self) -> bool:
+        return self.allows(UserAccessPermissions.ASSEMBLE_DOC)
+
+    @property
+    def can_print_to_representation(self) -> bool:
+        return self.allows(UserAccessPermissions.PRINT_TO_REPRESENTATION)
+
+    @property
+    def can_print_high_quality(self) -> bool:
+        return self.can_print_to_representation
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the identity, provenance, and effective flags as a mapping."""
+        return {
+            "password_type": self.password_type,
+            "revision": self.revision,
+            "raw_permission_bits": self.raw_permission_bits,
+            "permissions_valid": self.permissions_valid,
+            **self.permissions.to_dict(),
+        }
+
+
+# Descriptive aliases for callers that prefer a document-oriented name.
+DocumentPermissions = PermissionView
+EncryptionPermissions = PermissionView
+Permissions = PermissionView
+
+
 def _saslprep(password: str) -> str:
     """
     Apply the SASLprep profile (RFC 4013) of stringprep (RFC 3454).
@@ -956,6 +1130,29 @@ class Encryption:
 
     def is_decrypted(self) -> bool:
         return self._password_type != PasswordType.NOT_DECRYPTED
+
+    @property
+    def permission_view(self) -> PermissionView | None:
+        """
+        The permissions tied to the password identity used to open the document.
+
+        Returns ``None`` until decryption succeeds.  The raw ``/P`` value is
+        kept in the view, while the effective permission flags are limited to
+        the bits defined by this document's encryption revision.
+        """
+        if not self.is_decrypted():
+            return None
+        return PermissionView(
+            password_type=self._password_type,
+            revision=self.R,
+            raw_permission_bits=self.P,
+            permissions_valid=self._are_permissions_valid,
+        )
+
+    @property
+    def permissions(self) -> PermissionView | None:
+        """Alias for :attr:`permission_view`."""
+        return self.permission_view
 
     def encrypt_object(self, obj: PdfObject, idnum: int, generation: int) -> PdfObject:
         # skip calculate key

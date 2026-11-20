@@ -10,7 +10,13 @@ You can read the full docs at https://pypdf.readthedocs.io/.
 from ._configuration import Configuration, apply_configuration, get_configuration, overwrite_configuration
 from ._crypt_providers import crypt_provider
 from ._doc_common import DocumentInformation
-from ._encryption import PasswordType
+from ._encryption import (
+    DocumentPermissions,
+    EncryptionPermissions,
+    PasswordType,
+    PermissionView,
+    Permissions,
+)
 from ._page import PageObject, Transformation
 from ._reader import PdfReader
 from ._text_extraction import mult
@@ -33,13 +39,17 @@ _debug_versions = (
 
 __all__ = [
     "Configuration",
+    "DocumentPermissions",
     "DocumentInformation",
+    "EncryptionPermissions",
     "ImageType",
     "ObjectDeletionFlag",
     "PageObject",
     "PageRange",
     "PaperSize",
     "PasswordType",
+    "Permissions",
+    "PermissionView",
     "PdfReader",
     "PdfWriter",
     "Transformation",

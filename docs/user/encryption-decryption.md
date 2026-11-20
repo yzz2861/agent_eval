@@ -63,3 +63,16 @@ writer = PdfWriter(clone_from=reader)
 # Save the new PDF to a file
 writer.write("out-decrypt.pdf")
 ```
+
+The return value of `decrypt()` reports which credential matched. To inspect
+the permissions that apply to that credential, use the separate permission
+view. It keeps the password type, the encryption revision, and the raw `/P`
+bits, while excluding permission bits that the revision does not define:
+
+```{testcode}
+reader = PdfReader("encrypted-file.pdf", password="test")
+permissions = reader.permission_view
+if permissions is not None:
+    print(permissions.password_type, permissions.revision)
+    print(permissions.can_print, permissions.can_copy, permissions.can_accessibility)
+```
