@@ -136,6 +136,10 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
     machine_output["metrics"] = manager.metrics.data
 
+    review_summary = manager.review_summary()
+    if review_summary is not None:
+        machine_output["review"] = review_summary
+
     # timezone agnostic format
     TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 

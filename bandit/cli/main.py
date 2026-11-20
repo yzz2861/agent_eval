@@ -14,6 +14,7 @@ import bandit
 from bandit.core import config as b_config
 from bandit.core import constants
 from bandit.core import manager as b_manager
+from bandit.core import review as b_review
 from bandit.core import utils
 
 BASE_CONFIG = "bandit.yaml"
@@ -129,6 +130,37 @@ def _log_info(args, profile):
     LOG.info("profile exclude tests: %s", exc)
     LOG.info("cli include tests: %s", args.tests)
     LOG.info("cli exclude tests: %s", args.skips)
+
+
+def _run_verification(args, b_conf):
+    """Re-verify a review-mode JSON report against the current workspace.
+
+    The targets name the candidate workspace roots; logical paths recorded
+    in the report are resolved underneath them.  No scan is performed.
+    """
+    import json
+
+    try:
+        with open(args.verify_report, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except OSError as err:
+        LOG.error("Could not open report for verification: %s", err)
+        return 2
+    except ValueError as err:
+        LOG.error("Report is not valid JSON: %s", err)
+        return 2
+
+    roots = [os.path.abspath(target) for target in args.targets]
+    from bandit.core import test_set as b_test_set
+
+    testset = b_test_set.BanditTestSet(config=b_conf)
+    summary = b_review.verify_report(report, roots, testset=testset)
+    args.output_file.write(json.dumps(summary, indent=2, sort_keys=True))
+    args.output_file.write("\n")
+    counts = summary["counts"]
+    if counts[b_review.NOT_REPRODUCIBLE]:
+        return 1
+    return 0
 
 
 def main():
@@ -371,6 +403,23 @@ def main():
         default=False,
         help="exit with 0, " "even with results found",
     )
+    parser.add_argument(
+        "--review",
+        dest="review",
+        action="store_true",
+        default=False,
+        help="attach reproducible file and rule material identifiers "
+        "to every result for later re-verification",
+    )
+    parser.add_argument(
+        "--verify-report",
+        dest="verify_report",
+        action="store",
+        default=None,
+        help="re-verify a JSON report previously produced with --review "
+        "against the current workspace and print a verification summary; "
+        "no scan is performed",
+    )
     python_ver = sys.version.replace("\n", "")
     parser.add_argument(
         "--version",
@@ -607,6 +656,9 @@ def main():
         parser.print_usage()
         sys.exit(2)
 
+    if args.verify_report is not None:
+        sys.exit(_run_verification(args, b_conf))
+
     # if the log format string was set in the options, reinitialize
     if b_conf.get_option("log_format"):
         log_format = b_conf.get_option("log_format")
@@ -635,6 +687,7 @@ def main():
         verbose=args.verbose,
         quiet=args.quiet,
         ignore_nosec=args.ignore_nosec,
+        review=args.review,
     )
 
     if args.baseline is not None:

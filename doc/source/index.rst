@@ -13,6 +13,7 @@ Using and Extending Bandit
 
    start
    config
+   review
    integrations
    plugins/index
    blacklists/index

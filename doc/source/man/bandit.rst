@@ -10,7 +10,8 @@ bandit [-h] [-r] [-a {file,vuln}] [-n CONTEXT_LINES] [-c CONFIG_FILE]
             [-f {csv,custom,html,json,screen,txt,xml,yaml}]
             [--msg-template MSG_TEMPLATE] [-o [OUTPUT_FILE]] [-v] [-d] [-q]
             [--ignore-nosec] [-x EXCLUDED_PATHS] [-b BASELINE]
-            [--ini INI_PATH] [--exit-zero] [--version]
+            [--ini INI_PATH] [--exit-zero] [--review]
+            [--verify-report VERIFY_REPORT] [--version]
             [targets [targets ...]]
 
 DESCRIPTION
@@ -76,6 +77,11 @@ OPTIONS
                         JSON-formatted files are accepted)
   --ini INI_PATH        path to a .bandit file that supplies command line arguments
   --exit-zero           exit with 0, even with results found
+  --review              attach reproducible file and rule material identifiers
+                        to every result for later re-verification
+  --verify-report VERIFY_REPORT
+                        re-verify a JSON report produced with --review against
+                        the current workspace and print a verification summary
   --version             show program's version number and exit
 
 CUSTOM FORMATTING

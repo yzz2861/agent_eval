@@ -21,6 +21,7 @@ from bandit.core import issue
 from bandit.core import meta_ast as b_meta_ast
 from bandit.core import metrics
 from bandit.core import node_visitor as b_node_visitor
+from bandit.core import review as b_review
 from bandit.core import test_set as b_test_set
 
 LOG = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class BanditManager:
         quiet=False,
         profile=None,
         ignore_nosec=False,
+        review=False,
     ):
         """Get logger, config, AST handler, and result store ready
 
@@ -52,6 +54,7 @@ class BanditManager:
         :param quiet: Whether to only show output in the case of an error
         :param profile_name: Optional name of profile to use (from cmd line)
         :param ignore_nosec: Whether to ignore #nosec or not
+        :param review: Whether to attach re-verification material to results
         :return:
         """
         self.debug = debug
@@ -71,6 +74,9 @@ class BanditManager:
         self.metrics = metrics.Metrics()
         self.b_ts = b_test_set.BanditTestSet(config, profile)
         self.scores = []
+        self.review_mode = review
+        self.review_recorder = None
+        self.review_withheld = []
 
     def get_skipped(self):
         ret = []
@@ -257,6 +263,8 @@ class BanditManager:
 
         self.files_list = sorted(files_list)
         self.excluded_files = sorted(excluded_files)
+        if self.review_mode:
+            self.review_recorder = b_review.ReviewRecorder(self.files_list)
 
     def run_tests(self):
         """Runs through all files in the scope
@@ -277,6 +285,9 @@ class BanditManager:
         for count, fname in enumerate(files):
             LOG.debug("working on file : %s", fname)
 
+            if self.review_mode:
+                self.review_recorder.snapshot(fname)
+
             try:
                 if fname == "-":
                     open_fd = os.fdopen(sys.stdin.fileno(), "rb", 0)
@@ -288,6 +299,8 @@ class BanditManager:
                 else:
                     with open(fname, "rb") as fdata:
                         self._parse_file(fname, fdata, new_files_list)
+                if self.review_mode:
+                    self._finalize_review_file(fname)
             except OSError as e:
                 self.skipped.append((fname, e.strerror))
                 new_files_list.remove(fname)
@@ -297,6 +310,43 @@ class BanditManager:
 
         # do final aggregation of metrics
         self.metrics.aggregate()
+
+    def _finalize_review_file(self, fname):
+        """Withhold a file findings when the workspace changed mid-scan."""
+        if fname == "<stdin>":
+            return
+        stale, reason = self.review_recorder.is_stale(fname)
+        if not stale:
+            return
+        kept = []
+        for result in self.results:
+            if result.fname != fname:
+                kept.append(result)
+                continue
+            material = (
+                result.review.get("file_material")
+                if getattr(result, "review", None)
+                else None
+            )
+            self.review_withheld.append(
+                {
+                    "filename": fname,
+                    "reason": reason,
+                    "test_id": result.test_id,
+                    "line_number": result.lineno,
+                    "file_material": material,
+                }
+            )
+        self.results = kept
+
+    def review_summary(self):
+        """Return the review-mode summary used by the formatters."""
+        if not self.review_mode or self.review_recorder is None:
+            return None
+        summary = self.review_recorder.summary()
+        summary["withheld"] = list(self.review_withheld)
+        summary["withheld_count"] = len(self.review_withheld)
+        return summary
 
     def _parse_file(self, fname, fdata, new_files_list):
         try:
@@ -364,6 +414,11 @@ class BanditManager:
 
         score = res.process(data)
         self.results.extend(res.tester.results)
+        if self.review_mode:
+            for result in res.tester.results:
+                b_review.attach_attestation(
+                    result, self.review_recorder, data
+                )
         return score
 
 

@@ -104,6 +104,9 @@ class Issue:
         self.col_offset = col_offset
         self.end_col_offset = end_col_offset
         self.linerange = []
+        # Optional review-mode material identifiers, attached by the manager
+        # when bandit runs with review mode enabled.
+        self.review = None
 
     def __str__(self):
         return (
@@ -216,6 +219,8 @@ class Issue:
 
         if with_code:
             out["code"] = self.get_code(max_lines=max_lines)
+        if self.review is not None:
+            out["review"] = self.review
         return out
 
     def from_dict(self, data, with_code=True):

@@ -187,7 +187,8 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
     issues = manager.get_issue_list(sev_level=sev_level, conf_level=conf_level)
 
-    add_results(issues, run)
+    review_summary = manager.review_summary()
+    add_results(issues, run, review_summary)
 
     serializedLog = to_json(log)
 
@@ -225,7 +226,7 @@ def add_skipped_file_notifications(skips, invocation):
         invocation.tool_configuration_notifications.append(notification)
 
 
-def add_results(issues, run):
+def add_results(issues, run, review_summary=None):
     if run.results is None:
         run.results = []
 
@@ -237,6 +238,14 @@ def add_results(issues, run):
 
     if len(rules) > 0:
         run.tool.driver.rules = list(rules.values())
+
+    if review_summary is not None:
+        run.properties["review"] = {
+            "mode": review_summary["mode"],
+            "algorithm": review_summary["algorithm"],
+            "scan_root": review_summary["scan_root"],
+            "withheld_count": review_summary["withheld_count"],
+        }
 
 
 def create_result(issue, rules, rule_indices):
@@ -258,16 +267,20 @@ def create_result(issue, rules, rule_indices):
         issue_dict["code"],
     )
 
+    properties = {
+        "issue_confidence": issue_dict["issue_confidence"],
+        "issue_severity": issue_dict["issue_severity"],
+    }
+    if issue_dict.get("review") is not None:
+        properties["review"] = issue_dict["review"]
+
     return om.Result(
         rule_id=rule.id,
         rule_index=rule_index,
         message=om.Message(text=issue_dict["issue_text"]),
         level=level_from_severity(issue_dict["issue_severity"]),
         locations=[om.Location(physical_location=physical_location)],
-        properties={
-            "issue_confidence": issue_dict["issue_confidence"],
-            "issue_severity": issue_dict["issue_severity"],
-        },
+        properties=properties,
     )
 
 

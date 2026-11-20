@@ -75,6 +75,9 @@ class BanditTester:
                     result.test = name
                     if result.test_id == "":
                         result.test_id = test._test_id
+                    # Record the resolved configuration the rule was actually
+                    # invoked with so review mode can fingerprint it.
+                    result._rule_config = getattr(test, "_config", None)
 
                     # don't skip the test if there was no nosec comment
                     if nosec_tests_to_skip is not None:
