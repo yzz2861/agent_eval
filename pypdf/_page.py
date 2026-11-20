@@ -621,6 +621,40 @@ class PageObject(DictionaryObject):
         """
         return cast(float, self.get(PG.USER_UNIT, 1))
 
+    def get_optional_content_visibility(
+        self,
+        target: Any = None,
+        configuration: Any = None,
+        *,
+        event: str = "view",
+    ) -> Any:
+        """Inspect marked content on this page and its nested form XObjects."""
+        from ._optional_content import get_optional_content_visibility  # noqa: PLC0415
+
+        if self.pdf is None:
+            raise ValueError("The page is not associated with a PDF document")
+        return get_optional_content_visibility(
+            self.pdf,
+            target,
+            page=self,
+            configuration=configuration,
+            event=event,
+        )
+
+    def get_ocg_visibility(
+        self,
+        target: Any = None,
+        configuration: Any = None,
+        *,
+        event: str = "view",
+    ) -> Any:
+        """Alias for :meth:`get_optional_content_visibility`."""
+        return self.get_optional_content_visibility(
+            target,
+            configuration=configuration,
+            event=event,
+        )
+
     @staticmethod
     def create_blank_page(
         pdf: PdfCommonDocProtocol | None = None,

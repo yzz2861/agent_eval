@@ -25,7 +25,7 @@ all features of PDF 2.0.
 | Content Stream Compression     |     1.5     |       ✅       |
 | Cross-reference Streams        |     1.5     |       ✅       |
 | Object Streams                 |     1.5     |       ✅       |
-| Optional Content Groups (OCGs) |     1.5     |       ❓       |
+| Optional Content Groups (OCGs) |     1.5     |       ✅       |
 | AES Encryption                 |     1.6     |       ✅       |
 
 This table is not complete - if in doubt, consider having a look at the API documentation or

@@ -40,6 +40,21 @@ from typing import (
 
 from ._configuration import get_configuration
 from ._encryption import Encryption
+from ._optional_content import (
+    OptionalContent,
+    OptionalContentConfiguration,
+    OptionalContentEvidence,
+    OptionalContentGroup,
+    OptionalContentVisibilityReport,
+    OptionalContentVisibilityState,
+    get_marked_content_visibility,
+    get_optional_content_configurations,
+    get_optional_content_group,
+    get_optional_content_groups,
+    get_optional_content_state,
+    get_optional_content_visibility,
+    get_visible_optional_content_groups,
+)
 from ._page import PageObject, _VirtualList
 from ._page_labels import index2labels
 from ._utils import (
@@ -333,6 +348,189 @@ class PdfDocCommon(ABC):
             return None
         retval.update(self._info)
         return retval
+
+    @property
+    def optional_content(self) -> OptionalContent:
+        """Access optional content (OCG) inspection helpers."""
+        return OptionalContent(self)
+
+    @property
+    def optional_content_visibility(self) -> OptionalContentVisibilityReport:
+        """Visibility results for every OCG in every configuration."""
+        return get_optional_content_visibility(self)
+
+    @property
+    def optional_content_evidence(self) -> list[OptionalContentEvidence]:
+        """All evidence records for optional content, including hidden groups."""
+        return get_optional_content_visibility(self).evidence
+
+    @property
+    def optional_content_groups(self) -> list[OptionalContentGroup]:
+        """All optional content groups, including groups hidden by default."""
+        return get_optional_content_groups(self)
+
+    @property
+    def optional_content_configurations(self) -> list[OptionalContentConfiguration]:
+        """The default and alternate optional content configurations."""
+        return get_optional_content_configurations(self)
+
+    def get_optional_content_groups(self) -> list[OptionalContentGroup]:
+        """Return all optional content groups, including hidden groups."""
+        return get_optional_content_groups(self)
+
+    def get_optional_content_configurations(self) -> list[OptionalContentConfiguration]:
+        """Return the default and alternate optional content configurations."""
+        return get_optional_content_configurations(self)
+
+    def get_optional_content_group(self, identifier: Any) -> OptionalContentGroup | None:
+        """Find a group by name, dictionary, or indirect reference."""
+        return get_optional_content_group(self, identifier)
+
+    def get_visible_optional_content_groups(
+        self,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        event: str = "view",
+    ) -> list[OptionalContentGroup]:
+        """Return groups known to be visible in one configuration."""
+        return get_visible_optional_content_groups(
+            self,
+            configuration=configuration,
+            event=event,
+        )
+
+    def get_optional_content_visibility(
+        self,
+        target: Any = None,
+        page: int | Any | None = None,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | IndirectObject | None = None,
+        *,
+        page_number: int | None = None,
+        event: str = "view",
+        name: str | None = None,
+        marker: str | None = None,
+        ocg: Any = None,
+        ocg_name: str | None = None,
+        config: str | int | OptionalContentConfiguration | DictionaryObject | IndirectObject | None = None,
+    ) -> OptionalContentVisibilityReport:
+        """Report conditional visibility of marked content or an OCG.
+
+        This is a forensic-oriented API. It returns one result per optional
+        content configuration, including configurations in which the target is
+        hidden. Visibility is three-state: visible, hidden, or unknown.
+        """
+        return get_optional_content_visibility(
+            self,
+            target,
+            page=page,
+            configuration=configuration,
+            page_number=page_number,
+            event=event,
+            name=name,
+            marker=marker,
+            ocg=ocg,
+            ocg_name=ocg_name,
+            config=config,
+        )
+
+    def get_optional_content_state(
+        self,
+        target: Any,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        page: int | Any | None = None,
+        event: str = "view",
+    ) -> OptionalContentVisibilityState:
+        """Return a single optional-content visibility state."""
+        return get_optional_content_state(
+            self,
+            target,
+            configuration=configuration,
+            page=page,
+            event=event,
+        )
+
+    def is_optional_content_visible(
+        self,
+        target: Any,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        page: int | Any | None = None,
+        event: str = "view",
+    ) -> bool | None:
+        """Return visibility as a bool, or None when it cannot be determined."""
+        state = self.get_optional_content_state(
+            target,
+            configuration=configuration,
+            page=page,
+            event=event,
+        )
+        return state.visible
+
+    def find_optional_content(
+        self,
+        target: Any = None,
+        page: int | Any | None = None,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        event: str = "view",
+    ) -> OptionalContentVisibilityReport:
+        """Alias for :meth:`get_optional_content_visibility`."""
+        return self.get_optional_content_visibility(
+            target,
+            page=page,
+            configuration=configuration,
+            event=event,
+        )
+
+    def get_ocg_visibility(
+        self,
+        target: Any,
+        page: int | Any | None = None,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        event: str = "view",
+    ) -> OptionalContentVisibilityReport:
+        """Alias for :meth:`get_optional_content_visibility`."""
+        return self.get_optional_content_visibility(
+            target,
+            page=page,
+            configuration=configuration,
+            event=event,
+        )
+
+    def get_marked_content_visibility(
+        self,
+        target: Any = None,
+        page: int | Any | None = None,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        event: str = "view",
+    ) -> OptionalContentVisibilityReport:
+        """Alias for :meth:`get_optional_content_visibility`."""
+        return get_marked_content_visibility(
+            self,
+            target,
+            page=page,
+            configuration=configuration,
+            event=event,
+        )
+
+    def get_optional_content_group_visibility(
+        self,
+        target: Any,
+        page: int | Any | None = None,
+        configuration: str | int | OptionalContentConfiguration | DictionaryObject | None = None,
+        *,
+        event: str = "view",
+    ) -> OptionalContentVisibilityReport:
+        """Alias for :meth:`get_optional_content_visibility`."""
+        return self.get_optional_content_visibility(
+            target,
+            page=page,
+            configuration=configuration,
+            event=event,
+        )
 
     @property
     @abstractmethod

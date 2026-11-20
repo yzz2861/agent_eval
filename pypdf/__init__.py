@@ -11,6 +11,25 @@ from ._configuration import Configuration, apply_configuration, get_configuratio
 from ._crypt_providers import crypt_provider
 from ._doc_common import DocumentInformation
 from ._encryption import PasswordType
+from ._optional_content import (
+    OptionalContent,
+    OptionalContentConfiguration,
+    OptionalContentEvidence,
+    OptionalContentGroup,
+    OptionalContentVisibility,
+    OptionalContentVisibilityReport,
+    OptionalContentVisibilityState,
+    find_optional_content,
+    get_marked_content_visibility,
+    get_ocg_visibility,
+    get_optional_content_configurations,
+    get_optional_content_group,
+    get_optional_content_groups,
+    get_optional_content_state,
+    get_optional_content_visibility,
+    get_visible_optional_content_groups,
+    is_optional_content_visible,
+)
 from ._page import PageObject, Transformation
 from ._reader import PdfReader
 from ._text_extraction import mult
@@ -36,6 +55,13 @@ __all__ = [
     "DocumentInformation",
     "ImageType",
     "ObjectDeletionFlag",
+    "OptionalContent",
+    "OptionalContentConfiguration",
+    "OptionalContentEvidence",
+    "OptionalContentGroup",
+    "OptionalContentVisibility",
+    "OptionalContentVisibilityReport",
+    "OptionalContentVisibilityState",
     "PageObject",
     "PageRange",
     "PaperSize",
@@ -46,7 +72,17 @@ __all__ = [
     "__version__",
     "_debug_versions",
     "apply_configuration",
+    "find_optional_content",
     "get_configuration",
+    "get_marked_content_visibility",
+    "get_ocg_visibility",
+    "get_optional_content_configurations",
+    "get_optional_content_group",
+    "get_optional_content_groups",
+    "get_optional_content_state",
+    "get_optional_content_visibility",
+    "get_visible_optional_content_groups",
+    "is_optional_content_visible",
     "mult",
     "overwrite_configuration",
     "parse_filename_page_ranges",
