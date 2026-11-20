@@ -98,7 +98,8 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'ProvenanceClaim', 'ProvenanceRecord',
+           'PID_CREATING_APPLICATION',
 ]
 
 import io
@@ -266,6 +267,10 @@ DEFECT_FATAL =     40    # an error which cannot be ignored, parsing is
 # Minimal size of an empty OLE file, with 512-bytes sectors = 1536 bytes
 # (this is used in isOleFile and OleFileIO.open)
 MINIMAL_OLEFILE_SIZE = 1536
+
+# Property id of the "Creating Application" property in the
+# \x05SummaryInformation property stream (see [MS-OLEPS] 2.18):
+PID_CREATING_APPLICATION = 0x12
 
 #=== FUNCTIONS ===============================================================
 
@@ -556,6 +561,82 @@ class OleMetadata:
         for prop in self.DOCSUM_ATTRIBS:
             value = getattr(self, prop)
             print('- {}: {}'.format(prop, repr(value)))
+
+class ProvenanceClaim:
+    """
+    A single provenance declaration found in an OLE file, for example a
+    creating application name stored in a property stream, or the class
+    identifier (CLSID) of a storage.
+
+    Attributes:
+
+    - location: where the declaration was found in the file (string)
+    - scope: path of the storage the declaration applies to (tuple of names,
+      empty tuple for the root storage)
+    - declared: declared value as stored in the file, kept unmodified even
+      when it cannot be verified against known identifiers
+    - identified: name of the known producer matching the declared value,
+      or None if the declared value is not a known identifier
+    - corroborated: True when the stream layout of the storage confirms the
+      identified producer, False otherwise
+
+    New in version 0.48
+    """
+
+    def __init__(self, location, scope, declared, identified=None,
+                 corroborated=False):
+        self.location = location
+        self.scope = tuple(scope)
+        self.declared = declared
+        self.identified = identified
+        self.corroborated = corroborated
+
+    def __repr__(self):
+        return ('<ProvenanceClaim location=%r scope=%r declared=%r '
+                'identified=%r corroborated=%r>'
+                % (self.location, self.scope, self.declared,
+                   self.identified, self.corroborated))
+
+
+class ProvenanceRecord:
+    """
+    Provenance inventory for one directory branch (storage) of an OLE file:
+    the list of provenance claims found for that storage.
+
+    Attributes:
+
+    - storage_path: path of the storage (tuple of names, empty tuple for
+      the root storage)
+    - claims: list of ProvenanceClaim objects
+
+    New in version 0.48
+    """
+
+    def __init__(self, storage_path):
+        self.storage_path = tuple(storage_path)
+        self.claims = []
+
+    @property
+    def producers(self):
+        """
+        Sorted list of known producer names identified for this storage
+        (without duplicates, unknown values excluded).
+        """
+        return sorted(set(claim.identified for claim in self.claims
+                          if claim.identified is not None))
+
+    @property
+    def corroborated(self):
+        """
+        True when at least one claim of this storage is corroborated by the
+        stream layout of the storage.
+        """
+        return any(claim.corroborated for claim in self.claims)
+
+    def __repr__(self):
+        return '<ProvenanceRecord storage_path=%r claims=%r>' % (
+            self.storage_path, self.claims)
+
 
 class OleFileIONotClosed(RuntimeWarning):
     """
@@ -2349,6 +2430,112 @@ class OleFileIO:
         self.metadata = OleMetadata()
         self.metadata.parse_properties(self)
         return self.metadata
+
+    def get_provenance(self, known_identifiers=None, layout_signatures=None):
+        """
+        Inventory the provenance declarations of each storage (directory
+        branch) of this file: the creating application named in the
+        ``\\x05SummaryInformation`` property stream and the class identifier
+        (CLSID) of each storage, including the root entry.
+
+        Each declaration is cross-checked against the actual stream layout
+        of its storage, so that a claim can be corroborated by physical
+        evidence. Declarations which cannot be verified are kept with their
+        original value, along with the location and scope of the claim.
+
+        :param known_identifiers: None, or dict mapping a known identifier
+            (a CLSID string such as '00020906-0000-0000-C000-000000000046',
+            or an application name) to a producer name. Matching is
+            case-insensitive. Declared values not found in this dict are
+            kept as-is with no identified producer.
+        :param layout_signatures: None, or dict mapping a producer name to
+            an iterable of stream/storage names characteristic of that
+            producer. A claim is corroborated when all the names of the
+            producer's signature are present directly under the storage
+            the claim applies to.
+        :returns: list of ProvenanceRecord objects, one per storage, root
+            storage first
+
+        new in version 0.48
+        """
+        # normalize known identifiers to lowercase text for matching:
+        known = {}
+        if known_identifiers:
+            for identifier, producer in known_identifiers.items():
+                known[self._normalize_provenance_identifier(identifier)] = \
+                    producer
+        # normalize layout signatures to lowercase name sets:
+        signatures = {}
+        if layout_signatures:
+            for producer, names in layout_signatures.items():
+                signatures[producer] = set(name.lower() for name in names)
+        # map each storage path to the lowercase names of its direct kids:
+        kids_of = {}
+        for entry_path in self.listdir(streams=True, storages=True):
+            parent = tuple(entry_path[:-1])
+            kids_of.setdefault(parent, set()).add(entry_path[-1].lower())
+        # inventory the root storage and every sub-storage:
+        storage_paths = [[]] + self.listdir(streams=False, storages=True)
+        records = []
+        for storage_path in storage_paths:
+            scope = tuple(storage_path)
+            kids = kids_of.get(scope, set())
+            record = ProvenanceRecord(scope)
+            # claim from the class identifier of the storage:
+            clsid = self.getclsid(storage_path)
+            if clsid:
+                producer = known.get(
+                    self._normalize_provenance_identifier(clsid))
+                record.claims.append(ProvenanceClaim(
+                    location='directory entry CLSID',
+                    scope=scope,
+                    declared=clsid,
+                    identified=producer,
+                    corroborated=self._corroborates(producer, kids,
+                                                    signatures)))
+            # claim from the creating application property, if present:
+            summary_path = list(storage_path) + ['\x05SummaryInformation']
+            if self.exists(summary_path):
+                props = self.getproperties(summary_path)
+                application = props.get(PID_CREATING_APPLICATION)
+                if application is not None:
+                    producer = known.get(
+                        self._normalize_provenance_identifier(application))
+                    location = ('%s property %d (creating_application)'
+                                % ('/'.join(summary_path),
+                                   PID_CREATING_APPLICATION))
+                    record.claims.append(ProvenanceClaim(
+                        location=location,
+                        scope=scope,
+                        declared=application,
+                        identified=producer,
+                        corroborated=self._corroborates(producer, kids,
+                                                        signatures)))
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _normalize_provenance_identifier(value):
+        """
+        Normalize a provenance identifier (CLSID or application name) to
+        lowercase text for case-insensitive matching.
+        """
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', 'replace')
+        return value.strip().lower()
+
+    @staticmethod
+    def _corroborates(producer, kids, signatures):
+        """
+        Check if a producer's layout signature is fully present in the
+        lowercase names of a storage's direct kids.
+        """
+        if producer is None:
+            return False
+        signature = signatures.get(producer)
+        if not signature:
+            return False
+        return signature.issubset(kids)
 
     def get_userdefined_properties(self, filename, convert_time=False, no_conversion=None):
         """
