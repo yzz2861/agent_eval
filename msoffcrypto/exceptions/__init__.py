@@ -26,3 +26,13 @@ class InvalidKeyError(DecryptionError):
     """Raised when the given password or key is incorrect or cannot be verified."""
 
     pass
+
+
+class EvidenceExportError(Exception):
+    """Raised when a forensic evidence export cannot be completed.
+
+    No handover receipt is issued when this is raised; an exception
+    handling record is left behind instead.
+    """
+
+    pass
