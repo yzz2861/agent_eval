@@ -1,5 +1,7 @@
 from unittest import TestCase
 
+import lxml.html
+
 from .sanitizer import Sanitizer
 
 
@@ -829,4 +831,131 @@ git commit
                 ("<p>a<badtag>b<em>c</em></badtag>d</p>", "<p>ad</p>"),
             ],
             sanitizer=sanitizer,
+        )
+
+
+class FragmentSanitizerTestCase(TestCase):
+    def sanitizer(self, **settings):
+        configuration = {
+            "tags": {"section", "p", "span", "a"},
+            "empty": {"a"},
+            "separate": {"section", "p", "a"},
+            "attributes": {
+                "section": {"id"},
+                "p": {"id"},
+                "span": {"id"},
+                "a": {
+                    "href",
+                    "id",
+                    "name",
+                    "aria-describedby",
+                    "aria-labelledby",
+                },
+            },
+        }
+        configuration.update(settings)
+        return Sanitizer(configuration)
+
+    @staticmethod
+    def elements_by_id(result):
+        root = lxml.html.fromstring(f"<div>{result}</div>")
+        return {
+            element.get("id"): element
+            for element in root.iter()
+            if isinstance(element.tag, str) and element.get("id")
+        }
+
+    def fragments(self):
+        return {
+            "alice": (
+                '<section id="attachment">'
+                '<span id="label">alice attachment</span>'
+                '<a id="jump" href="#attachment" aria-labelledby="label">'
+                "alice file</a></section>"
+            ),
+            "bob": (
+                '<section id="attachment">'
+                '<span id="label">bob attachment</span>'
+                '<a id="jump" href="#attachment" aria-labelledby="label">'
+                "bob file</a></section>"
+            ),
+        }
+
+    def test_same_named_anchors_are_scoped_to_their_source(self):
+        result = self.sanitizer().sanitize_fragments(self.fragments())
+        elements = self.elements_by_id(result)
+
+        for source in ("alice", "bob"):
+            self.assertEqual(
+                result.id_map[source]["attachment"], f"{source}--attachment"
+            )
+            section = elements[result.id_map[source]["attachment"]]
+            self.assertEqual(
+                section.xpath("string(.//span[1])"), f"{source} attachment"
+            )
+
+        for source in ("alice", "bob"):
+            link = elements[result.id_map[source]["jump"]]
+            self.assertEqual(
+                link.get("href"), f"#{result.id_map[source]['attachment']}"
+            )
+            self.assertEqual(
+                link.get("aria-labelledby"), result.id_map[source]["label"]
+            )
+
+    def test_shared_anchor_stays_global(self):
+        fragments = {
+            "alice": '<a name="top"></a><a href="#top">top</a>',
+            "bob": '<a href="#top">also top</a>',
+        }
+        result = self.sanitizer().sanitize_fragments(fragments, shared_ids={"top"})
+
+        self.assertIn('<a name="top"></a>', result)
+        self.assertEqual(result.count('href="#top"'), 2)
+        self.assertNotIn("alice--top", result)
+
+    def test_ambiguous_and_empty_references_are_reported(self):
+        fragments = {
+            "alice": '<a href="#attachment">ambiguous</a>',
+            "bob": '<a name="attachment"></a>',
+            "carol": '<a name="attachment"></a>',
+            "dave": '<a href="#missing">missing</a><a href="#">empty</a>',
+        }
+        result = self.sanitizer().sanitize_fragments(fragments)
+
+        self.assertEqual(len(result.ambiguous), 1)
+        self.assertEqual(result.ambiguous[0].attribute, "href")
+        self.assertEqual(set(result.ambiguous[0].sources), {"bob", "carol"})
+        self.assertEqual([issue.attribute for issue in result.empty], ["href"])
+        self.assertEqual(result.empty[0].value, "#")
+        self.assertEqual([issue.value for issue in result.unresolved], ["#missing"])
+
+        snapshot = result.as_dict()
+        self.assertIn("html", snapshot)
+        self.assertEqual(snapshot["ambiguous"][0]["source"], "alice")
+
+    def test_import_order_and_recleaning_one_fragment_do_not_move_targets(self):
+        fragments = self.fragments()
+        sanitizer = self.sanitizer()
+
+        forward = sanitizer.sanitize_fragments(fragments)
+        reverse = sanitizer.sanitize_fragments(dict(reversed(fragments.items())))
+
+        def targets(result):
+            return {
+                (reference.source, reference.value): reference.target
+                for reference in result.references
+                if reference.attribute == "href"
+            }
+
+        self.assertEqual(forward.id_map, reverse.id_map)
+        self.assertEqual(targets(forward), targets(reverse))
+
+        # Re-cleaning one author's fragment alone must produce exactly the
+        # same scoped anchors and local link target as the merged page.
+        again = sanitizer.sanitize_fragments({"alice": fragments["alice"]})
+        self.assertEqual(again.id_map["alice"], forward.id_map["alice"])
+        self.assertEqual(
+            targets(again)[("alice", "#attachment")],
+            targets(forward)[("alice", "#attachment")],
         )

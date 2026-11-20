@@ -6,7 +6,7 @@ import lxml.html
 import lxml.html.clean
 
 
-__all__ = ("Sanitizer",)
+__all__ = ("Sanitizer", "merge_fragments", "sanitize_fragments")
 
 
 def sanitize_href(href):
@@ -273,7 +273,7 @@ class Sanitizer:
         try:
             doc = lxml.html.fromstring(html)
             lxml.html.tostring(doc, encoding="utf-8")
-        except Exception:  # noqa: BLE001 -- we could and maybe should be more specific
+        except Exception:
             from lxml.html import soupparser  # noqa: PLC0415
 
             doc = soupparser.fromstring(html)
@@ -442,3 +442,65 @@ class Sanitizer:
         html = re.sub(r"^<div>|</div>$", "", html)
 
         return html
+
+    def sanitize_fragments(
+        self,
+        fragments,
+        shared_ids=(),
+        *,
+        shared_anchors=None,
+        shared_names=None,
+        global_ids=None,
+        sources=None,
+        source_ids=None,
+        separator="",
+        id_separator="--",
+        source_separator=None,
+    ):
+        """
+        Sanitize several fragments and merge them into one source-scoped page.
+
+        Anchors (``id`` and legacy ``<a name>`` values) which survive
+        sanitization are prefixed deterministically based on their source.
+        In-page ``href="#..."`` links and IDREF attributes such as
+        ``aria-labelledby``, ``aria-describedby`` and ``for`` are rewritten
+        with the same scope.  ``shared_ids`` keeps a small number of anchors
+        global, for example a page-level "top" anchor.
+
+        The return value is a :class:`html_sanitizer.fragments.FragmentMergeResult`
+        (a ``str`` subclass) with ``ambiguous``, ``empty`` and ``unresolved``
+        diagnostics.
+        """
+        from .fragments import sanitize_fragments  # noqa: PLC0415
+
+        return sanitize_fragments(
+            fragments,
+            sanitizer=self,
+            shared_ids=shared_ids,
+            shared_anchors=shared_anchors,
+            shared_names=shared_names,
+            global_ids=global_ids,
+            sources=sources,
+            source_ids=source_ids,
+            separator=separator,
+            id_separator=id_separator,
+            source_separator=source_separator,
+        )
+
+    merge_fragments = sanitize_fragments
+    sanitize_many = sanitize_fragments
+
+
+def sanitize_fragments(
+    fragments,
+    sanitizer=None,
+    shared_ids=(),
+    **kwargs,
+):
+    """Sanitize and merge fragments (module-level convenience wrapper)."""
+    from .fragments import sanitize_fragments as merge  # noqa: PLC0415
+
+    return merge(fragments, sanitizer=sanitizer, shared_ids=shared_ids, **kwargs)
+
+
+merge_fragments = sanitize_fragments

@@ -7,6 +7,7 @@ Next version
 
 - Dropped support for Python < 3.10.
 - Added Python 3.14 and 3.15 to the CI matrix.
+- Added ``Sanitizer.sanitize_fragments`` for merging HTML fragments with deterministic per-source anchor scoping. It rewrites retained IDs, in-page links and accessibility IDREFs together, supports a small allowlist of shared anchors, and reports ambiguous, empty and unresolved references.
 
 2.7 (2026-10-25)
 ================

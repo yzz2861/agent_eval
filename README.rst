@@ -174,6 +174,65 @@ The ``get_sanitizer`` function caches sanitizer instances, so feel free
 to call it as often as you want to.
 
 
+Merging fragments
+=================
+
+When HTML fragments from several sources are concatenated into one page,
+same-named anchors have to be scoped before the fragments are joined.
+``Sanitizer.sanitize_fragments`` runs the regular sanitize pipeline for every
+fragment and then rewrites the retained anchors and references together::
+
+    >>> sanitizer = Sanitizer({
+    ...     "tags": {"a", "section"},
+    ...     "empty": {"a"},
+    ...     "separate": {"a", "section"},
+    ...     "attributes": {
+    ...         "a": ("href", "id", "name", "aria-labelledby"),
+    ...         "section": ("id",),
+    ...     },
+    ... })
+    >>> merged = sanitizer.sanitize_fragments({
+    ...     "alice": "<section id=\"attachment\"><a href=\"#attachment\">file</a></section>",
+    ...     "bob": "<section id=\"attachment\"><a href=\"#attachment\">file</a></section>",
+    ... })
+    >>> str(merged)
+    "<section id=\"alice--attachment\"><a href=\"#alice--attachment\">file</a></section><section id=\"bob--attachment\"><a href=\"#bob--attachment\">file</a></section>"
+
+The scope prefix is derived only from the source name and the original local
+ID, not from the position of the fragment. Changing the import order or
+sanitizing one fragment again therefore keeps its IDs and link targets stable.
+``id`` attributes on any allowed tag and legacy ``<a name>`` anchors are
+handled. In-page ``href="#..."`` links and IDREF attributes used by ARIA and
+HTML accessibility features (``aria-labelledby``, ``aria-describedby``,
+``aria-controls``, ``for``, ``headers``, ...) are rewritten to the same scoped
+IDs. Attributes which are not allowed by the sanitizer configuration are
+still dropped before this pass.
+
+A caller can keep a small number of deliberately global anchors by passing
+``shared_ids`` (also available as ``shared_anchors``)::
+
+    >>> merged = sanitizer.sanitize_fragments(fragments, shared_ids={"top"})
+
+Shared anchors keep their original name in both the anchor and its references.
+
+The return value is a ``str`` subclass containing the merged HTML, with
+reviewable diagnostics attached:
+
+- ``merged.ambiguous``: references which match anchors in more than one
+  source, or shared anchors which are defined more than once.
+- ``merged.empty``: empty references such as ``href="#"`` or an empty IDREF
+  attribute.
+- ``merged.unresolved``: references which do not point at any retained anchor.
+- ``merged.id_map``: ``{source: {local_id: effective_id}}``.
+- ``merged.references``: every considered link / IDREF and its target.
+- ``merged.as_dict()``: a JSON-friendly snapshot of the merged HTML and all
+  diagnostics.
+
+Fragments may also be passed as an iterable of ``(source, html)`` pairs, or as
+a sequence of HTML strings together with ``sources=...``. ``separator=`` can
+be used when the caller wants text inserted between fragments.
+
+
 Security issues
 ===============
 
