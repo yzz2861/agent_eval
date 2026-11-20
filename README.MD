@@ -100,3 +100,103 @@ The source directory for python-registry contains a `sample/`
 subdirectory that contains small programs that use python-registry.
 For example, `regview.py` is a read-only clone of Microsoft Window's
 Regedit, implemented in a few hundred lines.
+
+
+User identity correlation
+-------------------------
+`Registry.Identity` is an additive, read-only layer that keeps three kinds of
+identity information separate:
+
+* mount notes and export names (`SourceKind.MOUNT_NOTE`);
+* clues read from the hive itself (`SourceKind.HIVE`); and
+* an explicitly supplied, independent SID cross-reference
+  (`SourceKind.TRUSTED_SID_TABLE`).
+
+The central forensic rule is enforced in code: **without a trusted SID table,
+no unique user attribution is possible**.  The report can still show grouped
+copies and provisional candidates, but `report.is_unique` is false,
+`report.attribution` is `None`, and every per-hive attribution has `unique`
+set to false.  Internal SIDs, mount paths and usernames never silently become
+a final identity.
+
+Usage
+~~~~~
+```python
+from Registry.Identity import correlate_identities
+
+report = correlate_identities(
+    [
+        {"data": site_ntuser_bytes, "evidence_id": "SITE",
+         "mount_note": "C__Users_alice_NTUSER.DAT"},
+        {"data": lab_ntuser_bytes, "evidence_id": "LAB",
+         "mount_note": "/cases/42/C/Users/alice/NTUSER.DAT"},
+    ],
+    trusted_sid_table="sid-cross-reference.csv",
+)
+
+if report.is_unique:
+    print(report.attribution["username"], report.attribution["sid"])
+else:
+    for identity in report.identities:
+        print(identity.status.value, identity.sid, identity.username)
+```
+
+Inputs may be paths, bytes, file-like objects, parsed `Registry.Registry`
+objects, or specification dictionaries.  Each specification accepts
+`evidence_id`, `mount_note` (one note or a list), `label`, and one of
+`path`, `data`, `bytes`, `raw`, `filelike`, `file`, or `registry`.
+
+Hive-side extraction is conservative and covers the usual account clues:
+
+* NTUSER/USRCLASS: `Volatile Environment`, `Environment`, Explorer
+  `Shell Folders`, logon-user values and SID-named keys under
+  `Protected Storage System Provider`;
+* SAM: the machine SID, `Domains\Account\Users\Names`, RID keys with
+  `V`/`F` values, and account SIDs reconstructed from machine SID + RID;
+* SOFTWARE: `ProfileList` entries, profile paths, `Sid` values, last-logon
+  and autologon values;
+* SECURITY: `Policy\Accounts` SID keys; and
+* SYSTEM: environment values that explicitly contain a user name.
+
+Attribution status and provenance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Every clue carries `source`, `evidence_id`, `locator`, `confidence` and a
+`group`.  The numeric `confidence_score` is retained alongside the label.
+Typical ordering is: trusted table (authoritative), reconstructed SAM
+account SID (high), profile/environment clues (high to medium), explicit
+mount annotation (medium), path/export label (low), and free-form label
+(unverified).
+
+* Same display name with different SIDs remains visible as a
+  `same_name_sid_conflict`; the SID candidates are not collapsed.
+* A hive with no SID is marked with `sid_missing_evidence_ids`.  It is only
+  resolved when the trusted table maps the name to exactly one SID, and the
+  result records that the SID came from the table.
+* Byte-identical copies are grouped as a `byte_identical` mirror.  Every copy
+  keeps its own evidence id, path and mount notes; the copies are not two
+  users.  Different bytes that carry the same SID and name are reported as a
+  weaker `same_sid_and_name` mirror candidate.
+* Default/system profiles (`Default`, `Public`, `SYSTEM`, service accounts,
+  `DefaultAccount`, and their SIDs) are reported as `machine_default` and are
+  never promoted to a human user attribution.
+* A name-only ambiguity in the trusted table is reported as `ambiguous`; the
+  resolver does not pick the first row.
+
+Trusted SID table formats
+~~~~~~~~~~~~~~~~~~~~~~~~~
+CSV, TSV, JSON and plain text are accepted.  Column aliases include
+`username`/`user`/`name`, `sid`/`user_sid`, `domain`, and `note`.
+Headerless rows may be `user,sid`, `domain,user,sid`, or `sid user`.
+JSON may be a list of records, a mapping from user name to SID, a mapping from
+SID to user name, or an object with an `entries`/`users`/`table` list.
+
+The table is used only when passed explicitly.  It is never auto-discovered
+next to a hive, which keeps the provenance of the cross-reference clear.
+
+CLI
+~~~
+```
+python -m Registry.Identity --trusted-sid-table sid.csv --pretty SITE.DAT LAB.DAT
+```
+The command prints a JSON report.  `--require-unique` exits with status 3
+when no unique user attribution exists.
