@@ -100,3 +100,51 @@ The source directory for python-registry contains a `sample/`
 subdirectory that contains small programs that use python-registry.
 For example, `regview.py` is a read-only clone of Microsoft Window's
 Regedit, implemented in a few hundred lines.
+
+
+Value evidence and policy snapshots
+-----------------------------------
+Each RegistryValue can expose a per-value evidence view without changing
+the legacy value() or raw_data() API:
+
+    value = reg.root().value("AuditLevel")
+    evidence = value.evidence()
+
+    evidence.raw_data          # stored bytes, exactly as recorded
+    evidence.raw_hex           # legacy-style hex display key
+    evidence.type_marker       # effective numeric type marker
+    evidence.type_name         # RegDWord, RegBigEndian, ...
+    evidence.declared_length   # VK length declaration
+    evidence.complete          # False when declaration is short or marker missing
+    evidence.decoded           # same result as value.value()
+    evidence.comparison_key    # includes type/declaration, not only hex
+    evidence.report_comparison # display_key, evidence_key, and value_key
+
+The evidence kind distinguishes:
+
+  - big-endian: an explicit RegBigEndian integer
+  - little-endian: an ordinary RegDWord/little-endian integer
+  - incomplete: the value is still readable, but the VK declaration is
+    shorter than the storage width or a four-byte inline value lacks the
+    0x80000000 inline marker
+
+Compare two snapshots with compare_evidence() or
+RegistryValue.compare(). The status is unchanged,
+representation_changed (the bytes were reinterpreted or re-encoded), or
+value_changed (the stored bytes and decoded policy value both changed).
+
+A four-policy fixture and an external comparison program are provided:
+
+    python samples/compare_policy_evidence.py \
+        tests/reg_samples/policy_evidence/baseline.hive \
+        tests/reg_samples/policy_evidence/representation_change.hive
+
+    python samples/compare_policy_evidence.py \
+        tests/reg_samples/policy_evidence/baseline.hive \
+        tests/reg_samples/policy_evidence/value_change.hive
+
+The first command identifies AuditLevel as an evidence representation
+change: the raw bytes remain 01000000 while the type marker changes from
+RegDWord to RegBigEndian. The second identifies
+LmCompatibilityLevel as a true policy value change. Regenerate the tiny
+8 KiB hives with python tests/make_policy_evidence_hives.py.

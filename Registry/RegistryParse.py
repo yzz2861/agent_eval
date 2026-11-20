@@ -1007,6 +1007,15 @@ class VKRecord(Record):
         """
         return self.unpack_dword(0xC) & DEVPROP_MASK_TYPE
 
+    def raw_data_type(self):
+        """
+        Get the literal, unmasked type field stored in the VK record.
+
+        Most callers should use data_type(). This accessor is useful for
+        evidence views that need to preserve the value exactly as recorded.
+        """
+        return self.unpack_dword(0xC)
+
     def data_length(self):
         """
         Get the length of this value data. This is the actual length of the data that should be parsed for the value.
@@ -1097,9 +1106,13 @@ class VKRecord(Record):
             data_offset = d.data_offset()
             ret = self._buf[data_offset:data_offset + 0x8]
         elif data_type == RegBigEndian:
-            d = HBINCell(self._buf, data_offset, self)
-            data_offset = d.data_offset()
-            ret = self._buf[data_offset:data_offset + 4]
+            if self.raw_data_length() >= 0x80000000 or self.data_length() < 5:
+                # Four-byte values are stored directly in the DataOffset field.
+                ret = self.unpack_binary(0x8, 0x4)
+            else:
+                d = HBINCell(self._buf, data_offset, self)
+                data_offset = d.data_offset()
+                ret = self._buf[data_offset:data_offset + 4]
         elif data_type == RegLink or \
                         data_type == RegResourceList or \
                         data_type == RegFullResourceDescriptor or \

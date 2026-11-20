@@ -20,6 +20,8 @@ from __future__ import print_function
 
 import sys
 import ntpath
+import binascii
+import hashlib
 from enum import Enum
 
 from . import RegistryParse
@@ -39,6 +41,18 @@ RegResourceRequirementsList = 0x000A
 RegFileTime = 0x0010
 
 DEVPROP_MASK_TYPE = 0x00000FFF
+
+# Value evidence classifications. These names are deliberately explicit:
+# the same stored bytes can mean different things when the type marker or the
+# declared length changes.
+EVIDENCE_UNCHANGED = "unchanged"
+EVIDENCE_REPRESENTATION_CHANGED = "representation_changed"
+EVIDENCE_VALUE_CHANGED = "value_changed"
+
+EVIDENCE_BIG_ENDIAN = "big-endian"
+EVIDENCE_LITTLE_ENDIAN = "little-endian"
+EVIDENCE_INCOMPLETE = "incomplete"
+EVIDENCE_NOT_APPLICABLE = "not-applicable"
 
 class HiveType(Enum):
     UNKNOWN = ""
@@ -228,12 +242,546 @@ class RegistryValue(object):
     def raw_data(self, overrun=0):
         return self._vkrecord.raw_data(overrun)
 
+    def raw_value_type(self):
+        """
+        Get the literal, unmasked type field stored in the VK record.
+
+        value_type() returns the effective type after applying the
+        DEVPROP_MASK_TYPE mask. The unmasked field is retained for evidence
+        views so that no recorded marker information is lost.
+        """
+        return self._vkrecord.raw_data_type()
+
+    def evidence(self, overrun=0):
+        """
+        Return a per-value evidence view.
+
+        The result keeps the stored bytes, the type marker, the declaration
+        from the VK record, the decoded value, and canonical comparison keys
+        together. The legacy value()/raw_data() methods are unchanged.
+        """
+        return RegistryValueEvidence(self, overrun=overrun)
+
+    def evidence_view(self, overrun=0):
+        """
+        Alias for evidence() for callers that prefer an explicit view name.
+        """
+        return self.evidence(overrun=overrun)
+
+    def compare(self, other, overrun=0):
+        """
+        Compare this value's evidence with another value or evidence view.
+
+        The result distinguishes an unchanged value, an evidence
+        representation change, and an actual policy value change.
+        """
+        return compare_evidence(self.evidence(overrun=overrun), other)
+
+    def compare_evidence(self, other, overrun=0):
+        """
+        Alias for compare().
+        """
+        return self.compare(other, overrun=overrun)
+
     def timestamp(self):
         """
         Get the last modified timestamp as a Python datetime. Only valid for
         AppContainer settings.dat reg hive
         """
         return self._vkrecord.timestamp()
+
+
+def _hexlify(data):
+    if data is None:
+        return None
+    return binascii.hexlify(data).decode("ascii")
+
+
+def _canonical_value(value):
+    """
+    Return a stable, human-readable key for a decoded value.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return "bytes:{0}".format(_hexlify(value))
+    if isinstance(value, bool):
+        return "bool:{0}".format(1 if value else 0)
+    if isinstance(value, (int, float)):
+        return "{0}:{1!r}".format(type(value).__name__, value)
+    if isinstance(value, (list, tuple)):
+        return "list:[{0}]".format(",".join(_canonical_value(item) for item in value))
+    if hasattr(value, "isoformat"):
+        return "datetime:{0}".format(value.isoformat())
+    if isinstance(value, str):
+        return "text:{0}".format(value)
+    return "repr:{0}".format(repr(value))
+
+
+def _json_safe_value(value):
+    if isinstance(value, (bytes, bytearray)):
+        return _hexlify(value)
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _expected_storage_length(data_type):
+    if data_type in (RegDWord, RegBigEndian):
+        return 4
+    if data_type in (RegQWord, RegFileTime):
+        return 8
+    return None
+
+
+class RegistryValueEvidence(dict):
+    """
+    A per-value evidence view.
+
+    The object behaves as both a mapping and a small object with attributes,
+    so it can be serialized by report tooling without losing the distinction
+    between storage bytes and their declared interpretation.
+
+    The three important encodings are:
+      - explicit big-endian integers (RegBigEndian)
+      - ordinary little-endian integers (RegDWord and other little-endian types)
+      - records whose value is still readable but whose declared length is
+        shorter than the storage width
+    """
+
+    _ALIASES = {
+        "raw": "raw_data",
+        "raw_bytes": "raw_data",
+        "hex": "raw_hex",
+        "type": "value_type",
+        "type_marker": "value_type",
+        "type_id": "value_type",
+        "data_type": "value_type",
+        "type_field": "raw_type_marker",
+        "raw_type": "raw_type_marker",
+        "raw_type_field": "raw_type_marker",
+        "data_length": "declared_length",
+        "raw_data_length": "raw_length_field",
+        "value_type_str": "type_name",
+        "type_str": "type_name",
+        "decoded_result": "decoded",
+        "raw_storage": "raw_data",
+        "storage_bytes": "raw_data",
+        "compare_key": "comparison_key",
+        "endianness": "byte_order",
+        "decoded_value": "decoded",
+        "value": "decoded",
+        "declared_incomplete": "incomplete",
+        "evidence_kind": "kind",
+        "encoding_class": "encoding",
+        "comparison": "comparison_key",
+        "report_comparison": "comparison_view",
+        "comparison_summary": "comparison_view",
+        "evidence_key": "comparison_key",
+        "storage_key": "comparison_key",
+        "fingerprint": "comparison_key",
+        "legacy_key": "display_key",
+    }
+
+    def __init__(self, value, overrun=0):
+        if not isinstance(value, RegistryValue):
+            raise TypeError("RegistryValueEvidence requires a RegistryValue")
+
+        vkrecord = value._vkrecord
+        value_type = value.value_type()
+        raw_type_marker = value.raw_value_type()
+        declared_length = vkrecord.data_length()
+        raw_length_field = vkrecord.raw_data_length()
+        expected_length = _expected_storage_length(value_type)
+
+        raw_data = b""
+        raw_error = None
+        try:
+            raw_data = value.raw_data(overrun=overrun)
+        except Exception as e:
+            raw_error = str(e)
+
+        inline_marker_present = raw_length_field >= 0x80000000
+        inline_required = (
+            expected_length is not None and
+            expected_length <= 4 and
+            value_type in (RegDWord, RegBigEndian)
+        )
+        if expected_length is None:
+            declared_length_complete = len(raw_data) >= declared_length
+        else:
+            declared_length_complete = (
+                declared_length >= expected_length and
+                len(raw_data) >= expected_length
+            )
+        complete = declared_length_complete and (
+            inline_marker_present or not inline_required
+        )
+
+        if value_type == RegBigEndian:
+            byte_order = "big"
+            encoding = EVIDENCE_BIG_ENDIAN
+        elif value_type in (RegDWord, RegQWord, RegFileTime):
+            byte_order = "little"
+            encoding = EVIDENCE_LITTLE_ENDIAN
+        else:
+            byte_order = "not-applicable"
+            encoding = EVIDENCE_NOT_APPLICABLE
+
+        if not complete:
+            kind = EVIDENCE_INCOMPLETE
+        else:
+            kind = encoding
+
+        decoded = None
+        decode_error = raw_error
+        if raw_error is None:
+            try:
+                decoded = value.value(overrun=overrun)
+            except Exception as e:
+                decode_error = str(e)
+        readable = decode_error is None
+
+        raw_hex = _hexlify(raw_data)
+        raw_key = "raw:{0}".format(raw_hex)
+        value_key = _canonical_value(decoded) if readable else None
+        display_key = raw_hex
+
+        comparison_material = (
+            "python-registry-evidence-v1|"
+            "type={0}|raw_type={1}|order={2}|encoding={3}|"
+            "declared={4}|raw_field={5}|complete={6}|raw={7}"
+        ).format(
+            value_type,
+            raw_type_marker,
+            byte_order,
+            encoding,
+            1 if complete else 0,
+            declared_length,
+            raw_length_field,
+            raw_hex,
+        )
+        comparison_key = hashlib.sha256(
+            comparison_material.encode("utf-8")
+        ).hexdigest()
+
+        notes = []
+        if not complete:
+            if not declared_length_complete:
+                if expected_length is not None:
+                    notes.append(
+                        "declared length {0} is shorter than the {1}-byte "
+                        "storage width; value is still readable".format(
+                            declared_length, expected_length
+                        )
+                    )
+                else:
+                    notes.append(
+                        "declared length {0} exceeds the {1} bytes available".format(
+                            declared_length, len(raw_data)
+                        )
+                    )
+            elif inline_required and not inline_marker_present:
+                notes.append(
+                    "four-byte inline value does not set the 0x80000000 "
+                    "marker; value is still readable"
+                )
+        if inline_marker_present:
+            notes.append("inline data field")
+        if raw_type_marker != value_type:
+            notes.append(
+                "raw type marker 0x{0:x} masks to 0x{1:x}".format(
+                    raw_type_marker, value_type
+                )
+            )
+
+        path = None
+        try:
+            path = vkrecord.parent().parent().path()
+        except Exception:
+            pass
+
+        super(RegistryValueEvidence, self).__init__(
+            name=value.name(),
+            path=path,
+            value_type=value_type,
+            type_name=value.value_type_str(),
+            raw_type_marker=raw_type_marker,
+            raw_data=raw_data,
+            raw_hex=raw_hex,
+            byte_order=byte_order,
+            encoding=encoding,
+            kind=kind,
+            declared_length=declared_length,
+            raw_length_field=raw_length_field,
+            expected_length=expected_length,
+            declared_length_complete=declared_length_complete,
+            inline=inline_marker_present,
+            inline_marker_present=inline_marker_present,
+            inline_required=inline_required,
+            complete=complete,
+            incomplete=not complete,
+            readable=readable,
+            decoded=decoded,
+            decoded_key=value_key,
+            value_key=value_key,
+            raw_key=raw_key,
+            display_key=display_key,
+            comparison_key=comparison_key,
+            decode_error=decode_error,
+            notes=notes,
+        )
+        self["comparison_view"] = {
+            "display_key": display_key,
+            "evidence_key": comparison_key,
+            "value_key": value_key,
+            "type_marker": value_type,
+            "byte_order": byte_order,
+            "complete": complete,
+        }
+
+    def __getitem__(self, key):
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        alias = self._ALIASES.get(key)
+        if alias is not None and dict.__contains__(self, alias):
+            return dict.__getitem__(self, alias)
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    @property
+    def is_big_endian(self):
+        return self["byte_order"] == "big"
+
+    @property
+    def is_little_endian(self):
+        return self["byte_order"] == "little"
+
+    @property
+    def is_incomplete(self):
+        return not self["complete"]
+
+    @property
+    def is_usual_little_endian(self):
+        return self["value_type"] in (RegDWord, RegQWord)
+
+    @property
+    def is_complete(self):
+        return self["complete"]
+
+    @property
+    def is_explicit_big_endian(self):
+        return self["value_type"] == RegBigEndian
+
+    def to_dict(self):
+        """
+        Return a JSON-friendly copy. Raw bytes become lowercase hex strings.
+        """
+        result = dict(self)
+        result["raw_data"] = self["raw_hex"]
+        result["decoded"] = _json_safe_value(self["decoded"])
+        return result
+
+    def as_dict(self):
+        """
+        Alias for to_dict().
+        """
+        return self.to_dict()
+
+    def compare(self, other):
+        """
+        Compare this evidence view with another evidence view or RegistryValue.
+        """
+        return compare_evidence(self, other)
+
+
+class RegistryValueComparison(dict):
+    """
+    Result of comparing two per-value evidence views.
+    """
+
+    _ALIASES = {
+        "classification": "status",
+        "category": "status",
+        "result": "verdict",
+        "reason": "report",
+        "is_representation_change": "representation_changed",
+        "is_value_change": "value_changed",
+        "evidence_changed": "representation_changed",
+        "evidence_representation_changed": "representation_changed",
+        "policy_value_changed": "value_changed",
+        "same_raw": "same_raw_data",
+        "same_type": "same_type_marker",
+        "same_value": "same_decoded_value",
+        "raw_changed": "raw_data_changed",
+        "type_changed": "type_marker_changed",
+    }
+
+    def __getitem__(self, key):
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        alias = self._ALIASES.get(key)
+        if alias is not None and dict.__contains__(self, alias):
+            return dict.__getitem__(self, alias)
+        raise KeyError(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def to_dict(self):
+        result = dict(self)
+        if isinstance(result.get("left"), RegistryValueEvidence):
+            result["left"] = result["left"].to_dict()
+        if isinstance(result.get("right"), RegistryValueEvidence):
+            result["right"] = result["right"].to_dict()
+        return result
+
+    def as_dict(self):
+        """
+        Alias for to_dict().
+        """
+        return self.to_dict()
+
+
+def _coerce_evidence(value):
+    if isinstance(value, RegistryValueEvidence):
+        return value
+    if isinstance(value, RegistryValue):
+        return value.evidence()
+    if hasattr(value, "evidence"):
+        return _coerce_evidence(value.evidence())
+    raise TypeError("expected RegistryValue or RegistryValueEvidence")
+
+
+def compare_evidence(left, right):
+    """
+    Compare two values and classify the difference.
+
+    - unchanged: stored bytes, type/declaration, and decoded value match.
+    - representation_changed: the bytes were reinterpreted or re-encoded
+      (for example, a DWord marker became RegBigEndian), so the report must
+      not treat the raw hex key alone as evidence of a policy change.
+    - value_changed: stored bytes and the decoded policy value both changed.
+    """
+    left = _coerce_evidence(left)
+    right = _coerce_evidence(right)
+
+    same_raw = left["raw_data"] == right["raw_data"]
+    same_type = (
+        left["value_type"] == right["value_type"] and
+        left["raw_type_marker"] == right["raw_type_marker"]
+    )
+    same_declaration = (
+        left["declared_length"] == right["declared_length"] and
+        left["raw_length_field"] == right["raw_length_field"]
+    )
+    same_evidence = left["comparison_key"] == right["comparison_key"]
+    if not left["readable"] and not right["readable"]:
+        same_decoded = same_raw
+    else:
+        same_decoded = (
+            left["readable"] and right["readable"] and
+            left["value_key"] == right["value_key"]
+        )
+
+    if same_evidence and same_decoded:
+        status = EVIDENCE_UNCHANGED
+        verdict = "unchanged"
+        report = "stored bytes, type/declaration, and decoded value are unchanged"
+    elif not same_raw and not same_decoded:
+        status = EVIDENCE_VALUE_CHANGED
+        verdict = "policy_value_changed"
+        report = "stored bytes and the decoded policy value both changed"
+    elif not same_raw and same_decoded:
+        status = EVIDENCE_REPRESENTATION_CHANGED
+        verdict = "evidence_representation_changed"
+        report = (
+            "stored bytes were re-encoded but the decoded policy value is "
+            "unchanged"
+        )
+    elif same_raw and not same_type:
+        status = EVIDENCE_REPRESENTATION_CHANGED
+        verdict = "evidence_representation_changed"
+        report = (
+            "stored bytes are unchanged but the type marker changed "
+            "({0} -> {1}); this is an evidence representation change, not "
+            "new policy bytes".format(
+                left["type_name"], right["type_name"]
+            )
+        )
+    elif same_raw and not same_declaration:
+        status = EVIDENCE_REPRESENTATION_CHANGED
+        verdict = "evidence_representation_changed"
+        report = (
+            "stored bytes are unchanged but the declared length changed "
+            "({0} -> {1})".format(
+                left["declared_length"], right["declared_length"]
+            )
+        )
+    elif same_raw and not same_decoded:
+        status = EVIDENCE_REPRESENTATION_CHANGED
+        verdict = "evidence_representation_changed"
+        report = (
+            "stored bytes and type marker are unchanged; only the decoded "
+            "representation changed"
+        )
+    else:
+        status = EVIDENCE_VALUE_CHANGED
+        verdict = "policy_value_changed"
+        report = "stored bytes changed and the decoded policy value differs"
+
+    representation_changed = status == EVIDENCE_REPRESENTATION_CHANGED
+    value_changed = status == EVIDENCE_VALUE_CHANGED
+
+    return RegistryValueComparison(
+        status=status,
+        verdict=verdict,
+        report=report,
+        left=left,
+        right=right,
+        same_raw_data=same_raw,
+        same_type_marker=same_type,
+        same_declaration=same_declaration,
+        same_decoded_value=same_decoded,
+        same_evidence=same_evidence,
+        raw_data_changed=not same_raw,
+        type_marker_changed=not same_type,
+        declaration_changed=not same_declaration,
+        decoded_value_changed=not same_decoded,
+        representation_changed=representation_changed,
+        value_changed=value_changed,
+        left_display_key=left["display_key"],
+        right_display_key=right["display_key"],
+        left_comparison_key=left["comparison_key"],
+        right_comparison_key=right["comparison_key"],
+    )
 
 
 class RegistryKey(object):
