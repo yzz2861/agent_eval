@@ -1,0 +1,14 @@
+line-length = 80
+
+[lint]
+select = ["ALL"]
+ignore = [
+    "COM", "EM", "FIX", "FBT", "PERF", "PT", "PTH", "TD", "TRY",
+    "D400", "D415", "D213", "D205", "D202", "D107", "D407", "D413",
+    "D212", "D104", "D406", "D105", "D411", "D401", "D200", "D203",
+    "PLR0913", "PLR2004", "N818",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["D", "E501", "ERA001", "RUF012", "S", "SLF001", "T201", "TC", "ANN202"]
+"demo_offline_release.py" = ["D", "INP001", "T201", "PLR0915"]
