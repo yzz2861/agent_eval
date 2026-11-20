@@ -3852,6 +3852,20 @@ class VBA_Parser(object):
                 for variable in oleform.extract_OleFormVariables(ole, form_storage):
                     yield (self.filename, '/'.join(form_storage), variable)
 
+    def extract_form_control_defaults(self):
+        """
+        Static forensic extraction of UserForm control default values.
+
+        Yields form_forensics.ControlDefaultValue records: each carries the
+        control identity, persisted default value, value source (stream,
+        offset, encoding) and an explicit parse status. Only form streams
+        are read; no macro or form is executed and control names are never
+        linked to VBA procedures.
+        """
+        from . import form_forensics
+        for record in form_forensics.extract_from_vba_parser(self):
+            yield record
+
     def extract_pcode(self):
         """
         Extract and disassemble the VBA P-code, using pcodedmp

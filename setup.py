@@ -289,6 +289,7 @@ entry_points = {
         'rtfobj=oletools.rtfobj:main',
         'oleobj=oletools.oleobj:main',
         'olefile=olefile.olefile:main',
+        'oleform-forensics=oletools.form_forensics:main',
     ],
 }
 

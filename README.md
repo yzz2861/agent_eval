@@ -85,6 +85,7 @@ Tools:
 
 - [oleid](https://github.com/decalage2/oletools/wiki/oleid): to analyze OLE files to detect specific characteristics usually found in malicious files.
 - [olevba](https://github.com/decalage2/oletools/wiki/olevba): to extract and analyze VBA Macro source code from MS Office documents (OLE and OpenXML).
+- **form_forensics** (offline UserForm forensics): statically reads the VBA UserForm `f`/`o` streams already parsed by oleform and reports, per project/form/control identity, the persisted default value, its source (stream, offset, encoding) and an explicit parse status. It distinguishes no stored default, an empty stored default and an unreadable value, never executes macros or forms, and keeps attribution stable even when stream enumeration order is reversed. Use `VBA_Parser.extract_form_control_defaults()` or the `oleform-forensics` CLI.
 - [MacroRaptor](https://github.com/decalage2/oletools/wiki/mraptor): to detect malicious VBA Macros
 - [msodde](https://github.com/decalage2/oletools/wiki/msodde): to detect and extract DDE/DDEAUTO links from MS Office documents, RTF and CSV
 - [pyxswf](https://github.com/decalage2/oletools/wiki/pyxswf): to detect, extract and analyze Flash objects (SWF) that may
