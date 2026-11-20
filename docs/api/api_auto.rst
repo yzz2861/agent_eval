@@ -183,6 +183,14 @@ dpkt.icmp module
     :undoc-members:
     :show-inheritance:
 
+dpkt.icmp_quote module
+----------------------
+
+.. automodule:: dpkt.icmp_quote
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 dpkt.icmp6 module
 -----------------
 

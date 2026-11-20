@@ -32,6 +32,8 @@ from . import http
 from . import http2
 from . import icmp
 from . import icmp6
+from . import icmp_quote
+from . import icmp_evidence
 from . import ieee80211
 from . import igmp
 from . import ip
@@ -76,6 +78,11 @@ from . import tpkt
 from . import udp
 from . import vrrp
 from . import yahoo
+
+from .icmp_quote import (
+    QuoteEvidence, QuoteEvidenceTable, verify_icmp_quotes,
+    correlate_icmp_quotes, build_evidence_table,
+)
 
 # Note: list() is used to get a copy of the dict in order to avoid
 # "RuntimeError: dictionary changed size during iteration"

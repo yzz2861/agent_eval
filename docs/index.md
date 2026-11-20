@@ -11,6 +11,7 @@ pip install dpkt
 ### Examples
 - [Print Packets](print_packets.md)
 - [Print ICMP](print_icmp.md)
+- [Verify ICMP Quotes](icmp_quote_verification.md)
 - [Print HTTP](print_http_requests.md)
 
 ### Documentation
