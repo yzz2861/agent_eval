@@ -101,6 +101,29 @@ class AbstractKeystore(object):
             keystore_bytes = self.saves(store_password)
             file.write(keystore_bytes)
 
+    def check_recovery(self, purpose, allowed_entry_types=None,
+                       public_material=None, **kwargs):
+        """
+        Run an offline recovery-capability check against this store.
+
+        See :func:`jks.recovery.check_recovery`.  The check only reads
+        public metadata and never decrypts an entry.
+        """
+        from .recovery import check_recovery
+        return check_recovery(self, purpose, allowed_entry_types,
+                              public_material, **kwargs)
+
+    audit_recovery = check_recovery
+    assess_recovery = check_recovery
+    recovery_check = check_recovery
+    check_capabilities = check_recovery
+    check_keystore_recovery = check_recovery
+    check_keystore_capabilities = check_recovery
+    recovery_report = check_recovery
+    verify_recovery = check_recovery
+    validate_recovery = check_recovery
+    audit = check_recovery
+
     @classmethod
     def _read_utf(cls, data, pos, kind=None):
         """

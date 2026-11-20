@@ -48,6 +48,7 @@ Contents:
    jks
    bks
    exceptions
+   recovery
 
 
 Indices and tables

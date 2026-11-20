@@ -95,3 +95,34 @@ def jksfile2context(jks_file, passphrase, key_alias, key_password=None):
     return ctx
 
 ```
+
+Offline recovery capability checks
+-----------------------------------
+
+A backup inventory can list the right aliases without proving that a
+keystore can actually restore a particular identity.  The recovery check
+looks only at public metadata and never decrypts an entry or returns key
+material:
+
+```python
+import jks
+
+ks = jks.KeyStore.load("backup.jks", None, try_decrypt_keys=False)
+report = jks.check_recovery(
+    ks,
+    purpose="tls_server",
+    allowed_entry_types=[jks.PrivateKeyEntry, jks.TrustedCertEntry],
+    public_material=expected_certificate_der,   # cert, public key, fingerprint or alias
+)
+
+print(report.ok, report.missing_capabilities)
+print(report.precedence)              # matched alternatives in priority order
+print(report.for_role("recovery").missing_capabilities)
+print(report.for_role("security").missing_capabilities)
+```
+
+A trusted-certificate entry can provide a complete certificate chain, but
+that chain alone never satisfies a purpose that requires private-key
+possession.  The report is JSON-serializable with ``report.to_json()`` and
+contains only aliases, categories, public fingerprints and capability
+gaps, never private keys or passwords.
