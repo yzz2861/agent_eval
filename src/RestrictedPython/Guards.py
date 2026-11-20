@@ -21,6 +21,15 @@ import string
 from RestrictedPython.transformer import INSPECT_ATTRIBUTES
 
 
+#: Version of the guard API and its security-relevant behaviour.
+#:
+#: Hosts which approve restricted code should include this value in the
+#: compile artifact.  It must be bumped whenever an existing guard changes in
+#: a way which can make previously approved code behave differently.
+GUARD_VERSION = '1'
+GUARDS_VERSION = GUARD_VERSION
+
+
 safe_builtins = {}
 
 _safe_names = [

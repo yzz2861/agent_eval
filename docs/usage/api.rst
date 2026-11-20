@@ -31,7 +31,7 @@ API overview
     The meaning and defaults of the parameters are the same as in
     ``compile_restricted``.
 
-    :return: CompileResult (a namedtuple with code, errors, warnings, used_names)
+    :return: CompileResult (code, errors, warnings, used_names, artifact)
 
 .. py:method:: compile_restricted_eval(source, filename, flags, dont_inherit, policy)
     :module: RestrictedPython
@@ -41,7 +41,7 @@ API overview
     The meaning and defaults of the parameters are the same as in
     ``compile_restricted``.
 
-    :return: CompileResult (a namedtuple with code, errors, warnings, used_names)
+    :return: CompileResult (code, errors, warnings, used_names, artifact)
 
 .. py:method:: compile_restricted_single(source, filename, flags, dont_inherit, policy)
     :module: RestrictedPython
@@ -51,7 +51,7 @@ API overview
     The meaning and defaults of the parameters are the same as in
     ``compile_restricted``.
 
-    :return: CompileResult (a namedtuple with code, errors, warnings, used_names)
+    :return: CompileResult (code, errors, warnings, used_names, artifact)
 
 .. py:method:: compile_restricted_function(p, body, name, filename, globalize=None)
     :module: RestrictedPython
@@ -109,6 +109,63 @@ API overview
     ...     '<function_name>',
     ...     compiled_function.__defaults__ or ())
     >>> result = new_function(*[], **{})
+
+reviewable compile artifacts
+++++++++++++++++++++++++++++
+
+The ``compile_restricted_*`` helpers return a ``CompileResult`` whose
+``artifact`` attribute describes the source and the environment which was
+used to compile it.  ``compile_restricted`` can return that result too by
+passing ``with_artifact=True`` (or ``return_artifact=True``).
+
+.. code-block:: pycon
+
+    >>> from RestrictedPython import compile_restricted_exec
+    >>> from RestrictedPython import RestrictingNodeTransformer
+    >>> result = compile_restricted_exec('answer = 42')
+    >>> result.artifact.policy
+    'RestrictedPython.transformer.RestrictingNodeTransformer'
+    >>> summary = result.artifact.to_json()  # deterministic text summary
+    >>> 'source_sha256' in summary
+    True
+
+The artifact contains a SHA-256 digest of the source plus labels for the
+policy, policy version, guard version, language feature settings, compiler
+flags and Python/RestrictedPython versions.  It never contains source text,
+guard objects, globals, builtins or other host object values.
+
+An approval record is only the textual artifact summary:
+
+.. code-block:: pycon
+
+    >>> from RestrictedPython import create_approval_record, check_approval
+    >>> record = create_approval_record(result)
+    >>> isinstance(record, str)
+    True
+    >>> check_approval(record, result).applicable
+    True
+
+To decide whether an old approval still applies, pass the same source through
+the current compiler and compare the new artifact.  Comparison is purely a
+metadata operation and never executes the source:
+
+.. code-block:: pycon
+
+    >>> class OtherPolicy(RestrictingNodeTransformer):
+    ...     pass
+    >>> current = compile_restricted_exec('answer = 42', policy=OtherPolicy)
+    >>> decision = check_approval(record, current)
+    >>> decision.applicable
+    False
+    >>> decision.changed_fields
+    ('policy',)
+
+The same mechanism reports ``guard_version``, ``policy_version``,
+``language_features``, ``flags``, ``python_version`` and other environment
+changes.  Pass ``guard_version=``, ``policy_version=`` and
+``language_features=`` to the compile helpers (or supply a
+``CompileEnvironment`` through ``environment=``) to record the host's actual
+settings.
 
 restricted builtins
 +++++++++++++++++++

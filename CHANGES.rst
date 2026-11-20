@@ -4,7 +4,17 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add reviewable compile artifacts to the restricted compile results.  An
+  artifact contains a source digest plus the policy, guard version, language
+  feature settings, compiler flags and Python/RestrictedPython versions, but
+  no source text or host object values.  ``compile_restricted`` can return a
+  ``CompileResult`` with ``with_artifact=True`` while its historical return
+  value is unchanged.
+
+- Add text-only approval records and ``check_approval`` /
+  ``approval_applies`` helpers.  They report which policy, guard version,
+  language feature or other environment setting invalidated an approval, and
+  compare metadata without executing the restricted source.
 
 
 9.0 (2026-11-04)

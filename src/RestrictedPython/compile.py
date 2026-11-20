@@ -9,6 +9,10 @@ import warnings
 
 from RestrictedPython._compat import IS_CPYTHON
 from RestrictedPython._types import cast_not_none
+from RestrictedPython.artifacts import build_compile_artifact
+from RestrictedPython.artifacts import CompileArtifact
+from RestrictedPython.artifacts import CompileEnvironment
+from RestrictedPython.artifacts import T_FeatureInput
 from RestrictedPython.transformer import RestrictingNodeTransformer
 from RestrictedPython.transformer import copy_locations
 
@@ -17,11 +21,164 @@ from RestrictedPython.transformer import copy_locations
 ReadableBuffer: typing.TypeAlias = bytes | bytearray
 
 
-class CompileResult(typing.NamedTuple):
-    code: types.CodeType | None
-    errors: collections.abc.Sequence[str]
-    warnings: collections.abc.Sequence[str]
-    used_names: collections.abc.Mapping[str, bool]
+class CompileResult(tuple):
+    """The historical four-value compile result plus an optional artifact.
+
+    The tuple part intentionally keeps its original four fields so existing
+    unpacking and indexing code continues to work.  The artifact is available
+    through the ``artifact`` attribute (and through index ``4`` for callers
+    which prefer a uniform accessor).
+    """
+
+    _fields: typing.ClassVar[tuple[str, ...]] = (
+        'code',
+        'errors',
+        'warnings',
+        'used_names',
+    )
+    _field_defaults: typing.ClassVar[dict[str, typing.Any]] = {
+        'artifact': None,
+    }
+    __match_args__ = _fields
+
+    artifact: CompileArtifact | None
+
+    def __new__(
+        cls,
+        code: types.CodeType | None,
+        errors: collections.abc.Sequence[str],
+        warnings: collections.abc.Sequence[str],
+        used_names: collections.abc.Mapping[str, bool],
+        artifact: CompileArtifact | None = None,
+    ) -> CompileResult:
+        result = tuple.__new__(cls, (code, errors, warnings, used_names))
+        result.artifact = artifact
+        return result
+
+    @property
+    def code(self) -> types.CodeType | None:
+        return typing.cast(types.CodeType | None, tuple.__getitem__(self, 0))
+
+    @property
+    def errors(self) -> collections.abc.Sequence[str]:
+        return typing.cast(
+            collections.abc.Sequence[str], tuple.__getitem__(self, 1))
+
+    @property
+    def warnings(self) -> collections.abc.Sequence[str]:
+        return typing.cast(
+            collections.abc.Sequence[str], tuple.__getitem__(self, 2))
+
+    @property
+    def used_names(self) -> collections.abc.Mapping[str, bool]:
+        return typing.cast(
+            collections.abc.Mapping[str, bool], tuple.__getitem__(self, 3))
+
+    def __getitem__(self, index: int | slice) -> typing.Any:
+        if index == 4:
+            return self.artifact
+        return tuple.__getitem__(self, index)
+
+    def __eq__(self, other: typing.Any) -> bool:
+        if not isinstance(other, tuple):
+            return NotImplemented  # type: ignore[return-value]
+        if isinstance(other, CompileResult):
+            if self.artifact is None or other.artifact is None:
+                return bool(tuple.__eq__(self, other))
+            return bool(
+                tuple.__eq__(self, other)
+                and self.artifact == other.artifact
+            )
+        if isinstance(other, tuple) and len(other) == 5:
+            return bool(
+                tuple.__eq__(self, other[:4])
+                and self.artifact == other[4]
+            )
+        return bool(tuple.__eq__(self, other))
+
+    __hash__ = tuple.__hash__
+
+    def __ne__(self, other: typing.Any) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result  # type: ignore[return-value]
+        return not result
+
+    def __repr__(self) -> str:
+        return (
+            f'{type(self).__name__}('
+            f'code={self.code!r}, '
+            f'errors={self.errors!r}, '
+            f'warnings={self.warnings!r}, '
+            f'used_names={self.used_names!r}, '
+            f'artifact={self.artifact!r})'
+        )
+
+    def __copy__(self) -> CompileResult:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, typing.Any]) -> CompileResult:
+        return self
+
+    def __getnewargs__(self) -> tuple[typing.Any, ...]:
+        return (
+            self.code,
+            self.errors,
+            self.warnings,
+            self.used_names,
+            self.artifact,
+        )
+
+    def _asdict(self) -> dict[str, typing.Any]:
+        return {
+            'code': self.code,
+            'errors': self.errors,
+            'warnings': self.warnings,
+            'used_names': self.used_names,
+        }
+
+    @classmethod
+    def _make(
+        cls,
+        iterable: collections.abc.Iterable[typing.Any],
+    ) -> CompileResult:
+        values = tuple(iterable)
+        if len(values) == len(cls._fields):
+            values += (None,)
+        return cls(*values)
+
+    def _replace(self, **changes: typing.Any) -> CompileResult:
+        unknown = set(changes) - set(self._fields) - {'artifact'}
+        if unknown:
+            raise ValueError(f'Got unexpected field names: {unknown!r}')
+        values = [
+            changes.get(name, getattr(self, name))
+            for name in self._fields
+        ]
+        artifact = changes.get('artifact', self.artifact)
+        return type(self)(*values, artifact=artifact)
+
+    def approval_record(self) -> typing.Any:
+        """Return the text-only approval record for this compile result."""
+        if self.artifact is None:
+            return None
+        return self.artifact.approval_record()
+
+    @property
+    def approval(self) -> typing.Any:
+        return self.approval_record()
+
+    @property
+    def summary(self) -> str | None:
+        if self.artifact is None:
+            return None
+        return self.artifact.to_json()
+
+    def matches_approval(self, approval: typing.Any) -> bool:
+        """Return whether ``approval`` still applies to this result."""
+        from RestrictedPython.artifacts import approval_applies
+
+        return approval_applies(approval, self)
 
 
 syntax_error_template = (
@@ -45,11 +202,32 @@ def _compile_restricted_mode(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
+        _artifact: CompileArtifact | None = None,
 ) -> CompileResult:
 
     if not IS_CPYTHON:
         warnings.warn_explicit(
             NOT_CPYTHON_WARNING, RuntimeWarning, 'RestrictedPython', 0)
+
+    artifact = _artifact
+    if artifact is None:
+        artifact = build_compile_artifact(
+            source,
+            mode=mode,
+            flags=flags,
+            dont_inherit=dont_inherit,
+            policy=policy,
+            guard_version=guard_version,
+            policy_version=policy_version,
+            language_features=language_features,
+            environment=environment,
+        )
 
     byte_code = None
     collected_errors: list[str] = []
@@ -101,7 +279,8 @@ def _compile_restricted_mode(
         byte_code,
         tuple(collected_errors),
         collected_warnings,
-        used_names)
+        used_names,
+        artifact)
 
 
 def compile_restricted_exec(
@@ -110,6 +289,12 @@ def compile_restricted_exec(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `exec`."""
     return _compile_restricted_mode(
@@ -118,7 +303,11 @@ def compile_restricted_exec(
         mode='exec',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment)
 
 
 def compile_restricted_eval(
@@ -127,6 +316,12 @@ def compile_restricted_eval(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `eval`."""
     return _compile_restricted_mode(
@@ -135,7 +330,11 @@ def compile_restricted_eval(
         mode='eval',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment)
 
 
 def compile_restricted_single(
@@ -144,6 +343,12 @@ def compile_restricted_single(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `single`."""
     return _compile_restricted_mode(
@@ -152,7 +357,11 @@ def compile_restricted_single(
         mode='single',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment)
 
 
 def compile_restricted_function(
@@ -165,6 +374,12 @@ def compile_restricted_function(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
 ) -> CompileResult:
     """Compile a restricted code object for a function.
 
@@ -188,8 +403,22 @@ def compile_restricted_function(
                 type=v.__class__.__name__,
                 msg=v.msg,
                 statement=v.text.strip() if v.text else None)
+            artifact = build_compile_artifact(
+                body,
+                mode='function',
+                flags=flags,
+                dont_inherit=dont_inherit,
+                policy=policy,
+                guard_version=guard_version,
+                policy_version=policy_version,
+                language_features=language_features,
+                environment=environment)
             return CompileResult(
-                code=None, errors=(error,), warnings=(), used_names={})
+                code=None,
+                errors=(error,),
+                warnings=(),
+                used_names={},
+                artifact=artifact)
 
     # The compiled code is actually executed inside a function
     # (that is called when the code is called) so reading and assigning to a
@@ -209,13 +438,28 @@ def compile_restricted_function(
     function_ast.body = body_ast
     wrapper_ast = ast.fix_missing_locations(wrapper_ast)
 
+    artifact = build_compile_artifact(
+        wrapper_ast,
+        mode='function',
+        flags=flags,
+        dont_inherit=dont_inherit,
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment)
     result = _compile_restricted_mode(
         wrapper_ast,
         filename=filename,
         mode='exec',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment,
+        _artifact=artifact)
 
     return result
 
@@ -227,7 +471,15 @@ def compile_restricted(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
-) -> types.CodeType:
+        *,
+        return_artifact: bool = False,
+        with_artifact: bool = False,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
+) -> types.CodeType | CompileResult:
     """Replacement for the built-in compile() function.
 
     policy ... `ast.NodeTransformer` class defining the restrictions.
@@ -240,7 +492,11 @@ def compile_restricted(
             mode=mode,
             flags=flags,
             dont_inherit=dont_inherit,
-            policy=policy)
+            policy=policy,
+            guard_version=guard_version,
+            policy_version=policy_version,
+            language_features=language_features,
+            environment=environment)
     else:
         raise TypeError('unknown mode %s', mode)
     for warning in result.warnings:
@@ -250,4 +506,45 @@ def compile_restricted(
         )
     if result.errors:
         raise SyntaxError(result.errors)
+    if return_artifact or with_artifact:
+        return result
     return cast_not_none(result.code)
+
+
+def compile_restricted_with_artifact(
+        source: _T_source,
+        filename: str | bytes | os.PathLike[typing.Any] = '<unknown>',
+        mode: typing.Literal["exec", "eval", "single"] = 'exec',
+        flags: int = 0,
+        dont_inherit: bool = False,
+        policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        *,
+        guard_version: str | None = None,
+        policy_version: str | None = None,
+        language_features: T_FeatureInput = None,
+        environment: CompileEnvironment | collections.abc.Mapping[
+            str, typing.Any] | None = None,
+) -> CompileResult:
+    """Compile and return the code together with its reviewable artifact."""
+    if mode not in ['exec', 'eval', 'single']:
+        raise TypeError('unknown mode %s', mode)
+    return _compile_restricted_mode(
+        source,
+        filename=filename,
+        mode=mode,
+        flags=flags,
+        dont_inherit=dont_inherit,
+        policy=policy,
+        guard_version=guard_version,
+        policy_version=policy_version,
+        language_features=language_features,
+        environment=environment)
+
+
+compile_restricted_artifact = compile_restricted_with_artifact
+compile_restricted_descriptor = compile_restricted_with_artifact
+compile_restricted_with_descriptor = compile_restricted_with_artifact
+compile_restricted_exec_artifact = compile_restricted_exec
+compile_restricted_eval_artifact = compile_restricted_eval
+compile_restricted_single_artifact = compile_restricted_single
+compile_restricted_function_artifact = compile_restricted_function
