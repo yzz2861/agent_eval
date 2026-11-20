@@ -5,7 +5,24 @@
 from .cvss2 import CVSS2
 from .cvss3 import CVSS3
 from .cvss4 import CVSS4
-from .exceptions import CVSS2Error, CVSS3Error, CVSS4Error, CVSSError
+from .exceptions import (
+    CVSS2Error,
+    CVSS3Error,
+    CVSS4Error,
+    CVSSHistoryError,
+    CVSSHistoryReferenceError,
+    CVSSHistoryRevocationError,
+    CVSSHistoryValidationError,
+    CVSSError,
+)
+from .history import (
+    ADVISORY,
+    ERRATUM,
+    REVOCATION,
+    HistoryEvent,
+    ScoringBasis,
+    ScoringHistory,
+)
 from .interactive import ask_interactively
 
 __version__ = "3.6"

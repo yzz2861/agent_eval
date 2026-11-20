@@ -136,3 +136,41 @@ class CVSS4RHMalformedError(CVSS4Error):
     """
 
     pass
+
+
+class CVSSHistoryError(CVSSError):
+    """
+    General exception for the scoring-history layer.
+    """
+
+    pass
+
+
+class CVSSHistoryValidationError(CVSSHistoryError):
+    """
+    Exception for an invalid scoring-history event, e.g. an erratum changing a metric which is
+    not allowed to be updated or carrying an illegal metric value.
+    """
+
+    pass
+
+
+class CVSSHistoryReferenceError(CVSSHistoryError):
+    """
+    Exception for an illegal cross-version reference. The offending event can be traced back
+    through the ``event_id``, ``advisory_id`` and ``referenced_prefix`` attributes.
+    """
+
+    def __init__(self, message, event_id=None, advisory_id=None, referenced_prefix=None):
+        super(CVSSHistoryReferenceError, self).__init__(message)
+        self.event_id = event_id
+        self.advisory_id = advisory_id
+        self.referenced_prefix = referenced_prefix
+
+
+class CVSSHistoryRevocationError(CVSSHistoryError):
+    """
+    Exception for a revocation event which does not reference an existing, still-active erratum.
+    """
+
+    pass

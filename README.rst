@@ -71,6 +71,45 @@ Sample output:
    (9.9,)
    ('Critical',)
 
+Scoring history
+~~~~~~~~~~~~~~~
+
+An advisory can be corrected long after publication, and a correction may change a
+threat metric. Recomputing the vector with today's values then hides the basis on
+which the issue was originally judged. :class:`cvss.ScoringHistory` keeps every
+event (the advisory, late errata and revocations) and reconstructs the vector that
+was available at a given known time for a given business effective time. Only
+threat/temporal metrics (E, RL, RC; E for CVSS v4) can be updated
+by an erratum; a revocation restores the previous value.
+
+.. code-block:: python
+
+    from datetime import datetime
+    from cvss import ScoringHistory
+
+    history = ScoringHistory()
+    history.add_advisory('CVE-2025-9001',
+                         'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:U/RL:O/RC:C',
+                         known_at=datetime(2025, 3, 1, 9, 0),
+                         effective_at=datetime(2025, 3, 1, 12, 0))
+    history.add_erratum('CVE-2025-9001', 'E', 'P',
+                        known_at=datetime(2025, 3, 5, 10, 0),
+                        effective_at=datetime(2025, 3, 4, 12, 0))
+
+    # What the on-call team could have known then.
+    as_of_basis = history.as_of('CVE-2025-9001',
+                                known_at=datetime(2025, 3, 3, 12, 0),
+                                effective_at=datetime(2025, 3, 9, 12, 0))
+    # The same business point recomputed with the late correction.
+    hindsight_basis = history.hindsight('CVE-2025-9001',
+                                        effective_at=datetime(2025, 3, 9, 12, 0))
+
+Each basis exposes the reconstructed vector, scores, severities, the applied and
+revoked event ids and a per-metric provenance map. An illegal cross-version
+reference raises :class:`cvss.CVSSHistoryReferenceError` carrying the advisory,
+event and referenced prefix for tracing. See `examples/scoring_history_demo.py`
+for an advisory with two errata, a revocation and a cross-version reference.
+
 Interactive calculator
 ~~~~~~~~~~~~~~~~~~~~~~
 
