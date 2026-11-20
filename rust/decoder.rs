@@ -29,6 +29,13 @@ const IMMUTABLE_ATTR: &str = "_cbor2_immutable";
 const NAME_ATTR: &str = "_cbor2_name";
 const SEEK_CUR: u8 = 1;
 
+/// Default upper bound for the byte length of a tag 2/3 bignum payload.
+pub(crate) const DEFAULT_MAX_BIGNUM_BYTES: usize = 65536;
+/// Default maximum nesting depth of semantic tags (major type 6).
+pub(crate) const DEFAULT_MAX_TAG_DEPTH: usize = 100;
+/// Default bound on the exponent of a tag 5 bigfloat (``mantissa * 2 ** exponent``).
+pub(crate) const DEFAULT_MAX_FLOAT_EXPONENT: i64 = 10_000;
+
 static DATE_FROMISOFORMAT: PyImportable = PyImportable::new("datetime", "date.fromisoformat");
 static DATE_FROMORDINAL: PyImportable = PyImportable::new("datetime", "date.fromordinal");
 static DATETIME_FROMISOFORMAT: PyImportable =
@@ -84,6 +91,10 @@ type DecoderCallback<'py> =
 
 struct StackFrame<'py> {
     immutable: bool,
+    // True when this frame was opened by a semantic tag (major type 6)
+    is_semantic_tag: bool,
+    // True only for the frames of bignum tags 2 and 3
+    is_bignum_tag: bool,
     decoder_callback: Option<Box<DecoderCallback<'py>>>,
     shareable_index: Option<usize>,
     typename: DisplayName<'py>,
@@ -173,14 +184,17 @@ fn require_integer<'py>(value: Bound<'py, PyAny>, name: &str) -> PyResult<Bound<
     })
 }
 
-fn require_bignum_bytes(value: Bound<'_, PyAny>) -> PyResult<Bound<'_, PyBytes>> {
+fn require_bignum_bytes(
+    value: Bound<'_, PyAny>,
+    tag_offset: usize,
+) -> PyResult<Bound<'_, PyBytes>> {
     // Tags 2 and 3 enclose a byte string (RFC 8949 section 3.4.3). int.from_bytes() also
     // accepts any iterable of ints, so without this guard a tag 2/3 wrapping an array (or a map,
     // whose keys get iterated) would be coerced into an integer instead of rejected as malformed.
     let value_type = value.get_type();
     value.cast_into().map_err(|_| {
         CBORDecodeError::new_err(format!(
-            "bignum value must be a byte string, not {value_type}"
+            "bignum value must be a byte string, not {value_type} (at byte offset {tag_offset})"
         ))
     })
 }
@@ -224,6 +238,15 @@ fn require_bignum_bytes(value: Bound<'_, PyAny>) -> PyResult<Bound<'_, PyBytes>>
 ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
 ///     anything other than a text string or a byte string (this prevents attackers from crafting
 ///     maps or sets with colliding hashes as a denial-of-service attack)
+/// :param max_bignum_bytes:
+///     maximum allowed byte length of the byte string enclosed by a bignum tag (2 or 3);
+///     a payload claiming more bytes is rejected before any large buffer is allocated
+/// :param max_tag_depth:
+///     maximum allowed nesting depth of semantic tags (major type 6); deeply nested tag
+///     chains are rejected before they can exhaust the call stack
+/// :param max_float_exponent:
+///     maximum allowed absolute value of the exponent of a bigfloat (tag 5), preventing
+///     decimals with an unbounded number of digits from being materialized
 ///
 /// .. _CBOR: https://cbor.io/
 #[pyclass(module = "cbor2")]
@@ -243,12 +266,27 @@ pub struct CBORDecoder {
     allow_duplicate_keys: bool,
     #[pyo3(get)]
     strict_hashable_types: bool,
+    #[pyo3(get)]
+    max_bignum_bytes: usize,
+    #[pyo3(get)]
+    max_tag_depth: usize,
+    #[pyo3(get)]
+    max_float_exponent: i64,
 
     read_method: Option<Py<PyAny>>,
     buffer: Option<Py<PyBytes>>,
     read_position: usize,
     available_bytes: usize,
     fp_is_seekable: bool,
+    /// Configured bignum byte budgets of the open tag 2/3 frames, innermost last.
+    bignum_byte_budgets: Vec<usize>,
+    /// Number of semantic tag (major type 6) frames currently on the stack.
+    semantic_tag_depth: usize,
+    /// When a semantic tag opens its frame, these are consumed to mark the new StackFrame.
+    pending_semantic_tag: bool,
+    pending_bignum_tag: bool,
+    /// Total number of bytes consumed from the underlying buffer or stream so far.
+    bytes_consumed: usize,
 }
 
 impl CBORDecoder {
@@ -265,7 +303,21 @@ impl CBORDecoder {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        max_bignum_bytes: usize,
+        max_tag_depth: usize,
+        max_float_exponent: i64,
     ) -> PyResult<Self> {
+        if max_bignum_bytes == 0 {
+            return Err(PyValueError::new_err("max_bignum_bytes must be greater than 0"));
+        }
+        if max_tag_depth == 0 {
+            return Err(PyValueError::new_err("max_tag_depth must be greater than 0"));
+        }
+        if max_float_exponent < 0 {
+            return Err(PyValueError::new_err(
+                "max_float_exponent must be greater than or equal to 0",
+            ));
+        }
         let available_bytes = if let Some(buffer) = buffer.as_ref() {
             buffer.len()?
         } else {
@@ -282,12 +334,20 @@ impl CBORDecoder {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            max_bignum_bytes,
+            max_tag_depth,
+            max_float_exponent,
             semantic_decoders: semantic_decoders.map(|d| d.clone().unbind()),
             read_method: None,
             buffer: buffer.map(Bound::unbind),
             read_position: 0,
             available_bytes,
             fp_is_seekable: false,
+            bignum_byte_budgets: Vec::new(),
+            semantic_tag_depth: 0,
+            pending_semantic_tag: false,
+            pending_bignum_tag: false,
+            bytes_consumed: 0,
         };
         if let Some(fp) = fp {
             this.set_fp(fp)?
@@ -330,6 +390,7 @@ impl CBORDecoder {
         if self.available_bytes == 0 {
             // No buffer
             let (new_bytes, amount_read) = self.read_from_fp(py, N)?;
+            self.bytes_consumed += N;
             self.read_position = N;
             self.available_bytes = amount_read - N;
             self.buffer = Some(new_bytes.unbind());
@@ -344,6 +405,7 @@ impl CBORDecoder {
             concatenated_buffer.truncate(self.available_bytes);
             let (new_bytes, amount_read) = self.read_from_fp(py, needed_bytes)?;
             concatenated_buffer.extend_from_slice(&new_bytes[..needed_bytes]);
+            self.bytes_consumed += needed_bytes;
             self.buffer = Some(new_bytes.unbind());
             self.available_bytes = amount_read - needed_bytes;
             self.read_position = needed_bytes;
@@ -357,6 +419,7 @@ impl CBORDecoder {
                 .try_into()?;
             self.available_bytes -= N;
             self.read_position += N;
+            self.bytes_consumed += N;
             Ok(slice)
         }
     }
@@ -366,6 +429,25 @@ impl CBORDecoder {
         let major_type = initial_byte >> 5;
         let subtype = initial_byte & 31;
         Ok((major_type, subtype))
+    }
+
+    /// Byte offset of the next data item relative to the start of the stream.
+    ///
+    /// When reading from a fully buffered input (``loads``) this is exact. For unseekable
+    /// streams it reflects the number of bytes actually read so far, which may lag behind the
+    /// logical position while bytes sit in the read buffer.
+    fn current_offset(&self) -> usize {
+        self.bytes_consumed
+    }
+
+    /// Raise a CBORDecodeError naming the byte offset at which a limit was violated, so
+    /// callers can locate the offending item in the input.
+    fn limit_error_at(&self, offset: usize, message: impl Into<String>) -> PyErr {
+        CBORDecodeError::new_err(format!(
+            "{} (at byte offset {})",
+            message.into(),
+            offset
+        ))
     }
 
     fn decode_length_finite(&mut self, py: Python<'_>, subtype: u8) -> PyResult<u64> {
@@ -441,11 +523,21 @@ impl CBORDecoder {
         &mut self,
         py: Python<'py>,
         subtype: u8,
+        item_offset: usize,
     ) -> PyResult<DecoderResult<'py>> {
         // Major tag 2
         match self.decode_length_as_usize(py, subtype)? {
             None => {
                 // Indefinite length
+                if let Some(limit) = self.bignum_byte_budgets.last().copied() {
+                    return Err(self.limit_error_at(
+                        item_offset,
+                        format!(
+                            "indefinite length byte string cannot be the payload of a bignum \
+tag (2/3), whose payload is limited to {limit} bytes"
+                        ),
+                    ));
+                }
                 let sys_maxsize = *SYS_MAXSIZE.get(py).unwrap();
                 let bytes = PyBytes::new_with_writer(py, 0, |writer| {
                     loop {
@@ -474,11 +566,22 @@ impl CBORDecoder {
                 })?;
                 Ok(Value(bytes.into_any()))
             }
-            Some(length) if length <= 65536 => {
-                let bytes = self.read(py, length)?;
-                Ok(StringValue(PyBytes::new(py, &bytes).into_any(), length))
-            }
             Some(length) => {
+                if let Some(limit) = self.bignum_byte_budgets.last().copied()
+                    && length > limit
+                {
+                    return Err(self.limit_error_at(
+                        item_offset,
+                        format!(
+                            "bignum payload of {length} bytes exceeds the configured maximum \
+of {limit} bytes"
+                        ),
+                    ));
+                }
+                if length <= 65536 {
+                    let bytes = self.read(py, length)?;
+                    return Ok(StringValue(PyBytes::new(py, &bytes).into_any(), length));
+                }
                 // Incrementally read the bytestring, in chunks of 65536 bytes. The claimed
                 // length is untrusted until the data has actually been read, so no more than
                 // 64 KiB of it is reserved up front; a truncated payload claiming a huge length
@@ -910,8 +1013,19 @@ impl CBORDecoder {
         py: Python<'py>,
         subtype: u8,
         immutable: bool,
+        tag_offset: usize,
     ) -> PyResult<DecoderResult<'py>> {
         let tagnum = self.decode_length_finite(py, subtype)?;
+        if self.semantic_tag_depth == self.max_tag_depth {
+            return Err(self.limit_error_at(
+                tag_offset,
+                format!(
+                    "semantic tag nesting depth exceeds the configured maximum of {} tags",
+                    self.max_tag_depth
+                ),
+            ));
+        }
+        self.pending_semantic_tag = true;
         if let Some(semantic_decoders) = &self.semantic_decoders {
             match semantic_decoders.bind(py).get_item(tagnum) {
                 Ok(decoder) => {
@@ -980,12 +1094,38 @@ impl CBORDecoder {
                 "string-form datetime",
             ),
             1 => (Box::new(Self::decode_epoch_datetime), "epoch-form datetime"),
-            2 => (Box::new(Self::decode_positive_bignum), "positive bignum"),
-            3 => (Box::new(Self::decode_negative_bignum), "negative bignum"),
+            2 => {
+                self.pending_bignum_tag = true;
+                self.bignum_byte_budgets.push(self.max_bignum_bytes);
+                let offset = tag_offset;
+                let callback = move |value: Bound<'py, PyAny>, _immutable: bool| {
+                    Self::decode_positive_bignum(value, offset)
+                };
+                (Box::new(callback), "positive bignum")
+            }
+            3 => {
+                self.pending_bignum_tag = true;
+                self.bignum_byte_budgets.push(self.max_bignum_bytes);
+                let offset = tag_offset;
+                let callback = move |value: Bound<'py, PyAny>, _immutable: bool| {
+                    Self::decode_negative_bignum(value, offset)
+                };
+                (Box::new(callback), "negative bignum")
+            }
             4 => (Box::new(Self::decode_fraction), "decimal fraction"),
-            5 => (Box::new(Self::decode_bigfloat), "bigfloat"),
+            5 => {
+                let limit = self.max_float_exponent;
+                let offset = tag_offset;
+                let callback = move |value: Bound<'py, PyAny>, _immutable: bool| {
+                    Self::decode_bigfloat_limited(value, limit, offset)
+                };
+                (Box::new(callback), "bigfloat")
+            }
             25 => (Box::new(Self::decode_stringref), "string reference"),
-            28 => return Ok(Shareable),
+            28 => {
+                self.pending_semantic_tag = false;
+                return Ok(Shareable);
+            }
             29 => (Box::new(Self::decode_sharedref), "shared reference"),
             30 => (Box::new(Self::decode_rational), "rational"),
             35 => (Box::new(Self::decode_regexp), "regular expression"),
@@ -994,8 +1134,14 @@ impl CBORDecoder {
             52 => (Box::new(Self::decode_ipv4), "IPv4 address"),
             54 => (Box::new(Self::decode_ipv6), "IPv6 address"),
             100 => (Box::new(Self::decode_epoch_date), "epoch-form date"),
-            256 => return Ok(StringNamespace),
-            258 => return self.decode_set(py, immutable),
+            256 => {
+                self.pending_semantic_tag = false;
+                return Ok(StringNamespace);
+            }
+            258 => {
+                self.pending_semantic_tag = false;
+                return self.decode_set(py, immutable);
+            }
             260 => (Box::new(Self::decode_ipaddress), "IP address"),
             261 => (Box::new(Self::decode_ipnetwork), "IP network"),
             1004 => (Box::new(Self::decode_date_string), "string-form date"),
@@ -1154,20 +1300,26 @@ impl CBORDecoder {
             .map(CompleteFrame)
     }
 
-    fn decode_positive_bignum(value: Bound<PyAny>, _immutable: bool) -> PyResult<DecoderResult> {
+    fn decode_positive_bignum(
+        value: Bound<PyAny>,
+        tag_offset: usize,
+    ) -> PyResult<DecoderResult> {
         // Semantic tag 2
         let py = value.py();
-        let payload = require_bignum_bytes(value)?;
+        let payload = require_bignum_bytes(value, tag_offset)?;
         INT_FROMBYTES
             .get(py)?
             .call1((payload, intern!(py, "big")))
             .map(CompleteFrame)
     }
 
-    fn decode_negative_bignum(value: Bound<PyAny>, _immutable: bool) -> PyResult<DecoderResult> {
+    fn decode_negative_bignum(
+        value: Bound<PyAny>,
+        tag_offset: usize,
+    ) -> PyResult<DecoderResult> {
         // Semantic tag 3
         let py = value.py();
-        let payload = require_bignum_bytes(value)?;
+        let payload = require_bignum_bytes(value, tag_offset)?;
         let int = INT_FROMBYTES
             .get(py)?
             .call1((payload, intern!(py, "big")))?;
@@ -1193,17 +1345,34 @@ impl CBORDecoder {
         }
     }
 
-    fn decode_bigfloat(value: Bound<PyAny>, _immutable: bool) -> PyResult<DecoderResult> {
-        // Semantic tag 5
+    // Tag 5 decoder with a bound on the binary exponent, so a malicious payload cannot
+    // request a Decimal (or intermediate integer) with an unbounded number of digits.
+    fn decode_bigfloat_limited(
+        value: Bound<PyAny>,
+        max_exponent: i64,
+        tag_offset: usize,
+    ) -> PyResult<DecoderResult> {
         let py = value.py();
         let tuple = require_tuple(value, 2)?;
-        let decimal_class = DECIMAL_TYPE.get(py)?;
-        {
-            let exp = decimal_class.call1((require_integer(tuple.get_item(0)?, "exponent")?,))?;
-            let sig = decimal_class.call1((require_integer(tuple.get_item(1)?, "mantissa")?,))?;
-            let exp = PyInt::new(py, 2).pow(exp, py.None())?;
-            sig.mul(exp).map(CompleteFrame)
+        let exponent: i64 = require_integer(tuple.get_item(0)?, "exponent")?
+            .extract()
+            .map_err(|_| {
+                CBORDecodeError::new_err(format!(
+                    "bigfloat exponent exceeds the platform integer range \
+(at byte offset {tag_offset})"
+                ))
+            })?;
+        if exponent.abs() > max_exponent {
+            return Err(CBORDecodeError::new_err(format!(
+                "bigfloat exponent {exponent} exceeds the configured maximum of \
+{max_exponent} (at byte offset {tag_offset})"
+            )));
         }
+        let decimal_class = DECIMAL_TYPE.get(py)?;
+        let exp = decimal_class.call1((tuple.get_item(0)?,))?;
+        let sig = decimal_class.call1((require_integer(tuple.get_item(1)?, "mantissa")?,))?;
+        let exp = PyInt::new(py, 2).pow(exp, py.None())?;
+        sig.mul(exp).map(CompleteFrame)
     }
 
     fn decode_stringref(value: Bound<PyAny>, _immutable: bool) -> PyResult<DecoderResult> {
@@ -1510,6 +1679,9 @@ impl CBORDecoder {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        max_bignum_bytes = DEFAULT_MAX_BIGNUM_BYTES,
+        max_tag_depth = DEFAULT_MAX_TAG_DEPTH,
+        max_float_exponent = DEFAULT_MAX_FLOAT_EXPONENT,
     ))]
     pub fn new(
         py: Python<'_>,
@@ -1523,6 +1695,9 @@ impl CBORDecoder {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        max_bignum_bytes: usize,
+        max_tag_depth: usize,
+        max_float_exponent: i64,
     ) -> PyResult<Self> {
         Self::new_internal(
             py,
@@ -1537,6 +1712,9 @@ impl CBORDecoder {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            max_bignum_bytes,
+            max_tag_depth,
+            max_float_exponent,
         )
     }
 
@@ -1652,6 +1830,7 @@ impl CBORDecoder {
         if self.available_bytes == 0 {
             // No buffer
             let (new_bytes, amount_read) = self.read_from_fp(py, amount)?;
+            self.bytes_consumed += amount;
             self.read_position = amount;
             self.available_bytes = amount_read - amount;
             let new_buffer = new_bytes.as_bytes()[..amount].to_vec();
@@ -1664,6 +1843,7 @@ impl CBORDecoder {
                 self.buffer.take().unwrap().as_bytes(py)[self.read_position..].to_vec();
             let (new_bytes, amount_read) = self.read_from_fp(py, needed_bytes)?;
             concatenated_buffer.extend_from_slice(&new_bytes[..needed_bytes]);
+            self.bytes_consumed += needed_bytes;
             self.buffer = Some(new_bytes.unbind());
             self.available_bytes = amount_read - needed_bytes;
             self.read_position = needed_bytes;
@@ -1675,6 +1855,7 @@ impl CBORDecoder {
                 .to_vec();
             self.available_bytes -= amount;
             self.read_position += amount;
+            self.bytes_consumed += amount;
             Ok(vec)
         }
     }
@@ -1761,15 +1942,16 @@ impl CBORDecoder {
                     panic!("no decoder callback, shareable index or string namespace");
                 }
             } else {
+                let item_offset = self.current_offset();
                 let (major_type, subtype) = self.read_major_and_subtype(py)?;
                 match major_type {
                     0 => self.decode_uint(py, subtype),
                     1 => self.decode_negint(py, subtype),
-                    2 => self.decode_bytestring(py, subtype),
+                    2 => self.decode_bytestring(py, subtype, item_offset),
                     3 => self.decode_string(py, subtype),
                     4 => self.decode_array(py, subtype, current_immutable),
                     5 => self.decode_map(py, subtype, current_immutable),
-                    6 => self.decode_semantic(py, subtype, current_immutable),
+                    6 => self.decode_semantic(py, subtype, current_immutable, item_offset),
                     7 => self.decode_special(py, subtype),
                     _ => Err(CBORDecodeError::new_err(format!(
                         "invalid major type: {major_type}"
@@ -1814,11 +1996,20 @@ impl CBORDecoder {
                         shareable_index = Some(index);
                     }
                     current_immutable = current_immutable || requested_immutable;
+                    let is_semantic_tag = self.pending_semantic_tag;
+                    let is_bignum_tag = self.pending_bignum_tag;
+                    self.pending_semantic_tag = false;
+                    self.pending_bignum_tag = false;
+                    if is_semantic_tag {
+                        self.semantic_tag_depth += 1;
+                    }
                     add_frame(
                         &mut frames,
                         self.max_depth,
                         StackFrame {
                             immutable: current_immutable,
+                            is_semantic_tag,
+                            is_bignum_tag,
                             decoder_callback: Some(callback),
                             shareable_index,
                             typename,
@@ -1842,6 +2033,12 @@ impl CBORDecoder {
                     let frame = frames
                         .pop()
                         .expect("received frame completion but there are no frames on the stack");
+                    if frame.is_semantic_tag {
+                        self.semantic_tag_depth -= 1;
+                    }
+                    if frame.is_bignum_tag {
+                        self.bignum_byte_budgets.pop();
+                    }
                     value_depth = frame.max_child_depth + 1;
                     // The finished value replaces the container registered up front, as
                     // object_hook or tag_hook may have substituted it
@@ -1861,6 +2058,8 @@ impl CBORDecoder {
                         self.max_depth,
                         StackFrame {
                             immutable: current_immutable,
+                            is_semantic_tag: false,
+                            is_bignum_tag: false,
                             decoder_callback: None,
                             shareable_index: None,
                             typename: DisplayName::String("string namespace"),
@@ -1915,6 +2114,8 @@ impl CBORDecoder {
                         self.max_depth,
                         StackFrame {
                             immutable: current_immutable,
+                            is_semantic_tag: false,
+                            is_bignum_tag: false,
                             decoder_callback: None,
                             shareable_index: Some(shareables.len()),
                             typename: DisplayName::String("shareable value"),

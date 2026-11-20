@@ -1,5 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
+use crate::decoder::{
+    DEFAULT_MAX_BIGNUM_BYTES, DEFAULT_MAX_FLOAT_EXPONENT, DEFAULT_MAX_TAG_DEPTH,
+};
 mod decoder;
 mod encoder;
 mod types;
@@ -96,6 +99,15 @@ mod _cbor2 {
     ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
     ///     anything other than a text string or a byte string (this prevents attackers from
     ///     crafting maps or sets with colliding hashes as a denial-of-service attack)
+    /// :param max_bignum_bytes:
+    ///     maximum allowed byte length of the byte string enclosed by a bignum tag (2 or 3);
+    ///     a payload claiming more bytes is rejected before any large buffer is allocated
+    /// :param max_tag_depth:
+    ///     maximum allowed nesting depth of semantic tags (major type 6); deeply nested tag
+    ///     chains are rejected before they can exhaust the call stack
+    /// :param max_float_exponent:
+    ///     maximum allowed absolute value of the exponent of a bigfloat (tag 5), preventing
+    ///     decimals with an unbounded number of digits from being materialized
     /// :param immutable:
     ///     if :data:`True`, return immutable objects (e.g. :class:`frozenset` and :class:`tuple`)
     ///     instead of mutable objects (e.g. :class:`list` and :class:`dict`)
@@ -116,6 +128,9 @@ mod _cbor2 {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        max_bignum_bytes = DEFAULT_MAX_BIGNUM_BYTES,
+        max_tag_depth = DEFAULT_MAX_TAG_DEPTH,
+        max_float_exponent = DEFAULT_MAX_FLOAT_EXPONENT,
         immutable = false,
     ))]
     fn load<'py>(
@@ -130,6 +145,9 @@ mod _cbor2 {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        max_bignum_bytes: usize,
+        max_tag_depth: usize,
+        max_float_exponent: i64,
         immutable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let mut decoder = CBORDecoder::new(
@@ -144,6 +162,9 @@ mod _cbor2 {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            max_bignum_bytes,
+            max_tag_depth,
+            max_float_exponent,
         )?;
         decoder.decode(py, immutable)
     }
@@ -183,6 +204,15 @@ mod _cbor2 {
     ///     if :data:`True`, raise a :exc:`CBORDecodeError` when a map key or a set element is
     ///     anything other than a text string or a byte string (this prevents attackers from
     ///     crafting maps or sets with colliding hashes as a denial-of-service attack)
+    /// :param max_bignum_bytes:
+    ///     maximum allowed byte length of the byte string enclosed by a bignum tag (2 or 3);
+    ///     a payload claiming more bytes is rejected before any large buffer is allocated
+    /// :param max_tag_depth:
+    ///     maximum allowed nesting depth of semantic tags (major type 6); deeply nested tag
+    ///     chains are rejected before they can exhaust the call stack
+    /// :param max_float_exponent:
+    ///     maximum allowed absolute value of the exponent of a bigfloat (tag 5), preventing
+    ///     decimals with an unbounded number of digits from being materialized
     /// :param immutable:
     ///     if :data:`True`, return immutable objects (e.g. :class:`frozenset` and :class:`tuple`)
     ///     instead of mutable objects (e.g. :class:`list` and :class:`dict`)
@@ -202,6 +232,9 @@ mod _cbor2 {
         allow_indefinite = true,
         allow_duplicate_keys = true,
         strict_hashable_types = false,
+        max_bignum_bytes = DEFAULT_MAX_BIGNUM_BYTES,
+        max_tag_depth = DEFAULT_MAX_TAG_DEPTH,
+        max_float_exponent = DEFAULT_MAX_FLOAT_EXPONENT,
         immutable = false,
     ))]
     fn loads<'py>(
@@ -215,6 +248,9 @@ mod _cbor2 {
         allow_indefinite: bool,
         allow_duplicate_keys: bool,
         strict_hashable_types: bool,
+        max_bignum_bytes: usize,
+        max_tag_depth: usize,
+        max_float_exponent: i64,
         immutable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = if let Ok(bytes) = data.cast::<PyBytes>() {
@@ -243,6 +279,9 @@ mod _cbor2 {
             allow_indefinite,
             allow_duplicate_keys,
             strict_hashable_types,
+            max_bignum_bytes,
+            max_tag_depth,
+            max_float_exponent,
         )?;
         decoder.decode(py, immutable)
     }

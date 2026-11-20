@@ -131,6 +131,9 @@ class CBORDecoder:
         allow_indefinite: bool = ...,
         allow_duplicate_keys: bool = ...,
         strict_hashable_types: bool = ...,
+        max_bignum_bytes: int = ...,
+        max_tag_depth: int = ...,
+        max_float_exponent: int = ...,
     ) -> Self: ...
 
     # Properties
@@ -144,6 +147,12 @@ class CBORDecoder:
     def allow_duplicate_keys(self) -> bool: ...
     @property
     def strict_hashable_types(self) -> bool: ...
+    @property
+    def max_bignum_bytes(self) -> int: ...
+    @property
+    def max_tag_depth(self) -> int: ...
+    @property
+    def max_float_exponent(self) -> int: ...
     def decode(self, *, immutable: bool = ...) -> Any: ...
     def read(self, amount: int, /) -> bytes: ...
 
@@ -224,6 +233,9 @@ def load(
     allow_indefinite: bool = ...,
     allow_duplicate_keys: bool = ...,
     strict_hashable_types: bool = ...,
+    max_bignum_bytes: int = ...,
+    max_tag_depth: int = ...,
+    max_float_exponent: int = ...,
     immutable: bool = ...,
 ) -> Any: ...
 def loads(
@@ -238,6 +250,9 @@ def loads(
     allow_indefinite: bool = ...,
     allow_duplicate_keys: bool = ...,
     strict_hashable_types: bool = ...,
+    max_bignum_bytes: int = ...,
+    max_tag_depth: int = ...,
+    max_float_exponent: int = ...,
     immutable: bool = ...,
 ) -> Any: ...
 def shareable_encoder(

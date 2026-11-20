@@ -5,6 +5,16 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added the ``max_bignum_bytes``, ``max_tag_depth`` and ``max_float_exponent`` parameters to
+  :class:`CBORDecoder`, :func:`load` and :func:`loads`, providing configurable budgets that
+  bound the byte length of tag 2/3 bignum payloads, the nesting depth of semantic tags and the
+  absolute exponent of tag 5 bigfloats; over-limit items now raise a :exc:`CBORDecodeError`
+  naming the byte offset of the offending item
+- Rejected tag 2/3 bignums that enclose anything other than a byte string with an explicit,
+  offset-aware :exc:`CBORDecodeError`
+
 **6.3.0** (2026-11-13)
 
 - Added the ``--format=json`` CLI option to encode JSON files or standard input as binary CBOR

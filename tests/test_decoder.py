@@ -986,6 +986,123 @@ def test_bignum_non_bytestring(payload: str, typename: str) -> None:
         loads(unhexlify(payload))
 
 
+class TestDecoderBudgets:
+    def test_default_budget_constants(self) -> None:
+        decoder = CBORDecoder(BytesIO())
+        assert decoder.max_bignum_bytes == 65536
+        assert decoder.max_tag_depth == 100
+        assert decoder.max_float_exponent == 10000
+
+    def test_oversized_bignum_rejected_before_reading_payload(self) -> None:
+        # tag 2 claiming a 1 MiB bignum payload that is not actually present: the limit must
+        # trip on the declared length, so no huge allocation or EOF occurs
+        payload = b"\xc2\x1a\x00\x10\x00\x00"
+        with pytest.raises(
+            CBORDecodeError,
+            match=(
+                r"bignum payload of 1048576 bytes exceeds the configured maximum of "
+                r"65536 bytes \(at byte offset 1\)"
+            ),
+        ):
+            loads(payload)
+
+    def test_oversized_bignum_custom_budget(self) -> None:
+        # 4-byte payload, budget of 3 bytes
+        payload = unhexlify("c24401020304")
+        with pytest.raises(
+            CBORDecodeError,
+            match=r"bignum payload of 4 bytes exceeds the configured maximum of 3 bytes",
+        ):
+            loads(payload, max_bignum_bytes=3)
+        assert loads(payload, max_bignum_bytes=4) == 0x01020304
+
+    def test_oversized_negative_bignum(self) -> None:
+        payload = b"\xc3\x1a\x00\x10\x00\x00"
+        with pytest.raises(CBORDecodeError, match="negative bignum"):
+            loads(payload)
+
+    def test_indefinite_bignum_payload_rejected(self) -> None:
+        # tag 2 wrapping an indefinite-length byte string
+        payload = unhexlify("c25f4101ff")
+        with pytest.raises(CBORDecodeError, match="indefinite length byte string"):
+            loads(payload)
+
+    @pytest.mark.parametrize("tag", [2, 3], ids=["positive", "negative"])
+    def test_bignum_wrapping_non_bytestring_reports_offset(self, tag: int) -> None:
+        payload = bytes([0xC0 | tag]) + b"\x81\x05"  # tag wrapping a one-element array
+        with pytest.raises(
+            CBORDecodeError,
+            match=(
+                r"bignum value must be a byte string, not <class "
+                r".*list.*> \(at byte offset 1\)"
+            ),
+        ):
+            loads(payload)
+
+    def test_deep_tag_chain_rejected_at_default_budget(self) -> None:
+        # 101 nested tag 55799 wrappers around an integer exceeds the default depth of 100
+        payload = b"\xd9\xd9\xf7" * 101 + b"\x00"
+        with pytest.raises(
+            CBORDecodeError,
+            match=(
+                r"semantic tag nesting depth exceeds the configured maximum of 100 tags "
+                r"\(at byte offset 300\)"
+            ),
+        ):
+            loads(payload)
+
+    def test_tag_chain_within_custom_budget(self) -> None:
+        payload = b"\xd9\xd9\xf7" * 5 + b"\x00"
+        assert loads(payload, max_tag_depth=5) == 0
+        with pytest.raises(CBORDecodeError, match="maximum of 5 tags"):
+            loads(b"\xd9\xd9\xf7" * 6 + b"\x00", max_tag_depth=5)
+
+    def test_bignum_does_not_count_toward_container_depth(self) -> None:
+        # The bignum limit is separate from max_depth, which only counts containers
+        assert loads(unhexlify("c249010000000000000000")) == 18446744073709551616
+
+    def test_bigfloat_exponent_limit(self) -> None:
+        # tag 5: [10001, 1] -> 1 * 2 ** 10001
+        payload = b"\xc5\x82\x19\x27\x11\x01"
+        with pytest.raises(
+            CBORDecodeError,
+            match=(
+                r"bigfloat exponent 10001 exceeds the configured maximum of 10000 "
+                r"\(at byte offset 0\)"
+            ),
+        ):
+            loads(payload)
+
+    def test_bigfloat_negative_exponent_limit(self) -> None:
+        # tag 5: [-10001, 1]
+        payload = b"\xc5\x82\x39\x27\x10\x01"
+        with pytest.raises(CBORDecodeError, match="bigfloat exponent -10001"):
+            loads(payload)
+
+    def test_bigfloat_within_custom_budget(self) -> None:
+        payload = unhexlify("c5822003")  # 3 * 2 ** 0 == 1.5
+        assert loads(payload) == Decimal("1.5")
+        with pytest.raises(CBORDecodeError, match="maximum of 0"):
+            loads(payload, max_float_exponent=0)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_bignum_bytes": 0},
+            {"max_tag_depth": 0},
+            {"max_float_exponent": -1},
+        ],
+    )
+    def test_invalid_budgets_rejected(self, kwargs: dict[str, int]) -> None:
+        with pytest.raises(ValueError):
+            CBORDecoder(BytesIO(), **kwargs)
+
+    def test_limits_apply_to_stream_input(self) -> None:
+        payload = b"\xc2\x1a\x00\x10\x00\x00"
+        with pytest.raises(CBORDecodeError, match="at byte offset"):
+            load(BytesIO(payload))
+
+
 def test_fraction() -> None:
     decoded = loads(unhexlify("c48221196ab3"))
     assert decoded == Decimal("273.15")
