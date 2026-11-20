@@ -1,0 +1,31 @@
+Observed interfaces: 2
+
+== section 0 / interface 0 ==
+  interface remark : '出口'
+  declared link type: 1 (D/I/X and 802.3 Ethernet)
+  snap length      : 65535
+  packets observed : 2
+  packet prefixes  :
+      prefix: Ethernet frame header
+      fields: destination_mac=00:1b:44:11:22:33, source_mac=00:1b:44:aa:bb:cc, ethertype=0x0800, ethertype_name=IPv4
+      prefix: Ethernet frame header
+      fields: destination_mac=00:1b:44:11:22:33, source_mac=00:1b:44:aa:bb:cc, ethertype=0x0800, ethertype_name=IPv4
+
+== section 1 / interface 0 ==
+  interface remark : '出口'
+  declared link type: 113 (Linux cooked socket capture)
+  snap length      : 65535
+  packets observed : 2
+  packet prefixes  :
+      prefix: Linux cooked capture header (16 bytes)
+      fields: packet_type=0, arphrd_type=1, address_length=6, address=0x001b44aabbcc0000, protocol=0x0800, protocol_name=IPv4
+      prefix: Linux cooked capture header (16 bytes)
+      fields: packet_type=0, arphrd_type=1, address_length=6, address=0x001b44aabbcc0000, protocol=0x0800, protocol_name=IPv4
+
+Shared-remark link type conflicts: 1
+  remark '出口' is used by interfaces whose declared link types differ:
+    - section 0 / interface 0: link type 1 (D/I/X and 802.3 Ethernet)
+    - section 1 / interface 0: link type 113 (Linux cooked socket capture)
+
+Handoff checklist mismatches: 1
+  - section 1 / interface 0: checklist expects 1 (D/I/X and 802.3 Ethernet), block declares 113 (Linux cooked socket capture)
