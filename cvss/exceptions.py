@@ -136,3 +136,11 @@ class CVSS4RHMalformedError(CVSS4Error):
     """
 
     pass
+
+
+class CVSS4ApprovalError(CVSS4Error):
+    """
+    Exception for invalid arguments of the CVSS4 approval explanation helpers.
+    """
+
+    pass

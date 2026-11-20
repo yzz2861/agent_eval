@@ -683,6 +683,33 @@ class CVSS4(object):
         """
         return str(self.base_score) + "/" + self.clean_vector()
 
+    def explain_approval(
+        self,
+        reviewed_vector,
+        threshold,
+        direction="below",
+        coupled_groups=None,
+        max_evaluations=100000,
+    ):
+        """
+        Explains which metric changes between this (original) vector and the reviewed vector are
+        jointly needed to move the base score across a caller supplied gate.
+
+        See :func:`cvss.approval4.explain_approval` for the full argument and return description.
+        Scoring, modified metric inheritance and rounding are all taken from this CVSS4 class, so
+        every returned vector can be re-checked with the unmodified calculator.
+        """
+        from .approval4 import explain_approval
+
+        return explain_approval(
+            self.clean_vector(),
+            reviewed_vector,
+            threshold,
+            direction=direction,
+            coupled_groups=coupled_groups,
+            max_evaluations=max_evaluations,
+        )
+
     def as_json(self, sort=False, minimal=False):
         """
         Returns a dictionary formatted with attribute names and values defined by the official

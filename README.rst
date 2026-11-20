@@ -71,6 +71,46 @@ Sample output:
    (9.9,)
    ('Critical',)
 
+Approval explanation (CVSS 4.0)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a risk rating is changed, the approval helper explains which metric changes
+are jointly responsible for moving the score across a gate. Given two complete
+CVSS 4.0 vectors it returns every inclusion-minimal set of changes whose joint
+application crosses a caller supplied threshold, each with the full ordered
+vector and its rounded score so the original calculator can be used to re-check
+it. No external solver is used; the search is a bounded enumeration.
+
+Metrics that must always be applied or rejected together are declared with
+``coupled_groups``. Scores, modified metric inheritance and the round half up
+rounding are taken straight from the CVSS4 calculator. If the evaluation budget
+is reached, ``complete`` is False and only the conclusions that were actually
+proven are returned.
+
+.. code-block:: python
+
+    from cvss import CVSS4
+
+    original = (
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:L/SA:H/"
+        "E:A/CR:H/IR:H/AR:L"
+    )
+    reviewed = (
+        "CVSS:4.0/AV:P/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:L/SA:H/"
+        "E:U/CR:H/IR:H/AR:L"
+    )
+
+    result = CVSS4(original).explain_approval(reviewed, 6.9)
+    print(result.original_score, result.reviewed_score, result.complete)
+    for group in result.minimal_groups:
+        print(group.metrics, group.score)
+        print(group.vector)
+
+    # Metrics that must move together can be coupled by the caller.
+    result = CVSS4(original).explain_approval(
+        reviewed, 6.9, coupled_groups=[("AV", "E")]
+    )
+
 Interactive calculator
 ~~~~~~~~~~~~~~~~~~~~~~
 
