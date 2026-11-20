@@ -13,6 +13,7 @@ from typing import Any
 from typing import Dict
 from typing import Generator
 from typing import Iterable
+from typing import Optional
 from typing import Pattern
 from typing import Set
 
@@ -22,10 +23,17 @@ from ..constants import VerifiedResult
 from ..core.potential_secret import PotentialSecret
 from ..settings import get_settings
 from detect_secrets.util.code_snippet import CodeSnippet
+from detect_secrets.util.filetype import FileType
 from detect_secrets.util.inject import call_function_with_arguments
 
 
 class BasePlugin(metaclass=ABCMeta):
+    # If set, this plugin only applies to the listed file types (e.g. its rules
+    # are only meaningful for another language). The scan coverage account uses
+    # this to report which checks genuinely applied to each file. None means the
+    # plugin applies to all files.
+    applicable_file_types: Optional[Set[FileType]] = None
+
     @abstractproperty
     def secret_type(self) -> str:
         """

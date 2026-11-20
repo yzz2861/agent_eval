@@ -7,6 +7,7 @@ from typing import Optional
 from . import audit
 from .core import baseline
 from .core import plugins
+from .core.coverage import CoverageLedger
 from .core.log import log
 from .core.scan import get_files_to_scan
 from .core.scan import scan_for_allowlisted_secrets_in_file
@@ -67,11 +68,13 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         print(json.dumps(baseline.format_for_output(secrets), indent=2))
         return
 
+    coverage = CoverageLedger()
     secrets = baseline.create(
         *args.path,
         should_scan_all_files=args.all_files,
         root=args.custom_root,
         num_processors=args.num_cores,
+        coverage=coverage,
     )
     if args.baseline is not None:
         # The pre-commit hook's baseline upgrade is to trim the supplied baseline for non-existent
@@ -84,9 +87,14 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         # default.
         secrets.merge(args.baseline)
 
-        baseline.save_to_file(secrets, args.baseline_filename)
+        baseline.save_to_file(secrets, args.baseline_filename, coverage=coverage)
     else:
-        print(json.dumps(baseline.format_for_output(secrets, is_slim_mode=args.slim), indent=2))
+        print(
+            json.dumps(
+                baseline.format_for_output(secrets, is_slim_mode=args.slim, coverage=coverage),
+                indent=2,
+            ),
+        )
 
 
 def scan_adhoc_string(line: str) -> str:

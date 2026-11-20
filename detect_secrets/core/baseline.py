@@ -15,6 +15,7 @@ from ..settings import configure_settings_from_baseline
 from ..settings import get_settings
 from ..util.importlib import import_modules_from_package
 from ..util.semver import Version
+from .coverage import CoverageLedger
 from .scan import get_files_to_scan
 from .secrets_collection import SecretsCollection
 
@@ -24,6 +25,7 @@ def create(
     should_scan_all_files: bool = False,
     root: str = '',
     num_processors: Optional[int] = None,
+    coverage: Optional[CoverageLedger] = None,
 ) -> SecretsCollection:
     """Scans all the files recursively in path to initialize a baseline."""
     kwargs = {}
@@ -32,7 +34,13 @@ def create(
 
     secrets = SecretsCollection(root=root)
     secrets.scan_files(
-        *get_files_to_scan(*paths, should_scan_all_files=should_scan_all_files, root=root),
+        *get_files_to_scan(
+            *paths,
+            should_scan_all_files=should_scan_all_files,
+            root=root,
+            coverage=coverage,
+        ),
+        coverage=coverage,
         **kwargs,
     )
 
@@ -52,6 +60,16 @@ def load(baseline: Dict[str, Any], filename: str = '') -> SecretsCollection:
     return SecretsCollection.load_from_baseline(baseline)
 
 
+def load_coverage(baseline: Dict[str, Any]) -> CoverageLedger:
+    """
+    With a given baseline file, load the scan coverage account from it.
+
+    Historical baselines predate coverage accounting: they are still readable,
+    but positions without a coverage basis are reported as unknown.
+    """
+    return CoverageLedger.load_from_baseline(baseline)
+
+
 def load_from_file(filename: str) -> Dict[str, Any]:
     """
     :raises: UnableToReadBaselineError
@@ -64,7 +82,11 @@ def load_from_file(filename: str) -> Dict[str, Any]:
         raise UnableToReadBaselineError from e
 
 
-def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) -> Dict[str, Any]:
+def format_for_output(
+    secrets: SecretsCollection,
+    is_slim_mode: bool = False,
+    coverage: Optional[CoverageLedger] = None,
+) -> Dict[str, Any]:
     output = {
         'version': VERSION,
 
@@ -73,6 +95,9 @@ def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) ->
 
         'results': secrets.json(),
     }
+
+    if coverage is not None and not is_slim_mode:
+        output['coverage'] = coverage.json()
 
     if not is_slim_mode:
         output['generated_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -92,6 +117,7 @@ def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) ->
 def save_to_file(
     secrets: Union[SecretsCollection, Dict[str, Any]],
     filename: str,
+    coverage: Optional[CoverageLedger] = None,
 ) -> None:    # pragma: no cover
     """
     :param secrets: if this is a SecretsCollection, it will output the baseline in its latest
@@ -106,7 +132,7 @@ def save_to_file(
     # this function to "do more than one thing".
     output = secrets
     if isinstance(secrets, SecretsCollection):
-        output = format_for_output(secrets)
+        output = format_for_output(secrets, coverage=coverage)
 
     with open(filename, 'w') as f:
         f.write(json.dumps(output, indent=2) + '\n')

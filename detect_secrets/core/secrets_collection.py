@@ -11,6 +11,7 @@ from typing import Tuple
 
 from . import scan
 from ..util.path import convert_local_os_path
+from .coverage import CoverageLedger
 from .potential_secret import PotentialSecret
 from detect_secrets.settings import configure_settings_from_baseline
 from detect_secrets.settings import get_settings
@@ -49,10 +50,22 @@ class SecretsCollection:
     def files(self) -> Set[str]:
         return set(self.data.keys())
 
-    def scan_files(self, *filenames: str, num_processors: Optional[int] = None) -> None:
-        """Just like scan_file, but optimized through parallel processing."""
-        if len(filenames) == 1:
-            self.scan_file(filenames[0])
+    def scan_files(
+        self,
+        *filenames: str,
+        num_processors: Optional[int] = None,
+        coverage: Optional[CoverageLedger] = None,
+    ) -> None:
+        """
+        Just like scan_file, but optimized through parallel processing.
+
+        :param coverage: if supplied, the outcome of each file is recorded in the
+            ledger. Note that this forces serial scanning, since child processes
+            cannot write back to the ledger.
+        """
+        if len(filenames) == 1 or coverage is not None:
+            for filename in filenames:
+                self.scan_file(filename, coverage=coverage)
             return
 
         if not num_processors:
@@ -72,8 +85,12 @@ class SecretsCollection:
                 for secret in secrets:
                     self[os.path.relpath(secret.filename, self.root)].add(secret)
 
-    def scan_file(self, filename: str) -> None:
-        for secret in scan.scan_file(os.path.join(self.root, convert_local_os_path(filename))):
+    def scan_file(self, filename: str, coverage: Optional[CoverageLedger] = None) -> None:
+        for secret in scan.scan_file(
+            os.path.join(self.root, convert_local_os_path(filename)),
+            coverage=coverage,
+            coverage_source=convert_local_os_path(filename),
+        ):
             self[convert_local_os_path(filename)].add(secret)
 
     def scan_diff(self, diff: str) -> None:

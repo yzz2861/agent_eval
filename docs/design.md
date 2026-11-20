@@ -170,6 +170,27 @@ Since a baseline's layout is essential to the tool's functionality, any changes 
 details. Furthermore, by using the `detect-secrets-hook`, it will automatically keep users'
 baselines up-to-date to facilitate smooth transitions.
 
+### Coverage
+
+A scan report with zero findings is only meaningful if we know *why* it is empty. The coverage
+account (found in [`detect_secrets.core.coverage`](../detect_secrets/core/coverage.py)) records,
+per data source, what happened during a scan:
+
+- **status**: whether the source was `scanned`, `excluded`, or is `unknown`. Baselines created
+  before this feature have no coverage basis, so their entries remain `unknown` (but are still
+  readable).
+- **strategy**: for scanned sources, which plugins actually applied, and which were skipped
+  because they only target other file types (see `BasePlugin.applicable_file_types`).
+- **reason**: for excluded sources, why they were set aside -- e.g. rejected by a configured
+  filter (`filtered-by-rule`), dropped by workspace scoping (`not-in-workspace`), not a text
+  file (`non-text-file`), or unreadable (`unreadable`).
+
+Each entry also carries a digest of the slice of settings it depends on. When filter conditions
+change, `CoverageLedger.stale_sources` identifies only the affected entries that need to be
+recomputed, and `CoverageLedger.carried_over` preserves the rest. A report with zero findings
+only supports a release decision if `CoverageLedger.is_sufficient_for_release` holds: every
+input was genuinely scanned with at least one applicable plugin.
+
 ### Transformers
 
 There are certain filetypes that fare better with custom parsing, rather than reading it

@@ -5,6 +5,7 @@ from typing import cast
 from typing import Generator
 from typing import Iterable
 from typing import List
+from typing import Optional
 from typing import Set
 from typing import Tuple
 from typing import Union
@@ -21,6 +22,9 @@ from ..util.code_snippet import CodeSnippet
 from ..util.code_snippet import get_code_snippet
 from ..util.inject import call_function_with_arguments
 from ..util.path import get_relative_path
+from .coverage import CoverageLedger
+from .coverage import ExclusionReason
+from .coverage import SourceType
 from .log import log
 from .plugins import Plugin
 from .potential_secret import PotentialSecret
@@ -30,6 +34,7 @@ def get_files_to_scan(
     *paths: str,
     should_scan_all_files: bool = False,
     root: str = '',
+    coverage: Optional[CoverageLedger] = None,
 ) -> Generator[str, None, None]:
     """
     If we specify specific files, we should be able to scan them. This abides by the
@@ -53,6 +58,8 @@ def get_files_to_scan(
     See test cases for more details.
 
     :param root: if not specified, will assume current repository as root.
+    :param coverage: if supplied, inputs that are dropped by workspace scoping
+        will be recorded in the ledger.
     """
     if root:
         root = os.path.realpath(root)
@@ -83,6 +90,14 @@ def get_files_to_scan(
         return
 
     for path in paths:
+        if not os.path.exists(path):
+            # e.g. a directly specified file that does not exist (anymore). Without
+            # this, the input would silently vanish from the scan, and a report with
+            # zero findings would wrongly imply that it was checked.
+            if coverage is not None:
+                coverage.record_excluded(path, ExclusionReason.UNREADABLE)
+            continue
+
         iterator = (
             cast(List[Tuple], [(root or os.getcwd(), None, [path])])
             if os.path.isfile(path)
@@ -97,6 +112,11 @@ def get_files_to_scan(
                 )
                 if not relative_path:
                     # e.g. symbolic links may be pointing outside the root directory
+                    if coverage is not None:
+                        coverage.record_excluded(
+                            os.path.join(path_root, filename),
+                            ExclusionReason.NOT_IN_WORKSPACE,
+                        )
                     continue
 
                 if (
@@ -104,6 +124,14 @@ def get_files_to_scan(
                     or relative_path in valid_paths
                 ):
                     yield relative_path
+                elif coverage is not None:
+                    # Version control internals are never scan inputs, so they
+                    # don't belong in the coverage account.
+                    if not _is_version_control_internal(relative_path):
+                        coverage.record_excluded(
+                            relative_path,
+                            ExclusionReason.NOT_IN_WORKSPACE,
+                        )
 
 
 def scan_line(line: str) -> Generator[PotentialSecret, None, None]:
@@ -137,7 +165,20 @@ def scan_line(line: str) -> Generator[PotentialSecret, None, None]:
     )
 
 
-def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
+def scan_file(
+    filename: str,
+    coverage: Optional[CoverageLedger] = None,
+    coverage_source: Optional[str] = None,
+) -> Generator[PotentialSecret, None, None]:
+    """
+    :param coverage: if supplied, the outcome of scanning this file (scanned,
+        or excluded with a reason) will be recorded in the ledger.
+    :param coverage_source: the label used to record this file in the coverage
+        ledger, if it differs from the filename used to open the file.
+    """
+    if coverage_source is None:
+        coverage_source = filename
+
     try:
         if not get_plugins():   # pragma: no cover
             log.error('No plugins to scan with!')
@@ -146,12 +187,24 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
         log.error('Unable to load plugins!')
         return
 
-    if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
+    blocking_filter = _get_blocking_filter(
+        required_filter_parameters=['filename'],
+        filename=filename,
+    )
+    if blocking_filter:
+        if coverage is not None:
+            coverage.record_excluded(
+                coverage_source,
+                ExclusionReason.FILTERED_BY_RULE,
+                filter_path=blocking_filter.path,
+            )
         return
 
     try:
         has_secret = False
-        for lines in _get_lines_from_file(filename):
+        was_read = False
+        for lines in _get_lines_from_file(filename, coverage=coverage, source=coverage_source):
+            was_read = True
             for secret in _process_line_based_plugins(
                 lines=list(enumerate(lines, start=1)),
                 filename=filename,
@@ -161,12 +214,20 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
 
             if has_secret:
                 break
+
+        if was_read and coverage is not None:
+            coverage.record_scanned(coverage_source)
     except IOError:
         log.warning(f'Unable to open file: {filename}')
+        if coverage is not None:
+            coverage.record_excluded(coverage_source, ExclusionReason.UNREADABLE)
         return
 
 
-def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
+def scan_diff(
+    diff: str,
+    coverage: Optional[CoverageLedger] = None,
+) -> Generator[PotentialSecret, None, None]:
     """
     :raises: ImportError
     """
@@ -174,7 +235,10 @@ def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
         log.error('No plugins to scan with!')
         return
 
-    for filename, lines in _get_lines_from_diff(diff):
+    for filename, lines in _get_lines_from_diff(diff, coverage=coverage):
+        if coverage is not None:
+            coverage.record_scanned(filename, source_type=SourceType.DIFF)
+
         yield from _process_line_based_plugins(lines, filename=filename)
 
 
@@ -250,7 +314,11 @@ def _scan_for_allowlisted_secrets_in_lines(
             )
 
 
-def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
+def _get_lines_from_file(
+    filename: str,
+    coverage: Optional[CoverageLedger] = None,
+    source: Optional[str] = None,
+) -> Generator[List[str], None, None]:
     """
     This attempts to get lines in a given file. If no more lines are needed, the caller
     is responsible for breaking out of this loop.
@@ -267,6 +335,11 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
                 lines = f.readlines()
         except UnicodeDecodeError:
             # We flat out ignore binary files
+            if coverage is not None:
+                coverage.record_excluded(
+                    source or filename,
+                    ExclusionReason.NON_TEXT_FILE,
+                )
             return
 
         yield lines
@@ -280,7 +353,10 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
         yield lines
 
 
-def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
+def _get_lines_from_diff(
+    diff: str,
+    coverage: Optional[CoverageLedger] = None,
+) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
     """
     :raises: ImportError
     """
@@ -291,7 +367,18 @@ def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]
     patch_set = PatchSet.from_string(diff)
     for patch_file in patch_set:
         filename = patch_file.path
-        if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
+        blocking_filter = _get_blocking_filter(
+            required_filter_parameters=['filename'],
+            filename=filename,
+        )
+        if blocking_filter:
+            if coverage is not None:
+                coverage.record_excluded(
+                    filename,
+                    ExclusionReason.FILTERED_BY_RULE,
+                    filter_path=blocking_filter.path,
+                    source_type=SourceType.DIFF,
+                )
             continue
 
         yield (
@@ -386,7 +473,11 @@ def _scan_line(
     )
 
 
-def _is_filtered_out(required_filter_parameters: Iterable[str], **kwargs: Any) -> bool:
+def _get_blocking_filter(
+    required_filter_parameters: Iterable[str],
+    **kwargs: Any,
+) -> Optional[SelfAwareCallable]:
+    """Returns the first filter that rejects the given input, if any."""
     for filter_fn in get_filters_with_parameter(*required_filter_parameters):
         try:
             if call_function_with_arguments(filter_fn, **kwargs):
@@ -406,10 +497,16 @@ def _is_filtered_out(required_filter_parameters: Iterable[str], **kwargs: Any) -
                     debug_msg = 'Skipping secret due to `{0}`.'.format(filter_fn.path)
 
                 log.info(debug_msg)
-                return True
+                return filter_fn
         except TypeError:
             # Skipping non-compatible filters
             pass
+
+    return None
+
+
+def _is_filtered_out(required_filter_parameters: Iterable[str], **kwargs: Any) -> bool:
+    return _get_blocking_filter(required_filter_parameters, **kwargs) is not None
 
     return False
 
@@ -439,3 +536,7 @@ def get_filters_with_parameter(*parameters: str) -> List[SelfAwareCallable]:
         for filter in get_filters()
         if minimum_parameters <= filter.injectable_variables
     ]
+
+
+def _is_version_control_internal(path: str) -> bool:
+    return '.git' in path.replace(os.sep, '/').split('/')
