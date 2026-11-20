@@ -10,6 +10,11 @@ dev
 
 **API Changes (Backward Compatible)**
 
+- ``Encoder`` accepts an optional ``security_domain`` binding. Once a domain is
+  bound, encoding for another domain raises ``SecurityDomainMismatchError``
+  until the caller explicitly calls ``Encoder.reset``. Existing sessions that
+  do not use a domain keep their previous behaviour.
+
 **Bugfixes**
 
 

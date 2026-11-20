@@ -10,6 +10,61 @@ class HPACKError(Exception):
     """
 
 
+class HPACKEncodingError(HPACKError):
+    """
+    An error has been encountered while performing HPACK encoding.
+
+    .. versionadded:: 4.3.0
+    """
+
+
+class SecurityDomainMismatchError(HPACKEncodingError, ValueError):
+    """
+    An encoder was asked to reuse compression state across security domains.
+
+    HPACK compression state is shared by every header block encoded on a
+    connection. Applications that use the encoder for requests belonging to
+    different security domains must start a fresh compression context with
+    :meth:`hpack.Encoder.reset` before encoding for the new domain.
+
+    .. versionadded:: 4.3.0
+    """
+
+    def __init__(
+        self,
+        current_domain: object | None = None,
+        requested_domain: object | None = None,
+    ) -> None:
+        self.current_domain = current_domain
+        self.requested_domain = requested_domain
+        self.encoder_domain = current_domain
+        self.domain = requested_domain
+
+        if current_domain is None:
+            message = (
+                "Encoder already contains compression state that is not bound to a "
+                f"security domain; refusing to encode for domain {requested_domain!r}. "
+                "Call reset(security_domain=...) to start a fresh compression context."
+            )
+        else:
+            message = (
+                f"Encoder compression state is bound to security domain {current_domain!r}, "
+                f"but a header block for domain {requested_domain!r} was requested. "
+                "Call reset(security_domain=...) to start a fresh compression context."
+            )
+
+        super().__init__(message)
+
+
+# Keep the exception easy to discover for callers that use domain-oriented
+# terminology rather than the full "security domain" name.
+DomainMismatchError = SecurityDomainMismatchError
+CompressionDomainMismatchError = SecurityDomainMismatchError
+CompressionContextMismatchError = SecurityDomainMismatchError
+ContextDomainMismatchError = SecurityDomainMismatchError
+SecurityDomainError = SecurityDomainMismatchError
+
+
 
 class HPACKDecodingError(HPACKError):
     """

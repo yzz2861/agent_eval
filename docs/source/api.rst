@@ -4,7 +4,7 @@ hpack API
 This document provides the HPACK API.
 
 .. autoclass:: hpack.Encoder
-   :members: header_table_size, encode
+   :members: header_table_size, security_domain, encode, reset
 
 .. autoclass:: hpack.Decoder
    :members: header_table_size, decode
@@ -26,3 +26,5 @@ This document provides the HPACK API.
 .. autoclass:: hpack.OversizedHeaderListError
 
 .. autoclass:: hpack.InvalidTableSizeError
+
+.. autoclass:: hpack.SecurityDomainMismatchError

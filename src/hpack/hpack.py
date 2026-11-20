@@ -3,10 +3,11 @@ Implements the HPACK header compression algorithm as detailed by RFC 7541.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING, Any
 
-from .exceptions import HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError
+from .exceptions import HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError, SecurityDomainMismatchError
 from .huffman import HuffmanEncoder
 from .huffman_constants import REQUEST_CODES, REQUEST_CODES_LENGTH
 from .huffman_table import decode_huffman
@@ -32,6 +33,51 @@ _PREFIX_BIT_MAX_NUMBERS = [(2 ** i) - 1 for i in range(9)]
 # We default the maximum header list we're willing to accept to 64kB. That's a
 # lot of headers, but if applications want to raise it they can do.
 DEFAULT_MAX_HEADER_LIST_SIZE = 2 ** 16
+
+_DOMAIN_UNSET = object()
+
+# Alternative keyword names accepted by the encoder's domain-aware entry
+# points. They all denote the same caller-supplied security domain.
+_DOMAIN_KEYWORDS = frozenset({
+    "compression_domain",
+    "confidentiality_domain",
+    "constraint",
+    "context_domain",
+    "domain",
+    "partition",
+    "realm",
+    "scope",
+    "trust_domain",
+})
+
+
+def _resolve_security_domain(
+    security_domain: object | None,
+    domain_options: dict[str, object],
+    *,
+    default: object | None = _DOMAIN_UNSET,
+) -> object | None:
+    """
+    Resolve the security domain supplied through the canonical argument or one
+    of its compatibility aliases.
+    """
+    value: object | None = security_domain
+
+    for key, candidate in domain_options.items():
+        if key not in _DOMAIN_KEYWORDS:
+            msg = f"Unexpected keyword argument {key!r}"
+            raise TypeError(msg)
+
+        if value is _DOMAIN_UNSET or value is None:
+            value = candidate
+        elif candidate is not None and candidate != value:
+            msg = f"Conflicting security domains given by security_domain and {key}"
+            raise TypeError(msg)
+
+    return default if value is _DOMAIN_UNSET else value
+
+
+_CompressionState = tuple[HeaderTable, list[int]]
 
 
 def _unicode_if_needed(header: HeaderWeaklyTyped, raw: bool) -> HeaderTuple:
@@ -163,14 +209,64 @@ class Encoder:
     """
     An HPACK encoder object. This object takes HTTP headers and emits encoded
     HTTP/2 header blocks.
+
+    An encoder may optionally be associated with a security domain. HPACK
+    compression state is shared by every header block on a connection, so
+    reusing an encoder for a different domain can leak information through
+    indexed header fields. When a domain is supplied, the encoder refuses to
+    cross domain boundaries until the caller explicitly starts a fresh
+    compression context with :meth:`reset`.
+
+    .. versionchanged:: 4.3.0
+       Added optional ``security_domain`` support.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, security_domain: object | None = None, **domain_options: object) -> None:
         self.header_table = HeaderTable()
         self.huffman_coder = HuffmanEncoder(
             REQUEST_CODES, REQUEST_CODES_LENGTH,
         )
         self.table_size_changes: list[int] = []
+        self._security_domain = _resolve_security_domain(security_domain, domain_options, default=None)
+        self._has_encoded = False
+
+    @property
+    def security_domain(self) -> object | None:
+        """
+        The security domain this encoder's compression state is bound to.
+
+        ``None`` means the encoder is an unconstrained, legacy session.
+        Assigning a new domain starts a fresh compression context, discarding
+        any state accumulated for the previous domain.
+        """
+        return self._security_domain
+
+    @security_domain.setter
+    def security_domain(self, value: object | None) -> None:
+        if value != self._security_domain:
+            self.reset(security_domain=value)
+
+    @property
+    def domain(self) -> object | None:
+        """
+        Alias for :attr:`security_domain`.
+        """
+        return self._security_domain
+
+    @domain.setter
+    def domain(self, value: object | None) -> None:
+        self.security_domain = value
+
+    @property
+    def compression_domain(self) -> object | None:
+        """
+        Alias for :attr:`security_domain`.
+        """
+        return self._security_domain
+
+    @compression_domain.setter
+    def compression_domain(self, value: object | None) -> None:
+        self.security_domain = value
 
     @property
     def header_table_size(self) -> int:
@@ -185,7 +281,165 @@ class Encoder:
         if self.header_table.resized:
             self.table_size_changes.append(value)
 
+    def reset(
+        self,
+        security_domain: object | None = _DOMAIN_UNSET,
+        **domain_options: object,
+    ) -> None:
+        """
+        Start a fresh compression context.
+
+        The current header table entries and any pending table-size updates
+        are discarded. The table's configured size is preserved.
+
+        When ``security_domain`` is supplied, the fresh context is bound to
+        that domain. If it is omitted, the encoder keeps its current domain,
+        which makes ``reset()`` suitable for retrying a cancelled request
+        without crossing a domain boundary.
+
+        This method is the explicit handoff point for callers that reuse an
+        encoder after a pool or connection handoff changes the security
+        domain.
+        """
+        resolved_domain = _resolve_security_domain(
+            security_domain,
+            domain_options,
+            default=_DOMAIN_UNSET,
+        )
+
+        old_maxsize = self.header_table.maxsize
+        self.header_table = HeaderTable()
+        self.header_table.maxsize = old_maxsize
+        self.header_table.resized = False
+        self.table_size_changes = []
+        self._has_encoded = False
+        if resolved_domain is not _DOMAIN_UNSET:
+            self._security_domain = resolved_domain
+
+    def rebind(self, security_domain: object | None, **domain_options: object) -> None:
+        """
+        Alias for :meth:`reset` that explicitly binds the encoder to a domain.
+        """
+        self.reset(security_domain=security_domain, **domain_options)
+
+    def discard(self) -> None:
+        """
+        Discard compression state that was produced for an unsent request.
+        """
+        self.reset()
+
+    def abort(self) -> None:
+        """
+        Alias for :meth:`discard`.
+        """
+        self.reset()
+
+    def _check_security_domain(self, requested_domain: object | None) -> None:
+        if requested_domain is None:
+            return
+
+        has_compression_state = self._has_encoded or self.header_table.dynamic_entries or self.table_size_changes
+        if not has_compression_state:
+            # Before any compression state exists there is nothing to leak, so
+            # the encoder may freely bind to (or rebind from) a domain.
+            return
+
+        current_domain = self._security_domain
+        if current_domain is None or requested_domain != current_domain:
+            raise SecurityDomainMismatchError(current_domain, requested_domain)
+
+    def _snapshot_compression_state(self) -> _CompressionState:
+        return copy.deepcopy(self.header_table), list(self.table_size_changes)
+
+    def _restore_compression_state(self, state: _CompressionState) -> None:
+        header_table, table_size_changes = state
+        self.header_table = header_table
+        self.table_size_changes = table_size_changes
+
     def encode(self,
+               headers: Iterable[\
+                   HeaderTuple | \
+                   tuple[bytes | str, bytes | str] | \
+                   tuple[bytes | str, bytes | str, bool | None]] | \
+                   dict[bytes | str, bytes | str],
+               huffman: bool = True,
+               security_domain: object | None = None,
+               **domain_options: object) -> bytes:
+        """
+        Takes a set of headers and encodes them into a HPACK-encoded header
+        block.
+
+        :param headers: The headers to encode. Must be either an iterable of
+                        tuples, an iterable of :class:`HeaderTuple
+                        <hpack.HeaderTuple>`, or a ``dict``.
+
+                        If an iterable of tuples, the tuples may be either
+                        two-tuples or three-tuples. If they are two-tuples, the
+                        tuples must be of the format ``(name, value)``. If they
+                        are three-tuples, they must be of the format
+                        ``(name, value, sensitive)``, where ``sensitive`` is a
+                        boolean value indicating whether the header should be
+                        added to header tables anywhere. If not present,
+                        ``sensitive`` defaults to ``False``.
+
+                        If an iterable of :class:`HeaderTuple
+                        <hpack.HeaderTuple>`, the tuples must always be
+                        two-tuples. Instead of using ``sensitive`` as a third
+                        tuple entry, use :class:`NeverIndexedHeaderTuple
+                        <hpack.NeverIndexedHeaderTuple>` to request that
+                        the field never be indexed.
+
+                        .. warning:: HTTP/2 requires that all special headers
+                            (headers whose names begin with ``:`` characters)
+                            appear at the *start* of the header block. While
+                            this method will ensure that happens for ``dict``
+                            subclasses, callers using any other iterable of
+                            tuples **must** ensure they place their special
+                            headers at the start of the iterable.
+
+                            For efficiency reasons users should prefer to use
+                            iterables of two-tuples: fixing the ordering of
+                            dictionary headers is an expensive operation that
+                            should be avoided if possible.
+
+        :param huffman: (optional) Whether to Huffman-encode any header sent as
+                        a literal value. Except for use when debugging, it is
+                        recommended that this be left enabled.
+
+        :param security_domain: (optional) The security domain the request
+                        belongs to. Once an encoder has produced compression
+                        state for a domain, encoding for a different domain
+                        raises :class:`SecurityDomainMismatchError`. Call
+                        :meth:`reset` with the new domain to explicitly start
+                        a fresh compression context. Omitting this argument
+                        preserves the historical, unconstrained behaviour for
+                        legacy callers.
+
+        :returns: A bytestring containing the HPACK-encoded header block.
+
+        :raises SecurityDomainMismatchError: If the encoder's existing
+                        compression state belongs to a different domain.
+        """
+        requested_domain = _resolve_security_domain(
+            security_domain,
+            domain_options,
+            default=None,
+        )
+        self._check_security_domain(requested_domain)
+
+        state = self._snapshot_compression_state()
+        try:
+            encoded = self._encode_headers(headers, huffman)
+        except BaseException:
+            self._restore_compression_state(state)
+            raise
+
+        self._has_encoded = True
+        if requested_domain is not None:
+            self._security_domain = requested_domain
+        return encoded
+
+    def _encode_headers(self,
                headers: Iterable[\
                    HeaderTuple | \
                    tuple[bytes | str, bytes | str] | \
