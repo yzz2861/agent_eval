@@ -67,6 +67,11 @@ from tuf.api import exceptions
 from tuf.api.metadata import Root, Snapshot, TargetFile, Targets, Timestamp
 from tuf.ngclient._internal.trusted_metadata_set import TrustedMetadataSet
 from tuf.ngclient.config import EnvelopeType, UpdaterConfig
+from tuf.ngclient.quarantine import (
+    QuarantinedTargetError,
+    QuarantinePolicy,
+    QuarantinePolicyError,
+)
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
 if TYPE_CHECKING:
@@ -92,6 +97,10 @@ class Updater:
             download both metadata and targets. Default is ``Urllib3Fetcher``
         config: ``Optional``; ``UpdaterConfig`` could be used to setup common
             configuration options.
+        quarantine_policy: ``Optional``; initial local ``QuarantinePolicy``.
+            Default is an empty policy: all targets that pass TUF
+            verification are delivered. The policy can be replaced at any
+            time with ``set_quarantine_policy()``.
         bootstrap: Initial root metadata bytes. This argument is required.
             Pass the embedded root metadata bytes for secure initialization.
             Pass ``None`` only if you explicitly want to use the cached
@@ -111,6 +120,7 @@ class Updater:
         target_base_url: str | None = None,
         fetcher: FetcherInterface | None = None,
         config: UpdaterConfig | None = None,
+        quarantine_policy: QuarantinePolicy | None = None,
         *,
         bootstrap: bytes | None,
     ):
@@ -123,6 +133,7 @@ class Updater:
             self._target_base_url = _ensure_trailing_slash(target_base_url)
 
         self.config = config or UpdaterConfig()
+        self._quarantine_policy = quarantine_policy or QuarantinePolicy()
         if fetcher is not None:
             self._fetcher = fetcher
         else:
@@ -146,6 +157,55 @@ class Updater:
         )
         self._persist_root(self._trusted_set.root.version, bootstrap)
         self._update_root_symlink()
+
+    @property
+    def quarantine_policy(self) -> QuarantinePolicy:
+        """Currently active local quarantine policy snapshot."""
+        return self._quarantine_policy
+
+    def set_quarantine_policy(self, policy: QuarantinePolicy) -> None:
+        """Atomically replace the active local quarantine policy.
+
+        The policy is provided by the caller through this trusted local
+        entry point: it is never fetched from the network and no
+        external credentials are involved.
+
+        Replacement defines a strict boundary between old handles and
+        new attempts: each ``find_cached_target()`` and
+        ``download_target()`` call enforces the policy snapshot that was
+        active when that call started. Calls already in progress finish
+        under the old snapshot; only new attempts observe ``policy``.
+
+        Args:
+            policy: New immutable ``QuarantinePolicy``. An empty policy
+                restores the default behavior (TUF verification only).
+        """
+        self._quarantine_policy = policy
+        logger.info("Quarantine policy updated: %s", policy)
+
+    def load_quarantine_policy(self, data: bytes) -> None:
+        """Load a serialized quarantine policy provided by the caller.
+
+        The policy is parsed and validated first: if loading fails, the
+        previously active policy remains in effect, the failure is
+        logged and an exception is raised.
+
+        Args:
+            data: Serialized policy (JSON, see
+                ``tuf.ngclient.quarantine`` module docs).
+
+        Raises:
+            QuarantinePolicyError: Data is not a valid policy. The
+                previously active policy remains in effect.
+        """
+        try:
+            policy = QuarantinePolicy.from_bytes(data)
+        except QuarantinePolicyError:
+            logger.exception(
+                "Quarantine policy load failed: keeping previous policy"
+            )
+            raise
+        self.set_quarantine_policy(policy)
 
     def refresh(self) -> None:
         """Refresh top-level metadata.
@@ -221,6 +281,10 @@ class Updater:
     ) -> str | None:
         """Check whether a local file is an up to date target.
 
+        A cached file whose content is quarantined by the active local
+        quarantine policy is not delivered: it is reported as not
+        cached, and the decision is logged.
+
         Args:
             targetinfo: ``TargetFile`` from ``get_targetinfo()``.
             filepath: Local path to file. If ``None``, a file path is
@@ -237,9 +301,20 @@ class Updater:
         if filepath is None:
             filepath = self._generate_target_file_path(targetinfo)
 
+        # Snapshot the active policy: this call enforces this snapshot
+        # even if the policy is replaced while the call is in progress.
+        policy = self._quarantine_policy
         try:
             with open(filepath, "rb") as target_file:
                 targetinfo.verify_length_and_hashes(target_file)
+            if policy.is_quarantined(
+                self._metadata_base_url, targetinfo.hashes
+            ):
+                logger.warning(
+                    "Cached target %s is quarantined: not delivered",
+                    targetinfo.path,
+                )
+                return None
             return filepath
         except (OSError, exceptions.LengthOrHashMismatchError):
             return None
@@ -265,6 +340,9 @@ class Updater:
             ValueError: Invalid arguments
             DownloadError: Download of the target file failed in some way
             RepositoryError: Downloaded target failed to be verified in some way
+            QuarantinedTargetError: Downloaded target verified correctly
+                but its content is quarantined by the active local
+                quarantine policy: it is not delivered.
             OSError: Failed to write target to file
 
         Returns:
@@ -294,10 +372,24 @@ class Updater:
             target_filepath = f"{dirname}{sep}{hashes[0]}.{basename}"
         full_url = f"{target_base_url}{target_filepath}"
 
+        # Snapshot the active policy: this call enforces this snapshot
+        # even if the policy is replaced while the call is in progress.
+        policy = self._quarantine_policy
         with self._fetcher.download_file(
             full_url, targetinfo.length
         ) as target_file:
             targetinfo.verify_length_and_hashes(target_file)
+
+            if policy.is_quarantined(
+                self._metadata_base_url, targetinfo.hashes
+            ):
+                logger.warning(
+                    "Downloaded target %s is quarantined: not delivered",
+                    targetinfo.path,
+                )
+                raise QuarantinedTargetError(
+                    f"Target {targetinfo.path} is quarantined by local policy"
+                )
 
             target_file.seek(0)
             with open(filepath, "wb") as destination_file:
