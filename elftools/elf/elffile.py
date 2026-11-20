@@ -25,6 +25,12 @@ from .constants import SHN_INDICES
 from .dynamic import DynamicSection, DynamicSegment
 from .gnuversions import GNUVerDefSection, GNUVerNeedSection, GNUVerSymSection
 from .hash import ELFHashSection, GNUHashSection
+from .provenance import (
+    ProvenanceReport,
+    ProvenanceSegment,
+    WindowInput,
+    query_address_provenance as _query_address_provenance,
+)
 from .relocation import RelocationHandler, RelocationSection, RelrRelocationSection
 from .sections import (
     ARMAttributesSection,
@@ -44,6 +50,7 @@ from .structs import ELFStructs
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from collections.abc import Container as TContainer
+    from collections.abc import Hashable
     from types import TracebackType
     from typing import Self
 
@@ -273,6 +280,52 @@ class ELFFile:
             if (start >= seg['p_vaddr'] and
                 end <= seg['p_vaddr'] + seg['p_filesz']):
                 yield start - seg['p_vaddr'] + seg['p_offset']
+
+    def query_address_provenance(
+        self,
+        start: int,
+        size: int,
+        windows: WindowInput,
+        state: Hashable | None = None,
+    ) -> ProvenanceReport:
+        """ Resolve a board-address range against caller-provided windows.
+
+            The returned report splits ``[start, start + size)`` at every
+            window and PT_LOAD boundary. Each piece records whether it comes
+            from file bytes, the zero-filled tail of a load segment, or an
+            unattested mapping. If ``state`` is None, windows that are
+            conditional on different hardware states are returned together as
+            parallel sources instead of being guessed.
+
+            This is a read-only metadata query: segment payloads are not read
+            or modified. See elftools.elf.provenance for the result types.
+        """
+        return _query_address_provenance(
+            self, start, size, windows, state=state)
+
+    def resolve_address_range(
+        self,
+        start: int,
+        size: int,
+        windows: WindowInput,
+        state: Hashable | None = None,
+    ) -> ProvenanceReport:
+        """ Alias for query_address_provenance. """
+        return self.query_address_provenance(start, size, windows, state=state)
+
+    def address_provenance(
+        self,
+        start: int,
+        size: int,
+        windows: WindowInput,
+        state: Hashable | None = None,
+    ) -> ProvenanceReport:
+        """ Alias for query_address_provenance. """
+        return self.query_address_provenance(start, size, windows, state=state)
+
+    def read_provenance_source(self, source: ProvenanceSegment) -> bytes:
+        """ Read the file bytes for a FILE_BYTES provenance source. """
+        return source.read_data(self.stream)
 
     def has_dwarf_info(self, strict: bool = False) -> bool:
         """ Check whether this file appears to have debugging information.

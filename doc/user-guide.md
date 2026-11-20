@@ -135,6 +135,68 @@ count and enumerate them. There are also some special segment classes
 that have more information about well-known segments. Take a look at
 `elftools/elf/segments.py` for more details.
 
+### Board-address provenance
+
+On some embedded devices, a pointer found on the board is not an ELF
+virtual address. The same storage may be exposed through a vendor-specific
+window, and that window may depend on a boot or hardware mode. The
+`ELFFile.query_address_provenance` method resolves a board-address range
+against a caller-supplied window table and the ELF `PT_LOAD` segments
+without reading the segment payloads.
+
+A `StorageWindow` maps a half-open board interval to a half-open ELF
+interval of the same length:
+
+```python
+from elftools.elf.elffile import ELFFile
+from elftools.elf.provenance import StorageWindow
+
+windows = [
+    StorageWindow(0x08000000, 0x10000, 0x400000),
+    {
+        'board_start': 0x08010000,
+        'board_end': 0x08020000,
+        'elf_address': 0x410000,
+        'condition': 'boot-bank-a',
+    },
+    StorageWindow(0x08010000, 0x10000, 0x500000, state='boot-bank-b'),
+]
+
+with open('firmware.elf', 'rb') as stream:
+    elf = ELFFile(stream)
+    report = elf.query_address_provenance(
+        0x0800E000, 0x14000, windows, state=None)
+
+for span in report.spans:
+    for source in span.sources:
+        print(hex(span.start), hex(span.size), source.kind,
+              source.elf_address, source.file_offset)
+```
+
+The returned spans cover the requested range contiguously and are split at
+every window boundary and every relevant `PT_LOAD` file/memory boundary.
+Each source is one of:
+
+- `FILE_BYTES`: the source is backed by bytes at `file_offset` in the ELF
+  file. `segment_index` identifies the originating program header.
+- `ZERO_FILL`: the source is the zero-initialized tail of a `PT_LOAD`
+  segment (`p_memsz > p_filesz`); it has no file offset.
+- `UNATTESTED`: a window maps the board address, but no `PT_LOAD` segment
+  describes the corresponding ELF address.
+- `UNMAPPED`: no supplied window covers the board address.
+
+If `state` is `None`, the hardware state is treated as unknown. Windows
+that are conditional on different states and cover the same span are then
+reported together in `span.sources`, in caller order, rather than selecting
+one arbitrarily. Passing a known state selects only unconditional windows
+and windows for that state. Two windows with the same state must not map
+an overlapping board interval to different ELF addresses.
+
+For file-backed sources, `source.read_data(stream)` (or
+`elf.read_provenance_source(source)`) returns the original bytes while
+leaving the stream position unchanged. This lets an examiner verify each
+piece of a report directly against the file offset recorded for it.
+
 ### Structs and headers
 
 Most objects in ELF and DWARF have \"headers\", and such objects usually
