@@ -17,6 +17,26 @@ Decoding
 .. autoclass:: cbor2.CBORDecoder
 .. autodecorator:: cbor2.shareable_decoder
 
+Evidence import
+---------------
+
+.. automodule:: cbor2.evidence
+    :no-members:
+
+.. autoclass:: cbor2.evidence.EvidenceDecoder
+    :members:
+.. autoclass:: cbor2.evidence.TagInterpretationPolicy
+    :members:
+.. autoclass:: cbor2.evidence.MessageDecodeContext
+    :members:
+.. autoexception:: cbor2.evidence.EvidenceImportError
+.. autoexception:: cbor2.evidence.UnknownPolicyError
+.. type:: TagHandler
+    :canonical: ~collections.abc.Callable[[cbor2.evidence.MessageDecodeContext, cbor2.CBORTag, bool], typing.Any]
+
+    Type of the tag interpretation callbacks registered on a
+    :class:`~cbor2.evidence.TagInterpretationPolicy`.
+
 Types
 -----
 

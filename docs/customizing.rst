@@ -282,3 +282,51 @@ Here is the revised example::
     new_parent = cbor2.loads(serialized, semantic_decoders={80000: decode_mytype})
     assert new_parent.children[0].parent is new_parent
     assert new_parent.children[1].parent is new_parent
+
+
+Policy-based decoding of evidence messages
+------------------------------------------
+
+When several cooperating partners reuse the same CBOR extension tag for different purposes,
+:mod:`cbor2.evidence` provides an optional entry point that selects a tag interpretation
+strategy from an input type the caller has already identified out-of-band (for example from a
+signature envelope)::
+
+    from cbor2 import CBORTag, dumps
+    from cbor2.evidence import EvidenceDecoder, TagInterpretationPolicy
+
+    EVIDENCE_TAG = 4001
+
+    def partner_a_handler(context, tag, immutable):
+        return f"partner-a::{tag.value}"
+
+    def partner_b_handler(context, tag, immutable):
+        return {"source": "partner-b", "raw": tag.value}
+
+    decoder = EvidenceDecoder()
+    decoder.register_policy(
+        "partner-a",
+        TagInterpretationPolicy("partner A", {EVIDENCE_TAG: partner_a_handler}),
+    )
+    decoder.register_policy(
+        "partner-b",
+        TagInterpretationPolicy("partner B", {EVIDENCE_TAG: partner_b_handler}),
+    )
+
+    payload = dumps(CBORTag(EVIDENCE_TAG, "payload"))
+    decoder.decode_message(payload, "partner-a")  # "partner-a::payload"
+    decoder.decode_message(payload, "partner-b")  # {"source": "partner-b", "raw": "payload"}
+
+Each call to :meth:`~cbor2.evidence.EvidenceDecoder.decode_message` creates a fresh
+:class:`~cbor2.evidence.MessageDecodeContext`, so handler state stored in ``context.state`` and
+any error raised by a handler are confined to that message and cannot leak into the next one.
+Asking for an input type that has no registered policy raises
+:class:`~cbor2.evidence.UnknownPolicyError` instead of silently reusing a stale strategy.
+
+Tags that the selected policy does not have a handler for are returned unchanged as
+:class:`CBORTag` instances, so the original extension payload is preserved verbatim for
+forensics::
+
+    # The registered policies know nothing about tag 9999
+    preserved = decoder.decode_message(dumps(CBORTag(9999, b"\\x01\\x02")), "partner-a")
+    assert preserved == CBORTag(9999, b"\\x01\\x02")
