@@ -71,6 +71,50 @@ Sample output:
    (9.9,)
    ('Critical',)
 
+Queue migration reconciliation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Governance teams can compare an old CVSS 3.1 queue decision with a CVSS 4.0
+decision before switching.  Each rule set must declare the dimensions it uses
+(``score`` and/or ``severity``); cross-computation only uses dimensions declared
+by both rule sets with the same metric.  A missing vector is reported as missing
+evidence and is never filled in from the other vector.
+
+.. code-block:: python
+
+    from cvss import QueueRuleSet, migrate_queues
+
+    old_rules = QueueRuleSet(
+        "3.1",
+        ["score"],
+        [
+            {"queue": "priority", "min_score": 8.0},
+            {"queue": "standard"},
+        ],
+    )
+    new_rules = QueueRuleSet(
+        "4.0",
+        ["score"],
+        [
+            {"queue": "priority", "min_score": 8.0, "min_inclusive": False},
+            {"queue": "standard"},
+        ],
+    )
+
+    old_vector = "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H"  # 8.0 High
+    new_vector = (
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:L/SI:L/SA:L/E:U"
+    )  # 8.0 High
+
+    result = migrate_queues(old_vector, new_vector, old_rules, new_rules)
+    print(result.report())
+
+Both vectors score 8.0, but the inclusive/exclusive thresholds put the risk in
+different queues.  The report attributes the difference to ``rule_changed`` and
+rejects ``scoring_data_changed`` for the declared ``score`` basis.  If either
+vector is ``None``, that side has no score, severity, or queue, and both
+explanations remain possible instead of being guessed.
+
 Interactive calculator
 ~~~~~~~~~~~~~~~~~~~~~~
 
