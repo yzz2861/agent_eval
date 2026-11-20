@@ -36,6 +36,7 @@ def load_order():
         'asn1crypto.algos',
         'asn1crypto.keys',
         'asn1crypto.x509',
+        'asn1crypto.policy',
         'asn1crypto.crl',
         'asn1crypto.csr',
         'asn1crypto.ocsp',

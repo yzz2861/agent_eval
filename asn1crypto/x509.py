@@ -1627,6 +1627,11 @@ class PolicyQualifierId(ObjectIdentifier):
     }
 
 
+# Dotted OIDs for the policy qualifier kinds defined in RFC 5280
+CPS_QUALIFIER_OID = '1.3.6.1.5.5.7.2.1'
+USER_NOTICE_QUALIFIER_OID = '1.3.6.1.5.5.7.2.2'
+
+
 class PolicyQualifierInfo(Sequence):
     _fields = [
         ('policy_qualifier_id', PolicyQualifierId),
