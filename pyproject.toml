@@ -61,6 +61,7 @@ packages = [
     "elftools.construct.lib",
 ]
 script-files = [
+    "scripts/attribute_address.py",
     "scripts/readelf.py",
 ]
 platforms = [

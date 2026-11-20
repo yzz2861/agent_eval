@@ -65,6 +65,14 @@ serves at least these purposes:
     `elftools` to produce such output.
 3.  It\'s being used in the testing of `elftools`.
 
+Another script, `scripts/attribute_address.py`, implements an offline
+address-to-file/line path for crash platforms. The caller supplies the module
+ELF, every external debug ELF that may be considered, and the instance load
+mapping explicitly; the script checks build IDs, GNU debuglink CRCs, and
+split-DWARF identities before trusting line rows. See the
+[offline address attribution guide](address-attribution.md) for the request and
+report formats.
+
 ## Detailed usage
 
 ### Basic concepts
