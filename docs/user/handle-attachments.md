@@ -43,6 +43,44 @@ for attachment in reader.attachment_list:
     print(attachment.name, attachment.alternative_name, attachment.content)
 ```
 
+## Inventory Attachment References
+
+Attachments are not only reachable through the document's name tree: they can
+also be associated with the document or single pages (``/AF`` arrays) or be
+referenced by annotations (``/FS`` entries, e.g. from FileAttachment
+annotations). The read-only `attachment_inventory` lists all of these
+locations without writing any attachment data to disk:
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("example.pdf")
+
+for record in reader.attachment_inventory:
+    print(record.names, record.stream, record.flags)
+    for reference in record.references:
+        print(" ", reference.source, reference.name, reference.page_index)
+```
+
+References that resolve to the same embedded file stream are grouped into a
+single record, identified by object identity. This allows recognizing
+duplicate references to the same content, even if they use different names:
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("example.pdf")
+inventory = reader.attachment_inventory
+
+by_name = inventory.find_by_name("some-name.txt")
+same_content = [record for record in inventory if record.stream in {r.stream for r in by_name}]
+```
+
+Records are flagged when something is noteworthy: `name-conflict` if the same
+name is used with different content, `external-filespec` if the file is not
+embedded in the document, and `broken-reference` if a reference could not be
+resolved.
+
 ## Add Attachments
 
 To add a new attachment, use the following code:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import bisect
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pypdf._utils import format_iso8824_date, logger_warning, parse_iso8824_date
 from pypdf.constants import CatalogAttributes as CA
@@ -14,6 +17,7 @@ from pypdf.generic import (
     ByteStringObject,
     DecodedStreamObject,
     DictionaryObject,
+    IndirectObject,
     NameObject,
     NullObject,
     NumberObject,
@@ -24,7 +28,7 @@ from pypdf.generic import (
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from pypdf._writer import PdfWriter
 
@@ -473,3 +477,361 @@ class EmbeddedFile:
                 cls._report_malformed(f"Embedded files name list is not an array: {container_names}", strict=strict)
                 return
             yield from cls._load_from_names(container_names, strict=strict)
+
+
+class AttachmentSource(str, Enum):
+    """The location within a document at which an attachment is referenced."""
+
+    DOCUMENT_NAME_TREE = "document-name-tree"
+    """The document's embedded files name tree (catalog ``/Names`` entry)."""
+    DOCUMENT_ASSOCIATED_FILE = "document-associated-file"
+    """The catalog ``/AF`` array (associated files, PDF 2.0)."""
+    PAGE_ASSOCIATED_FILE = "page-associated-file"
+    """A page's ``/AF`` array (associated files, PDF 2.0)."""
+    ANNOTATION = "annotation"
+    """An annotation's ``/FS`` entry (e.g. a FileAttachment annotation)."""
+
+
+class AttachmentFlag(str, Enum):
+    """A noteworthy property of an attachment record."""
+
+    NAME_CONFLICT = "name-conflict"
+    """The same name is used by records with different content."""
+    EXTERNAL_FILESPEC = "external-filespec"
+    """The file specification has no ``/EF`` entry; the file is not embedded."""
+    BROKEN_REFERENCE = "broken-reference"
+    """A reference could not be resolved to a file specification or stream."""
+
+
+@dataclass(frozen=True)
+class ObjectIdentity:
+    """
+    The identity of a PDF object within one reader session.
+
+    Indirect objects are identified by their object and generation number,
+    direct objects by their in-memory identity. Two references denote the
+    same object if and only if their identities are equal.
+    """
+
+    indirect: tuple[int, int] | None = None
+    """Object and generation number for indirect objects, ``None`` otherwise."""
+    direct: int | None = None
+    """In-memory identity for direct objects, ``None`` otherwise."""
+
+    @classmethod
+    def of(cls, obj: Any) -> ObjectIdentity:
+        """Determine the identity of the given (possibly indirect) object."""
+        if obj is None:
+            return cls()
+        if isinstance(obj, IndirectObject):
+            return cls(indirect=(obj.idnum, obj.generation))
+        indirect_reference = getattr(obj, "indirect_reference", None)
+        if indirect_reference is not None:
+            return cls(indirect=(indirect_reference.idnum, indirect_reference.generation))
+        return cls(direct=id(obj))
+
+    def __str__(self) -> str:
+        if self.indirect is not None:
+            return f"{self.indirect[0]} {self.indirect[1]} R"
+        if self.direct is not None:
+            return f"direct object 0x{self.direct:x}"
+        return "unresolvable object"
+
+
+@dataclass(frozen=True)
+class AttachmentReference:
+    """A single location at which an attachment is referenced."""
+
+    source: AttachmentSource
+    """Where in the document the reference was found."""
+    name: str | None
+    """The name used at this location, if any could be determined."""
+    filespec: ObjectIdentity
+    """The identity of the referenced file specification dictionary."""
+    page_index: int | None = None
+    """The 0-based page index for page-level and annotation references."""
+
+
+@dataclass
+class AttachmentRecord:
+    """
+    All references to one embedded file stream (or one unresolvable reference target).
+
+    References from different sources that resolve to the same embedded file
+    stream are grouped into a single record, so no relationship is lost when
+    the same content is reachable through several names or locations.
+    """
+
+    stream: ObjectIdentity | None
+    """The identity of the embedded file stream, ``None`` for external or broken references."""
+    names: tuple[str, ...]
+    """All names under which this record is referenced, sorted."""
+    references: tuple[AttachmentReference, ...]
+    """All locations at which this record is referenced."""
+    flags: frozenset[AttachmentFlag] = frozenset()
+
+    @property
+    def filespecs(self) -> tuple[ObjectIdentity, ...]:
+        """The identities of all file specification dictionaries referencing this record."""
+        seen: dict[ObjectIdentity, None] = {}
+        for reference in self.references:
+            seen.setdefault(reference.filespec)
+        return tuple(seen)
+
+    @property
+    def has_name_conflict(self) -> bool:
+        """Whether any of this record's names is also used by a different record."""
+        return AttachmentFlag.NAME_CONFLICT in self.flags
+
+    @property
+    def is_external(self) -> bool:
+        """Whether this record describes a file that is not embedded in the document."""
+        return AttachmentFlag.EXTERNAL_FILESPEC in self.flags
+
+    @property
+    def is_broken(self) -> bool:
+        """Whether any reference of this record could not be fully resolved."""
+        return AttachmentFlag.BROKEN_REFERENCE in self.flags
+
+    def __repr__(self) -> str:
+        return (
+            f"<{self.__class__.__name__} names={list(self.names)!r} "
+            f"stream={self.stream} flags={sorted(self.flags)!r}>"
+        )
+
+
+@dataclass
+class _RecordBuilder:
+    """Mutable accumulator for an AttachmentRecord while scanning."""
+
+    stream: ObjectIdentity | None = None
+    names: set[str] = field(default_factory=set)
+    references: list[AttachmentReference] = field(default_factory=list)
+    flags: set[AttachmentFlag] = field(default_factory=set)
+
+
+class AttachmentInventory(Sequence[AttachmentRecord]):
+    """
+    Read-only inventory of all attachment references in a document.
+
+    The inventory collects references from the document's embedded files name
+    tree, the catalog and page ``/AF`` arrays, and annotation ``/FS`` entries.
+    References resolving to the same embedded file stream are grouped into a
+    single :class:`AttachmentRecord`, identified by object identity.
+
+    The inventory is purely informational: it never decodes stream content
+    and never writes any attachment data to disk.
+    """
+
+    def __init__(self, records: Iterable[AttachmentRecord]) -> None:
+        self._records = list(records)
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __getitem__(self, index: int) -> AttachmentRecord:
+        return self._records[index]
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} records={len(self._records)}>"
+
+    def find_by_name(self, name: str) -> list[AttachmentRecord]:
+        """Return all records referenced under the given name."""
+        return [record for record in self._records if name in record.names]
+
+    def find_by_stream(self, stream: ObjectIdentity) -> AttachmentRecord | None:
+        """Return the record for the given embedded stream identity, if any."""
+        for record in self._records:
+            if record.stream is not None and record.stream == stream:
+                return record
+        return None
+
+    @staticmethod
+    def _filespec_display_name(filespec: DictionaryObject) -> str | None:
+        """Retrieve the display name of a file specification dictionary."""
+        for key in (FileSpecificationDictionaryEntries.UF, FileSpecificationDictionaryEntries.F):
+            value = filespec.get(key)
+            if is_null_or_none(value):
+                continue
+            value = value.get_object()
+            if isinstance(value, str):
+                return str(value)
+        return None
+
+    @staticmethod
+    def _resolve_stream(filespec: DictionaryObject) -> tuple[Any, AttachmentFlag | None]:
+        """
+        Resolve the embedded file stream of a file specification dictionary.
+
+        Returns the (unresolved) stream object and ``None`` on success, or
+        ``None`` and the applicable flag otherwise.
+        """
+        ef = filespec.get("/EF")
+        if ef is None:
+            return None, AttachmentFlag.EXTERNAL_FILESPEC
+        ef = ef.get_object()
+        if not isinstance(ef, DictionaryObject):
+            return None, AttachmentFlag.BROKEN_REFERENCE
+        for key in (
+            FileSpecificationDictionaryEntries.UF,
+            FileSpecificationDictionaryEntries.F,
+            FileSpecificationDictionaryEntries.DOS,
+            FileSpecificationDictionaryEntries.Mac,
+            FileSpecificationDictionaryEntries.Unix,
+        ):
+            value = ef.get(key)
+            if is_null_or_none(value):
+                continue
+            if isinstance(value.get_object(), StreamObject):
+                return value, None
+            return None, AttachmentFlag.BROKEN_REFERENCE
+        return None, AttachmentFlag.BROKEN_REFERENCE
+
+    @classmethod
+    def _iter_name_tree_entries(cls, catalog: DictionaryObject) -> Iterator[tuple[str | None, Any]]:
+        """
+        Yield ``(name, value)`` pairs from the embedded files name tree.
+
+        Unlike :meth:`EmbeddedFile._load`, malformed entries are yielded as
+        well (with a ``None`` name or a non-dictionary value) so that they can
+        be flagged as broken references.
+        """
+        names_dict = catalog.get("/Names")
+        if is_null_or_none(names_dict):
+            return
+        names_dict = names_dict.get_object()
+        if not isinstance(names_dict, DictionaryObject):
+            return
+        container = names_dict.get("/EmbeddedFiles")
+        if is_null_or_none(container):
+            return
+        container = container.get_object()
+        if not isinstance(container, DictionaryObject):
+            return
+
+        name_arrays: list[Any] = []
+        kids = container.get("/Kids")
+        if not is_null_or_none(kids):
+            kids = kids.get_object()
+            if isinstance(kids, ArrayObject):
+                for kid in kids:
+                    kid = kid.get_object()
+                    if isinstance(kid, DictionaryObject) and "/Names" in kid:
+                        name_arrays.append(kid["/Names"])
+        if "/Names" in container:
+            name_arrays.append(container["/Names"])
+
+        for name_array in name_arrays:
+            name_array = name_array.get_object()
+            if not isinstance(name_array, ArrayObject):
+                continue
+            for i in range(0, len(name_array), 2):
+                name_object = name_array[i].get_object()
+                name = str(name_object) if isinstance(name_object, str) else None
+                value = name_array[i + 1] if i + 1 < len(name_array) else None
+                yield name, value
+
+    @classmethod
+    def _iter_af_entries(cls, dictionary: DictionaryObject) -> Iterator[Any]:
+        """Yield the file specifications of an ``/AF`` array."""
+        af = dictionary.get("/AF")
+        if is_null_or_none(af):
+            return
+        af = af.get_object()
+        if not isinstance(af, ArrayObject):
+            return
+        yield from af
+
+    @classmethod
+    def _collect_references(
+        cls, catalog: DictionaryObject, pages: Iterable[DictionaryObject]
+    ) -> list[tuple[AttachmentSource, str | None, int | None, Any]]:
+        """Collect raw ``(source, name, page_index, value)`` references."""
+        raw: list[tuple[AttachmentSource, str | None, int | None, Any]] = []
+        for name, value in cls._iter_name_tree_entries(catalog):
+            raw.append((AttachmentSource.DOCUMENT_NAME_TREE, name, None, value))
+        for value in cls._iter_af_entries(catalog):
+            raw.append((AttachmentSource.DOCUMENT_ASSOCIATED_FILE, None, None, value))
+        for page_index, page in enumerate(pages):
+            for value in cls._iter_af_entries(page):
+                raw.append((AttachmentSource.PAGE_ASSOCIATED_FILE, None, page_index, value))
+            annots = page.get("/Annots")
+            if is_null_or_none(annots):
+                continue
+            annots = annots.get_object()
+            if not isinstance(annots, ArrayObject):
+                continue
+            for annot in annots:
+                annot = annot.get_object()
+                if isinstance(annot, DictionaryObject) and "/FS" in annot:
+                    raw.append((AttachmentSource.ANNOTATION, None, page_index, annot["/FS"]))
+        return raw
+
+    @classmethod
+    def _build(
+        cls, catalog: DictionaryObject, pages: Iterable[DictionaryObject]
+    ) -> AttachmentInventory:
+        """
+        Build the inventory from a document catalog and its pages.
+
+        This method and its signature are considered internal API and thus not exposed publicly for now.
+        """
+        builders: dict[Any, _RecordBuilder] = {}
+        for source, name, page_index, value in cls._collect_references(catalog, pages):
+            filespec = value.get_object() if value is not None else None
+            filespec_identity = ObjectIdentity.of(value)
+            flags: set[AttachmentFlag] = set()
+            stream_identity: ObjectIdentity | None = None
+            if name is None and source == AttachmentSource.DOCUMENT_NAME_TREE:
+                flags.add(AttachmentFlag.BROKEN_REFERENCE)
+            if not isinstance(filespec, DictionaryObject):
+                flags.add(AttachmentFlag.BROKEN_REFERENCE)
+            else:
+                if name is None:
+                    name = cls._filespec_display_name(filespec)
+                stream_value, flag = cls._resolve_stream(filespec)
+                if flag is not None:
+                    flags.add(flag)
+                if stream_value is not None:
+                    stream_identity = ObjectIdentity.of(stream_value)
+
+            if stream_identity is not None:
+                key: Any = ("stream", stream_identity)
+            elif filespec is not None:
+                key = ("filespec", filespec_identity)
+            else:
+                key = ("unresolvable", len(builders))
+            builder = builders.setdefault(key, _RecordBuilder())
+            if stream_identity is not None:
+                builder.stream = stream_identity
+            if name is not None:
+                builder.names.add(name)
+            builder.flags.update(flags)
+            builder.references.append(
+                AttachmentReference(
+                    source=source,
+                    name=name,
+                    filespec=filespec_identity,
+                    page_index=page_index,
+                )
+            )
+
+        # Flag name conflicts: a name used by more than one record.
+        records_by_name: dict[str, set[Any]] = {}
+        for key, builder in builders.items():
+            for name in builder.names:
+                records_by_name.setdefault(name, set()).add(key)
+        for name, keys in records_by_name.items():
+            if len(keys) > 1:
+                for key in keys:
+                    builders[key].flags.add(AttachmentFlag.NAME_CONFLICT)
+
+        return cls(
+            AttachmentRecord(
+                stream=builder.stream,
+                names=tuple(sorted(builder.names)),
+                references=tuple(builder.references),
+                flags=frozenset(builder.flags),
+            )
+            for builder in builders.values()
+        )

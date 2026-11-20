@@ -80,7 +80,7 @@ from .generic import (
     create_string_object,
     is_null_or_none,
 )
-from .generic._files import EmbeddedFile
+from .generic._files import AttachmentInventory, EmbeddedFile
 from .types import OutlineType, PagemodeType
 from .xmp import XmpInformation
 
@@ -1747,6 +1747,27 @@ class PdfDocCommon(ABC):
     def attachment_list(self) -> Iterator[EmbeddedFile]:
         """Iterable of attachment objects."""
         yield from EmbeddedFile._load(self.root_object, strict=self.strict)
+
+    @property
+    def attachment_inventory(self) -> AttachmentInventory:
+        """
+        Read-only inventory of all attachment references in the document.
+
+        In contrast to :attr:`attachments` and :attr:`attachment_list`, which
+        only consider the document's embedded files name tree, the inventory
+        also covers the catalog and page ``/AF`` arrays and annotation ``/FS``
+        entries (e.g. from FileAttachment annotations).
+
+        References resolving to the same embedded file stream are grouped into
+        a single :class:`AttachmentRecord<pypdf.generic.AttachmentRecord>`,
+        identified by object identity, so duplicate references to the same
+        content can be recognized. Name conflicts, external file
+        specifications, and broken references are reported through flags.
+
+        The inventory is purely informational: it never decodes stream content
+        and never writes any attachment data to disk.
+        """
+        return AttachmentInventory._build(self.root_object, self.pages)
 
     @abstractmethod
     def _repr_mimebundle_(
