@@ -9,6 +9,7 @@ from bandit.core import context  # noqa
 from bandit.core import manager  # noqa
 from bandit.core import meta_ast  # noqa
 from bandit.core import node_visitor  # noqa
+from bandit.core import targets  # noqa
 from bandit.core import test_set  # noqa
 from bandit.core import tester  # noqa
 from bandit.core import utils  # noqa

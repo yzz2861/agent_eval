@@ -17,6 +17,7 @@ LOG = logging.getLogger(__name__)
 class BanditTester:
     def __init__(self, testset, debug, nosec_lines, metrics):
         self.results = []
+        self.errors = []
         self.testset = testset
         self.last_result = None
         self.debug = debug
@@ -118,6 +119,7 @@ class BanditTester:
                         )
 
             except Exception as e:
+                self.errors.append({"test": name, "error": e})
                 self.report_error(name, context, e)
                 if self.debug:
                     raise

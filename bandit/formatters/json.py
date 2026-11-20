@@ -136,6 +136,13 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
     machine_output["metrics"] = manager.metrics.data
 
+    # Multi-target scans add a self-describing block.  The legacy
+    # ``results``, ``errors`` and ``metrics`` fields are left untouched so
+    # existing report readers keep working.
+    multi_target_report = getattr(manager, "multi_target_report", None)
+    if multi_target_report is not None:
+        machine_output["target_results"] = multi_target_report
+
     # timezone agnostic format
     TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 

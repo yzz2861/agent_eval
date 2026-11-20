@@ -107,6 +107,10 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
     machine_output["metrics"] = manager.metrics.data
 
+    multi_target_report = getattr(manager, "multi_target_report", None)
+    if multi_target_report is not None:
+        machine_output["target_results"] = multi_target_report
+
     for result in machine_output["results"]:
         if "code" in result:
             code = result["code"].replace("\n", "\\n")

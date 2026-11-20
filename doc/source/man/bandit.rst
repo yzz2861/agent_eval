@@ -10,7 +10,8 @@ bandit [-h] [-r] [-a {file,vuln}] [-n CONTEXT_LINES] [-c CONFIG_FILE]
             [-f {csv,custom,html,json,screen,txt,xml,yaml}]
             [--msg-template MSG_TEMPLATE] [-o [OUTPUT_FILE]] [-v] [-d] [-q]
             [--ignore-nosec] [-x EXCLUDED_PATHS] [-b BASELINE]
-            [--ini INI_PATH] [--exit-zero] [--version]
+            [--ini INI_PATH] [--target-versions TARGET_VERSIONS]
+            [--exit-zero] [--version]
             [targets [targets ...]]
 
 DESCRIPTION
@@ -75,6 +76,11 @@ OPTIONS
                         path of a baseline report to compare against (only
                         JSON-formatted files are accepted)
   --ini INI_PATH        path to a .bandit file that supplies command line arguments
+  --target-versions TARGET_VERSIONS
+                        comma-separated Python syntax target versions (for
+                        example 3.10,3.12) to scan each file against; targets
+                        the running interpreter cannot emulate are reported as
+                        uncovered without requiring another Python installation
   --exit-zero           exit with 0, even with results found
   --version             show program's version number and exit
 

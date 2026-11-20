@@ -18,3 +18,11 @@ for 3.5 that uses, for example, `yield from` with asyncio, then you'll have
 syntax errors that will prevent Bandit from working properly. Alternatively,
 if you are relying on 2.7's octal notation of `0777` then you'll have a syntax
 error if you run Bandit on 3.x.
+
+For projects that support multiple Python versions, use
+``--target-versions`` to scan each file against several grammar targets in
+one run.  The JSON ``target_results`` block records, per file and target,
+whether the file was ``CHECKED``, ``REJECTED`` by that grammar, could not be
+concluded (``INCONCLUSIVE``), or was ``UNCOVERED`` because the host
+interpreter cannot emulate the target.  Additional interpreters are not
+installed; ``ast.parse(feature_version=...)`` is used instead.

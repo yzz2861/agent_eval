@@ -39,6 +39,7 @@ import sys
 from bandit.core import constants
 from bandit.core import docs_utils
 from bandit.core import test_properties
+from bandit.formatters import utils
 
 IS_WIN_PLATFORM = sys.platform.startswith("win32")
 COLORAMA = False
@@ -216,6 +217,9 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
         bits.append(header("\nTest results:"))
         bits.append(get_results(manager, sev_level, conf_level, lines))
+        target_details = utils.get_multi_target_details(manager)
+        if target_details:
+            bits.append(header("%s", "\n" + target_details))
         bits.append(header("\nCode scanned:"))
         bits.append(
             "\tTotal lines of code: %i"

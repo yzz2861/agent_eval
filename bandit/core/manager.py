@@ -21,6 +21,7 @@ from bandit.core import issue
 from bandit.core import meta_ast as b_meta_ast
 from bandit.core import metrics
 from bandit.core import node_visitor as b_node_visitor
+from bandit.core import targets as b_targets
 from bandit.core import test_set as b_test_set
 
 LOG = logging.getLogger(__name__)
@@ -71,6 +72,10 @@ class BanditManager:
         self.metrics = metrics.Metrics()
         self.b_ts = b_test_set.BanditTestSet(config, profile)
         self.scores = []
+        # Multi-target results are kept separate from the legacy
+        # single-version state so existing report consumers are unaffected.
+        self.target_report = None
+        self.multi_target_report = None
 
     def get_skipped(self):
         ret = []
@@ -257,6 +262,9 @@ class BanditManager:
 
         self.files_list = sorted(files_list)
         self.excluded_files = sorted(excluded_files)
+        # Keep the discovered set even after run_tests() removes files that
+        # the host cannot parse; a multi-target scan must still see them.
+        self.discovered_files = list(self.files_list)
 
     def run_tests(self):
         """Runs through all files in the scope
@@ -297,6 +305,68 @@ class BanditManager:
 
         # do final aggregation of metrics
         self.metrics.aggregate()
+
+    def run_multi_target_tests(self, target_versions):
+        """Scan every discovered file against several grammar targets.
+
+        Each target is parsed by the host interpreter with
+        ``ast.parse(feature_version=...)``.  No extra Python installation is
+        used.  A target newer (or older) than the host can emulate is
+        reported as ``UNCOVERED`` rather than silently producing an empty
+        result.
+
+        The legacy single-version state (``results``, ``scores``,
+        ``skipped`` and ``metrics``) is deliberately left untouched.
+
+        :param target_versions: comma separated string, a single version
+            tuple, or an iterable of version specs
+        :return: JSON-serialisable multi-target report dictionary
+        """
+        targets = b_targets.parse_target_versions(target_versions)
+        if not targets:
+            raise b_targets.TargetVersionError(
+                "at least one Python target version is required"
+            )
+
+        filenames = getattr(self, "discovered_files", None)
+        if not filenames:
+            filenames = list(self.files_list)
+
+        # Use a private metrics sink: multi-target scanning must not alter
+        # the metrics of a subsequent or previous legacy run.
+        target_metrics = metrics.Metrics()
+        file_reports = []
+        for fname in filenames:
+            try:
+                with open(fname, "rb") as fdata:
+                    data = fdata.read()
+            except OSError as exc:
+                reason = exc.strerror or str(exc)
+                file_reports.append(
+                    b_targets.file_error_report(fname, targets, reason)
+                )
+                continue
+
+            file_reports.append(
+                b_targets.scan_file(
+                    fname,
+                    data,
+                    targets,
+                    self.b_ts,
+                    target_metrics,
+                    ignore_nosec=self.ignore_nosec,
+                )
+            )
+
+        self.target_report = file_reports
+        self.multi_target_report = b_targets.build_report(
+            file_reports, targets
+        )
+        return self.multi_target_report
+
+    def scan_target_versions(self, target_versions):
+        """Alias for :meth:`run_multi_target_tests` for backend callers."""
+        return self.run_multi_target_tests(target_versions)
 
     def _parse_file(self, fname, fdata, new_files_list):
         try:

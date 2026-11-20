@@ -14,6 +14,7 @@ import bandit
 from bandit.core import config as b_config
 from bandit.core import constants
 from bandit.core import manager as b_manager
+from bandit.core import targets as b_targets
 from bandit.core import utils
 
 BASE_CONFIG = "bandit.yaml"
@@ -365,6 +366,19 @@ def main():
         help="path to a .bandit file that supplies command line arguments",
     )
     parser.add_argument(
+        "--target-versions",
+        "--target-version",
+        dest="target_versions",
+        action="append",
+        default=None,
+        type=str,
+        help="comma-separated Python syntax target versions "
+        "(for example 3.10,3.12) to scan each file against; the option "
+        "may be repeated. Targets the running interpreter cannot emulate "
+        "are reported as uncovered without requiring another Python "
+        "installation",
+    )
+    parser.add_argument(
         "--exit-zero",
         action="store_true",
         dest="exit_zero",
@@ -597,6 +611,14 @@ def main():
             "path of a baseline report",
         )
 
+        args.target_versions = _log_option_source(
+            parser.get_default("target_versions"),
+            args.target_versions,
+            ini_options.get("target-versions")
+            or ini_options.get("target_versions"),
+            "target syntax versions",
+        )
+
     try:
         b_conf = b_config.BanditConfig(config_file=args.config_file)
     except utils.ConfigError as e:
@@ -672,7 +694,21 @@ def main():
         sys.exit(2)
 
     # initiate execution of tests within Bandit Manager
-    b_mgr.run_tests()
+    multi_target_report = None
+    if args.target_versions:
+        try:
+            multi_target_report = b_mgr.run_multi_target_tests(
+                args.target_versions
+            )
+        except b_targets.TargetVersionError as e:
+            LOG.error("%s", e)
+            sys.exit(2)
+
+        # Also produce the ordinary host-version report so consumers of the
+        # legacy "results"/"errors"/"metrics" fields keep working.
+        b_mgr.run_tests()
+    else:
+        b_mgr.run_tests()
     LOG.debug(b_mgr.b_ma)
     LOG.debug(b_mgr.metrics)
 
@@ -688,8 +724,20 @@ def main():
         args.msg_template,
     )
 
+    target_unsuppressed = 0
+    if multi_target_report is not None:
+        target_unsuppressed = multi_target_report["summary"][
+            "unsuppressed_findings"
+        ]
+
     if (
-        b_mgr.results_count(sev_filter=sev_level, conf_filter=conf_level) > 0
+        (
+            b_mgr.results_count(
+                sev_filter=sev_level, conf_filter=conf_level
+            )
+            > 0
+            or target_unsuppressed > 0
+        )
         and not args.exit_zero
     ):
         sys.exit(1)

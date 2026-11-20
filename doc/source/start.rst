@@ -99,6 +99,46 @@ run Bandit with standard input:
 
     cat examples/imports.py | bandit -
 
+Multi-target syntax scanning
+----------------------------
+
+If a project supports more than one Python version, a file can be valid for
+one grammar target and invalid for another.  The host interpreter is still
+the only parser used; ``ast.parse(feature_version=...)`` emulates older
+grammars, and no extra Python installation is required.
+
+.. code-block:: console
+
+    bandit -r path/to/code --target-versions 3.8,3.12,3.14 -f json
+
+``--target-versions`` may also be repeated (for example
+``--target-version 3.8 --target-version 3.12``).
+
+The JSON report keeps the normal ``results``, ``errors`` and ``metrics``
+fields and adds a ``target_results`` block.  Each file has one entry per
+target with an explicit status:
+
+``CHECKED``
+    The file parsed and every applicable rule completed.
+
+``REJECTED``
+    The file is not valid syntax for this target, so no rule result exists.
+
+``UNCOVERED``
+    The host cannot emulate this grammar (for example a target newer than
+    the running interpreter).  It was not scanned; an empty result must not
+    be read as a clean result.
+
+``INCONCLUSIVE``
+    The file was readable but at least one rule could not complete.  Any
+    findings are partial.
+
+Findings at the same location and with the same rule ID are merged across
+targets.  ``python_versions`` lists the targets in which the finding
+applies, while ``suppressed``, ``suppressed_versions``,
+``suppressed_test_ids`` and ``blanket_nosec`` preserve the original rule ID
+and the ``# nosec`` state.
+
 For more usage information:
 
 .. code-block:: console

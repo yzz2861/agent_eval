@@ -275,14 +275,16 @@ class BanditNodeVisitor:
                 map(operator.add, self.scores[score_type], scores[score_type])
             )
 
-    def process(self, data):
+    def process(self, data, feature_version=None):
         """Main process loop
 
         Build and process the AST
         :param lines: lines code to process
+        :param feature_version: optional ``(major, minor)`` grammar version
+            used by ``ast.parse``; ``None`` keeps the host grammar
         :return score: the aggregated score for the current file
         """
-        f_ast = ast.parse(data)
+        f_ast = ast.parse(data, feature_version=feature_version)
         self.generic_visit(f_ast)
         # Run tests that do not require access to the AST,
         # but only to the whole file source:

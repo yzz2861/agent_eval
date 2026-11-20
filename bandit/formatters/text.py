@@ -170,6 +170,9 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
 
         bits.append("\nTest results:")
         bits.append(get_results(manager, sev_level, conf_level, lines))
+        target_details = utils.get_multi_target_details(manager)
+        if target_details:
+            bits.append("\n" + target_details)
         bits.append("\nCode scanned:")
         bits.append(
             "\tTotal lines of code: %i"
