@@ -53,6 +53,7 @@ test = [
 
 [project.scripts]
 evtx_dump = "evtx_scripts.evtx_dump:main"
+evtx_annotate = "evtx_scripts.evtx_annotate:main"
 evtx_dump_json = "evtx_scripts.evtx_dump_json:main"
 evtx_dump_chunk_slack = "evtx_scripts.evtx_dump_chunk_slack:main"
 evtx_eid_record_numbers = "evtx_scripts.evtx_eid_record_numbers:main"

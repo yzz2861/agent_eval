@@ -31,6 +31,12 @@ Examples
 --------
 Provided with the parsing module `Evtx` are four scripts that mimic the tools distributed with Parse-Evtx.  `evtx_info.py` prints metadata about the event log and verifies the checksums of each chunk.  `evtx_templates.py` builds and prints the templates used throughout the event log. `evtx_dump.py` parses the event log and transforms the binary XML into a human readable ASCII XML format. Finally, `evtx_dump_json.py` parses event logs, similar to `evtx_dump.py` and transforms the binary XML into JSON with the added capability to output the JSON array to a file. 
 
+Offline annotation
+------------------
+When logs are collected from another machine, the message resources Windows would use to render them are often missing, leaving only numeric fields.  `evtx_annotate.py` renders each record and places an offline annotation next to it, resolved from a separately collected JSON message dictionary.  The dictionary is aligned with each record's provider, event version, and language, and every annotated item is marked with its provenance (record vs. dictionary).  An explicit fallback language may be given with `--fallback-language`.  If the applicable resource version is unknown or a field's type has drifted, the original number and value are kept and a note explains the decision.  At most two message resource versions are retained per event; when an older resource is still readable but does not apply, the annotation notes explain why it was not used.  For example:
+
+    evtx_annotate.py security.evtx --dictionary messages.json --language zh-CN --fallback-language en-US
+
 Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review the contents and notice the complete implementation of the logic:
 
     print(e_views.XML_HEADER)
@@ -71,4 +77,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-
