@@ -44,6 +44,7 @@ def walk_tree(callback, paths):
 def print_usage(fp):
     print("Usage:", file=fp)
     print("  python -mmacholib [help|--help]", file=fp)
+    print("  python -mmacholib data-in-code FILE", file=fp)
     print("  python -mmacholib dump FILE ...", file=fp)
     print("  python -mmacholib find DIR ...", file=fp)
     print("  python -mmacholib standalone DIR ...", file=fp)
@@ -59,6 +60,11 @@ def main():
 
     if gCommand == "dump":
         walk_tree(macho_dump.print_file, sys.argv[2:])
+
+    elif gCommand in ("data-in-code", "data_in_code", "evidence"):
+        from macholib.data_in_code import main as evidence_main
+
+        sys.exit(evidence_main(sys.argv[2:]))
 
     elif gCommand == "find":
         walk_tree(lambda fp, path: print(path, file=fp), sys.argv[2:])

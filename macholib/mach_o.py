@@ -20,6 +20,7 @@ from macholib.ptypes import (
     p_long,
     p_short,
     p_uint8,
+    p_uint16,
     p_uint32,
     p_uint64,
     p_ulong,
@@ -1222,10 +1223,14 @@ class build_tool_version(Structure):
 
 
 class data_in_code_entry(Structure):
-    _fields_ = (("offset", p_uint32), ("length", p_uint32), ("kind", p_uint32))
+    _fields_ = (("offset", p_uint32), ("length", p_uint16), ("kind", p_uint16))
 
     def describe(self):
-        return {"offset": self.offset, "length": self.length, "kind": self.kind}
+        return {
+            "offset": int(self.offset),
+            "length": int(self.length),
+            "kind": int(self.kind),
+        }
 
 
 DICE_KIND_DATA = 0x0001

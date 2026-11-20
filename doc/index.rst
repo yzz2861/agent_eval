@@ -27,6 +27,7 @@ Reference Guide
    :maxdepth: 1
 
    MachO
+   data_in_code
    MachoOGraph
    MachoOStandalone
    SymbolTable

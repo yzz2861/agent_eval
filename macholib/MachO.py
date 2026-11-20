@@ -155,6 +155,14 @@ class MachO(object):
                 changed = True
         return changed
 
+    def build_data_in_code_manifest(self):
+        from macholib.data_in_code import build_evidence_manifest
+
+        return build_evidence_manifest(self)
+
+    build_data_in_code_evidence = build_data_in_code_manifest
+    getDataInCodeEvidence = build_data_in_code_manifest
+
     def load_header(self, fh, offset, size):
         fh.seek(offset)
         header = struct.unpack(">I", fh.read(4))[0]
@@ -362,6 +370,14 @@ class MachOHeader(object):
                 yield idx, name, data[
                     ofs : data.find(b"\x00", ofs)  # noqa: E203
                 ].decode(sys.getfilesystemencoding())
+
+    def build_data_in_code_manifest(self):
+        from macholib.data_in_code import build_evidence_manifest
+
+        return build_evidence_manifest(self.parent, headers=[self])
+
+    build_data_in_code_evidence = build_data_in_code_manifest
+    getDataInCodeEvidence = build_data_in_code_manifest
 
     def rewriteInstallNameCommand(self, loadcmd):
         """Rewrite the load command of this dylib"""
