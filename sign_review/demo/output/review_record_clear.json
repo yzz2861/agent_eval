@@ -1,0 +1,69 @@
+{
+  "deciding_findings": [],
+  "decision": "clear_to_proceed",
+  "findings": [
+    {
+      "change_type": "field_value",
+      "detail": {
+        "after": "Zhang Wei",
+        "before": "",
+        "default_after": null,
+        "default_before": null
+      },
+      "explanation": "字段 officer_name 的值在签后发生变化。",
+      "from_revision": 1,
+      "object_ref": "idx:0",
+      "policy_basis": "explicit-permission",
+      "severity": "allowed",
+      "target": "field:officer_name",
+      "to_revision": 2
+    },
+    {
+      "change_type": "field_value",
+      "detail": {
+        "after": "LF-2026-019",
+        "before": "",
+        "default_after": null,
+        "default_before": null
+      },
+      "explanation": "字段 case_id 的值在签后发生变化。",
+      "from_revision": 1,
+      "object_ref": "idx:1",
+      "policy_basis": "explicit-permission",
+      "severity": "allowed",
+      "target": "field:case_id",
+      "to_revision": 2
+    }
+  ],
+  "revision_count": 3,
+  "revision_offsets": [
+    1546,
+    2530,
+    3844
+  ],
+  "routing_reason": "所有签后变更均在显式许可范围内",
+  "signatures": [
+    {
+      "byte_range": [
+        0,
+        1885,
+        2143,
+        388
+      ],
+      "covered_end": 2531,
+      "detail": {
+        "note": "structural check only; no PKI trust"
+      },
+      "field_name": "legal_signature",
+      "field_ref": "15 0 R",
+      "signed_revision": 1,
+      "valid": true,
+      "value_ref": "14 0 R",
+      "verifier": "structural-stub"
+    }
+  ],
+  "signed_revision_index": 1,
+  "source": "clear_form.pdf",
+  "total_bytes": 3845,
+  "truncated": false
+}

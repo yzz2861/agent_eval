@@ -1,0 +1,311 @@
+{
+  "deciding_findings": [
+    {
+      "change_type": "field_appearance",
+      "explanation": "字段 case_id 的外观流或部件注解发生变化。",
+      "from_revision": 2,
+      "object_ref": "idx:1",
+      "severity": "unauthorized",
+      "target": "field:case_id",
+      "to_revision": 3
+    },
+    {
+      "change_type": "page_content",
+      "explanation": "第 2 页内容流发生变化。",
+      "from_revision": 3,
+      "object_ref": "page:1",
+      "severity": "unauthorized",
+      "target": "page:1",
+      "to_revision": 4
+    },
+    {
+      "change_type": "shared_resource",
+      "explanation": "新增共享资源 indirect:20 0 R，影响页面 1, 2。逐项：第 1 页: Font/F2; 第 2 页: Font/F2",
+      "from_revision": 4,
+      "object_ref": "indirect:20 0 R",
+      "severity": "unauthorized",
+      "target": "resource:indirect:20 0 R",
+      "to_revision": 5
+    },
+    {
+      "change_type": "page_geometry",
+      "explanation": "第 1 页尺寸或旋转发生变化。",
+      "from_revision": 5,
+      "object_ref": "page:0",
+      "severity": "unauthorized",
+      "target": "page:0",
+      "to_revision": 6
+    },
+    {
+      "change_type": "page_geometry",
+      "explanation": "第 2 页尺寸或旋转发生变化。",
+      "from_revision": 5,
+      "object_ref": "page:1",
+      "severity": "unauthorized",
+      "target": "page:1",
+      "to_revision": 6
+    },
+    {
+      "change_type": "inherited_attr",
+      "explanation": "第 1 页继承属性 /Rotate 变化，当前定义于节点 4 0 R，该节点可能被多个页面共享。",
+      "from_revision": 5,
+      "object_ref": "4 0 R",
+      "severity": "unauthorized",
+      "target": "page:0:/Rotate",
+      "to_revision": 6
+    },
+    {
+      "change_type": "inherited_attr",
+      "explanation": "第 2 页继承属性 /Rotate 变化，当前定义于节点 5 0 R，该节点可能被多个页面共享。",
+      "from_revision": 5,
+      "object_ref": "5 0 R",
+      "severity": "unauthorized",
+      "target": "page:1:/Rotate",
+      "to_revision": 6
+    }
+  ],
+  "decision": "manual_review",
+  "findings": [
+    {
+      "change_type": "field_value",
+      "detail": {
+        "after": "Li Na",
+        "before": "",
+        "default_after": null,
+        "default_before": null
+      },
+      "explanation": "字段 officer_name 的值在签后发生变化。",
+      "from_revision": 1,
+      "object_ref": "idx:0",
+      "policy_basis": "explicit-permission",
+      "severity": "allowed",
+      "target": "field:officer_name",
+      "to_revision": 2
+    },
+    {
+      "change_type": "field_appearance",
+      "detail": {
+        "appearance_after": {
+          "ap_present": true,
+          "normal_kind": "stream",
+          "ref": "18 0 R",
+          "stream": {
+            "decodable": true,
+            "length": 24,
+            "preview": "\u0001\u0000\u0000\tã\u0000\u0001\u0000\u0000\nw\u0000\u0001\u0000\u0000\u000b\u001f\u0000\u0001\u0000\u0000\u000b\u0000",
+            "sha256": "6123117d632d65f433ddf3417679b92991227d88bb7a05c7d7d866244f3c2ebd"
+          }
+        },
+        "appearance_before": null,
+        "widget_after": {
+          "/F": 4,
+          "/P": "indirect:4 0 R",
+          "/Rect": [
+            160,
+            220,
+            290,
+            240
+          ],
+          "/Subtype": "/Widget"
+        },
+        "widget_before": {
+          "/F": 4,
+          "/P": "indirect:4 0 R",
+          "/Rect": [
+            160,
+            220,
+            290,
+            240
+          ],
+          "/Subtype": "/Widget"
+        }
+      },
+      "explanation": "字段 case_id 的外观流或部件注解发生变化。",
+      "from_revision": 2,
+      "object_ref": "idx:1",
+      "policy_basis": "字段 case_id 的外观变更未获许可",
+      "severity": "unauthorized",
+      "target": "field:case_id",
+      "to_revision": 3
+    },
+    {
+      "change_type": "page_content",
+      "detail": {
+        "after": [
+          {
+            "ref": null,
+            "stream": {
+              "decodable": true,
+              "length": 12,
+              "preview": "\u0001\u0000\u0000\rK\u0000\u0001\u0000\u0000\rÌ\u0000",
+              "sha256": "02aead98f74dd6d3796f47dad04a0eb994e7fb77d5351c83e18cffe08889d05f"
+            }
+          }
+        ],
+        "before": [
+          {
+            "ref": null,
+            "stream": {
+              "decodable": true,
+              "length": 57,
+              "preview": "BT\n/F1 12 Tf\n1 0 0 1 40 250 Tm\n(Intake form page 2) Tj\nET",
+              "sha256": "2d7cff8abde87c9f6ad839f14f906c9cf8d617603b7c3802e6d510355f21b340"
+            }
+          }
+        ]
+      },
+      "explanation": "第 2 页内容流发生变化。",
+      "from_revision": 3,
+      "object_ref": "page:1",
+      "policy_basis": "策略未许可页面内容/页数改动",
+      "severity": "unauthorized",
+      "target": "page:1",
+      "to_revision": 4
+    },
+    {
+      "change_type": "shared_resource",
+      "detail": {
+        "impacted_pages": [
+          {
+            "names": [
+              "Font/F2"
+            ],
+            "page_index": 0
+          },
+          {
+            "names": [
+              "Font/F2"
+            ],
+            "page_index": 1
+          }
+        ]
+      },
+      "explanation": "新增共享资源 indirect:20 0 R，影响页面 1, 2。逐项：第 1 页: Font/F2; 第 2 页: Font/F2",
+      "from_revision": 4,
+      "object_ref": "indirect:20 0 R",
+      "policy_basis": "策略未许可共享资源改动",
+      "severity": "unauthorized",
+      "target": "resource:indirect:20 0 R",
+      "to_revision": 5
+    },
+    {
+      "change_type": "page_geometry",
+      "detail": {
+        "media_box_after": [
+          0.0,
+          0.0,
+          300,
+          300
+        ],
+        "media_box_before": [
+          0.0,
+          0.0,
+          300,
+          300
+        ],
+        "rotation_after": 90,
+        "rotation_before": 0
+      },
+      "explanation": "第 1 页尺寸或旋转发生变化。",
+      "from_revision": 5,
+      "object_ref": "page:0",
+      "policy_basis": "策略未许可页面几何改动",
+      "severity": "unauthorized",
+      "target": "page:0",
+      "to_revision": 6
+    },
+    {
+      "change_type": "page_geometry",
+      "detail": {
+        "media_box_after": [
+          0.0,
+          0.0,
+          300,
+          300
+        ],
+        "media_box_before": [
+          0.0,
+          0.0,
+          300,
+          300
+        ],
+        "rotation_after": 90,
+        "rotation_before": 0
+      },
+      "explanation": "第 2 页尺寸或旋转发生变化。",
+      "from_revision": 5,
+      "object_ref": "page:1",
+      "policy_basis": "策略未许可页面几何改动",
+      "severity": "unauthorized",
+      "target": "page:1",
+      "to_revision": 6
+    },
+    {
+      "change_type": "inherited_attr",
+      "detail": {
+        "after": 90,
+        "attribute": "/Rotate",
+        "before": null,
+        "defined_on": "4 0 R"
+      },
+      "explanation": "第 1 页继承属性 /Rotate 变化，当前定义于节点 4 0 R，该节点可能被多个页面共享。",
+      "from_revision": 5,
+      "object_ref": "4 0 R",
+      "policy_basis": "策略未许可继承属性改动",
+      "severity": "unauthorized",
+      "target": "page:0:/Rotate",
+      "to_revision": 6
+    },
+    {
+      "change_type": "inherited_attr",
+      "detail": {
+        "after": 90,
+        "attribute": "/Rotate",
+        "before": null,
+        "defined_on": "5 0 R"
+      },
+      "explanation": "第 2 页继承属性 /Rotate 变化，当前定义于节点 5 0 R，该节点可能被多个页面共享。",
+      "from_revision": 5,
+      "object_ref": "5 0 R",
+      "policy_basis": "策略未许可继承属性改动",
+      "severity": "unauthorized",
+      "target": "page:1:/Rotate",
+      "to_revision": 6
+    }
+  ],
+  "revision_count": 7,
+  "revision_offsets": [
+    1546,
+    2530,
+    3402,
+    3802,
+    4228,
+    4538,
+    5017
+  ],
+  "routing_reason": "签后未授权变更触发人工流转，首项: field:case_id (field_appearance)",
+  "signatures": [
+    {
+      "byte_range": [
+        0,
+        1885,
+        2143,
+        388
+      ],
+      "covered_end": 2531,
+      "detail": {
+        "note": "structural check only; no PKI trust"
+      },
+      "field_name": "legal_signature",
+      "field_ref": "15 0 R",
+      "signed_revision": 1,
+      "valid": true,
+      "value_ref": "14 0 R",
+      "verifier": "structural-stub"
+    }
+  ],
+  "signed_revision_index": 1,
+  "source": "manual_form.pdf",
+  "total_bytes": 5018,
+  "truncated": false
+}
