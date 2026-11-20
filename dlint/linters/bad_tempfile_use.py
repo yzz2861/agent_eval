@@ -33,3 +33,23 @@ class BadTempfileUseLinter(bad_module_attribute_use.BadModuleAttributeUseLinter)
                 'mktemp',
             ],
         }
+
+
+# Re-export the temporary-file identity rule for callers that discover
+# rules through the existing tempfile linter module.
+from .bad_tempfile_identity_use import (  # noqa: F401,E402
+    BadTempfileIdentityUseLinter,
+    BadTempfileNameUseLinter,
+    BadTempfileOwnershipUseLinter,
+    BadTempfilePathUseLinter,
+    TempfileIdentityUseLinter,
+)
+
+__all__ = [
+    "BadTempfileUseLinter",
+    "BadTempfileIdentityUseLinter",
+    "BadTempfileNameUseLinter",
+    "BadTempfileOwnershipUseLinter",
+    "BadTempfilePathUseLinter",
+    "TempfileIdentityUseLinter",
+]
