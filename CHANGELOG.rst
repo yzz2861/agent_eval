@@ -5,6 +5,8 @@ Change log
 Next version
 ============
 
+- Added an offline policy preview which compares two sanitizer settings and reports structural differences by original node path.
+- Preview decision logs record tags, paths, attribute names, reasons and lengths only; they never retain removed text or attribute values.
 - Dropped support for Python < 3.10.
 - Added Python 3.14 and 3.15 to the CI matrix.
 

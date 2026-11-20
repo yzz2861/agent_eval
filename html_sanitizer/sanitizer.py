@@ -254,13 +254,17 @@ class Sanitizer:
             normalize_tail=not inside,
         )
 
-    def sanitize(self, html):  # noqa: C901 -- I know.
+    def sanitize(self, html, *, trace=None):  # noqa: C901 -- I know.
         """
         Clean HTML code from ugly copy-pasted CSS and empty elements
 
         Removes everything not explicitly allowed in ``self.allowed_tags``.
 
         Requires ``lxml`` and, for especially broken HTML, ``beautifulsoup4``.
+
+        ``trace`` is an internal hook used by
+        :func:`html_sanitizer.preview.preview_policy`. It receives structural
+        decisions only; text and attribute values are never passed to it.
         """
 
         # normalize unicode
@@ -273,10 +277,13 @@ class Sanitizer:
         try:
             doc = lxml.html.fromstring(html)
             lxml.html.tostring(doc, encoding="utf-8")
-        except Exception:  # noqa: BLE001 -- we could and maybe should be more specific
+        except Exception:
             from lxml.html import soupparser  # noqa: PLC0415
 
             doc = soupparser.fromstring(html)
+
+        if trace is not None:
+            trace.start(doc)
 
         lxml.html.clean.Cleaner(
             remove_unknown_tags=False,
@@ -291,11 +298,18 @@ class Sanitizer:
             host_whitelist=self.embedded_hosts,
         )(doc)
 
+        if trace is not None:
+            trace.after_initial_cleaner(doc)
+
         # walk the tree recursively, because we want to be able to remove
         # previously emptied elements completely
         backlog = deque(doc.iterdescendants())
 
+        if trace is not None:
+            before = trace.text_lengths(doc)
         doc = self.normalize_whitespace(doc)
+        if trace is not None:
+            trace.text_maybe_changed(doc, before, reason="normalize_root")
 
         while True:
             try:
@@ -304,13 +318,26 @@ class Sanitizer:
                 break
 
             for processor in self.element_preprocessors:
+                before_tag = element.tag
                 element = processor(element)
+                if trace is not None:
+                    trace.ensure_marker(element)
+                if trace is not None and element.tag != before_tag:
+                    trace.tag_changed(
+                        element, before_tag, element.tag, reason="preprocessor"
+                    )
 
             if self.drop_disallowed_contents and element.tag not in self.tags:
+                if trace is not None:
+                    trace.dropped_subtree(element, reason="disallowed_contents")
                 element.drop_tree()
                 continue
 
+            if trace is not None:
+                before = trace.text_lengths(element)
             element = self.normalize_whitespace(element)
+            if trace is not None:
+                trace.text_maybe_changed(element, before, reason="normalize_whitespace")
 
             # remove empty tags if they are not explicitly allowed
             if (
@@ -318,6 +345,8 @@ class Sanitizer:
                 and element.tag not in self.empty
                 and not len(element)
             ):
+                if trace is not None:
+                    trace.dropped_tag(element, reason="empty")
                 element.drop_tag()
                 continue
 
@@ -328,21 +357,32 @@ class Sanitizer:
                 and {e.tag for e in element} <= self.whitespace
                 and all(self.only_whitespace_re.match(e.tail or "") for e in element)
             ):
+                if trace is not None:
+                    trace.dropped_subtree(element, reason="whitespace_only")
                 element.drop_tree()
                 continue
 
             if element.tag in {"li", "p"}:
                 # remove p-in-li and p-in-p tags
                 for p in element.findall("p"):
+                    if trace is not None:
+                        trace.dropped_tag(p, reason="nested_paragraph")
                     if getattr(p, "text", None):
                         p.text = " " + p.text + " "
                     p.drop_tag()
 
                 # remove list markers, maybe copy-pasted from word or whatever
                 if element.text:
+                    before_length = len(element.text)
                     element.text = filter_control_characters(
                         re.sub(r"^\s*(-|\*|&#183;)\s+", "", element.text)
                     )
+                    if trace is not None and len(element.text) != before_length:
+                        trace.text_maybe_changed(
+                            element,
+                            (before_length, len(element.tail or "")),
+                            reason="strip_list_marker",
+                        )
 
             elif element.tag in self.whitespace:
                 # Drop the next element if
@@ -355,12 +395,16 @@ class Sanitizer:
                         not element.tail or self.only_whitespace_re.match(element.tail)
                     )
                 ):
+                    if trace is not None:
+                        trace.dropped_tag(nx, reason="duplicate_whitespace_tag")
                     nx.drop_tag()
 
             if not element.text:
                 # No text before first child and first child is a <br>: Drop it
                 first = next(iter(element), None)
                 if first is not None and first.tag in self.whitespace:
+                    if trace is not None:
+                        trace.dropped_tag(first, reason="leading_whitespace_tag")
                     first.drop_tag()
                     # Maybe we have more than one <br>
                     backlog.append(element)
@@ -378,6 +422,8 @@ class Sanitizer:
                 ):
                     # Yes, we should. Tail is empty, that is, no text between
                     # tags of a mergeable type.
+                    if trace is not None:
+                        trace.merged(element, nx)
                     if nx.text:
                         if len(element):
                             list(element)[-1].tail = "{}{}".format(
@@ -402,21 +448,41 @@ class Sanitizer:
 
             for processor in self.element_postprocessors:
                 element = processor(element)
+                if trace is not None:
+                    trace.ensure_marker(element)
 
             # remove all attributes which are not explicitly allowed
             allowed = self.attributes.get(element.tag, [])
+            if trace is not None:
+                allowed = [*allowed, trace.marker_attribute]
             for key in element.keys():  # noqa: SIM118 (do not remove .keys())
                 if key not in allowed:
+                    if trace is not None:
+                        trace.attribute_removed(element, key)
                     del element.attrib[key]
                 elif not self.keep_typographic_whitespace:
+                    old_value_length = len(element.get(key) or "")
                     element.set(key, self.whitespace_re.sub(" ", element.get(key)))
+                    if trace is not None:
+                        trace.attribute_maybe_changed(
+                            element, key, old_value_length, reason="normalize_attribute"
+                        )
 
             # Clean hrefs so that they are benign
             href = element.get("href")
             if href is not None:
-                element.set("href", self.sanitize_href(href))
+                cleaned_href = self.sanitize_href(href)
+                if trace is not None and cleaned_href != href:
+                    trace.attribute_changed(
+                        element, "href", len(href), len(cleaned_href)
+                    )
+                element.set("href", cleaned_href)
 
+            if trace is not None:
+                before = trace.text_lengths(element)
             element = self.normalize_whitespace(element)
+            if trace is not None:
+                trace.text_maybe_changed(element, before, reason="normalize_whitespace")
 
         if self.autolink is True:
             lxml.html.clean.autolink(doc)
@@ -433,6 +499,10 @@ class Sanitizer:
             host_whitelist=self.embedded_hosts,
         )(doc)
 
+        if trace is not None:
+            trace.finish(doc, self)
+            trace.strip_markers(doc)
+
         html = lxml.html.tostring(doc, encoding="unicode")
 
         # add a space before the closing slash in empty tags
@@ -442,3 +512,40 @@ class Sanitizer:
         html = re.sub(r"^<div>|</div>$", "", html)
 
         return html
+
+    def preview(
+        self,
+        html,
+        new_settings=None,
+        *extra_settings,
+        new=None,
+        old_settings=None,
+        include_unchanged=False,
+    ):
+        """Compare this policy with another one without touching live data.
+
+        ``new_settings`` may be a settings mapping or another
+        :class:`Sanitizer`. The returned
+        :class:`html_sanitizer.preview.PolicyPreview` contains both cleaned
+        results and a structural diff keyed by original node paths.
+        """
+        if extra_settings:
+            if len(extra_settings) != 1:
+                raise TypeError("preview accepts at most two policy arguments")
+            if new is None:
+                old_settings, new_settings = new_settings, extra_settings[0]
+        from .preview import preview_policy  # noqa: PLC0415
+
+        return preview_policy(
+            html,
+            old=self if old_settings is None else old_settings,
+            new=new if new is not None else new_settings,
+            include_unchanged=include_unchanged,
+        )
+
+    def preview_policy(self, html, *settings, **kwargs):
+        """Alias for :meth:`preview`."""
+        return self.preview(html, *settings, **kwargs)
+
+    compare = preview
+    compare_policies = preview

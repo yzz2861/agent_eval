@@ -37,6 +37,72 @@ Usage
     >>> sanitizer.sanitize('<span style="font-weight:bold">some text</span>')
     '<strong>some text</strong>'
 
+
+Policy preview
+==============
+
+Rules often tighten over time. Reviewers need to know why a section of a
+page disappeared: was the whole branch dropped, was a wrapper removed while
+its contents survived, or was only the tag spelling changed? The offline
+preview runs the same input through two policies and reports both cleaned
+results plus a structural difference table::
+
+    >>> from html_sanitizer import preview_policy
+    >>> preview = preview_policy(
+    ...     "<p><span>Hello</span></p>",
+    ...     {"tags": {"p", "span"}, "attributes": {}, "empty": set(),
+    ...      "separate": {"p"}},
+    ...     {"tags": {"p"}, "attributes": {}, "empty": set(),
+    ...      "separate": {"p"}},
+    ... )
+    >>> preview.old_html
+    "<p><span>Hello</span></p>"
+    >>> preview.new_html
+    "<p>Hello</p>"
+    >>> print(preview.format_table())
+    CHANGE     PATH           TAG   OLD         NEW                         CHARS  DETAIL
+    unwrapped  /p[1]/span[1]  span  kept(span)  unwrapped(tag_not_allowed)  5      outer <span> removed, contents kept; 5 chars retained
+
+
+Each original element receives a stable path such as
+``/p[2]/span[1]``. The same path is used in both runs and in the difference
+table, so similar or identical sibling nodes stay distinguishable. The
+``change`` column uses explicit categories, including:
+
+- ``removed_subtree``: the new policy removed the node and its contents.
+- ``unwrapped``: the new policy removed only the element, keeping its
+  contents (``retained_content_length`` shows how much text survived).
+- ``format_changed``: the node still exists, but its output tag changed
+  (for example ``b`` became ``strong``).
+- ``restored``, ``rewrapped``, ``attributes_changed``, ``text_changed`` and
+  ``merge_changed`` cover the other combinations.
+
+``preview["old_summary"]`` and ``preview["new_summary"]`` include input and
+output lengths, node counts, removed-content lengths, decision counts and a
+snapshot of the effective policy. ``preview["policy_changes"]`` lists changed
+tags, attributes and flags. Each difference row also carries the redacted
+decision records for both policies.
+
+The preview is designed for offline review. Decision records never contain
+text nodes or attribute values; they only record tags, paths, attribute
+names, reasons and lengths. Use ``preview.to_debug_dict()`` or
+``preview.to_json(include_outputs=False)`` for a report that also omits the two
+sanitized HTML payloads. The normal result includes ``old_html`` and
+``new_html`` because those are the requested policy outputs.
+
+``Sanitizer.preview(html, new_sanitizer_or_settings)`` is a convenience
+method which uses the current instance as the old policy.
+
+The same preview is available from the command line. JSON files may contain a
+settings mapping; Python files may define a ``SETTINGS`` mapping in addition
+to plain JSON::
+
+    python -m html_sanitizer --preview --old old.json --new new.json page.html
+    python -m html_sanitizer.preview --old old.py --new new.py --format json page.html
+
+Pass ``-`` or omit the input filename to read HTML from stdin. Add ``--debug``
+to the JSON output to omit the two sanitized HTML payloads.
+
 Settings
 ========
 

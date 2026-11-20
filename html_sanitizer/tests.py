@@ -1,5 +1,7 @@
+import json
 from unittest import TestCase
 
+from .preview import preview_policy
 from .sanitizer import Sanitizer
 
 
@@ -830,3 +832,115 @@ git commit
             ],
             sanitizer=sanitizer,
         )
+
+
+class PolicyPreviewTestCase(TestCase):
+    @staticmethod
+    def settings(tags, **kwargs):
+        return {
+            "tags": set(tags),
+            "attributes": kwargs.pop("attributes", {}),
+            "empty": set(kwargs.pop("empty", ())),
+            "separate": set(kwargs.pop("separate", ())),
+            **kwargs,
+        }
+
+    def test_old_and_new_results_and_unwrapped_path(self):
+        old = Sanitizer(self.settings(["p", "span"], separate={"p"}))
+        new = Sanitizer(self.settings(["p"], separate={"p"}))
+        result = old.preview("<p><span>Hello</span></p>", new)
+
+        self.assertEqual(result.old_html, "<p><span>Hello</span></p>")
+        self.assertEqual(result.new_html, "<p>Hello</p>")
+        entry = result.differences[0]
+        self.assertEqual(entry.change, "unwrapped")
+        self.assertEqual(entry.path, "/p[1]/span[1]")
+        self.assertEqual(entry.tag, "span")
+        self.assertEqual(entry.new.retained_content_length, 5)
+
+    def test_removed_subtree_is_distinct_from_empty_wrapper_cleanup(self):
+        old = Sanitizer(self.settings(["p", "span"], separate={"p"}))
+        new = Sanitizer(
+            self.settings(["p"], separate={"p"}, drop_disallowed_contents=True)
+        )
+        result = old.preview("<p><span>Hello</span></p>", new)
+
+        by_path = {entry.path: entry for entry in result.differences}
+        self.assertEqual(by_path["/p[1]/span[1]"].change, "removed_subtree")
+        self.assertEqual(by_path["/p[1]/span[1]"].new.status, "removed")
+        self.assertEqual(by_path["/p[1]"].new.status, "unwrapped")
+        self.assertEqual(by_path["/p[1]"].new.retained_content_length, 0)
+
+    def test_format_change_is_reported(self):
+        old = Sanitizer(
+            self.settings(["p", "b"], separate={"p"}, element_preprocessors=[])
+        )
+        new = Sanitizer(self.settings(["p", "strong"], separate={"p"}))
+        result = old.preview("<p><b>Hello</b></p>", new)
+
+        self.assertEqual(result.old_html, "<p><b>Hello</b></p>")
+        self.assertEqual(result.new_html, "<p><strong>Hello</strong></p>")
+        entry = result.differences[0]
+        self.assertEqual(entry.change, "format_changed")
+        self.assertEqual(entry.old.tag, "b")
+        self.assertEqual(entry.new.tag, "strong")
+
+    def test_near_duplicate_nodes_get_distinct_paths(self):
+        old = Sanitizer(self.settings(["p", "span"], separate={"p", "span"}))
+        new = Sanitizer(self.settings(["p"], separate={"p"}))
+        result = old.preview("<p><span>same</span><span>same</span></p>", new)
+
+        paths = [entry.path for entry in result.differences]
+        self.assertEqual(paths, ["/p[1]/span[1]", "/p[1]/span[2]"])
+        self.assertTrue(
+            all(entry.change == "unwrapped" for entry in result.differences)
+        )
+
+    def test_debug_output_never_contains_removed_text_or_attribute_values(self):
+        secret = "SENSITIVE-DO-NOT-LOG"
+        old = Sanitizer(
+            self.settings(["p"], separate={"p"}, drop_disallowed_contents=True)
+        )
+        new = Sanitizer(
+            self.settings(["p"], separate={"p"}, drop_disallowed_contents=True)
+        )
+        html = '<p><span data-token="%s">%s</span></p>' % (secret, secret)
+        result = old.preview(html, new)
+
+        debug = json.dumps(result.to_debug_dict(), ensure_ascii=False)
+        self.assertNotIn(secret, debug)
+        self.assertNotIn(secret, repr(result))
+        self.assertNotIn(secret, result.old_html)
+        self.assertNotIn(secret, result.new_html)
+        self.assertEqual(result.old_html, "")
+        self.assertEqual(result.new_html, "")
+
+    def test_summaries_expose_lengths_and_policy_changes(self):
+        html = "<p><span>Hello</span></p>"
+        result = preview_policy(
+            html,
+            self.settings(["p", "span"], separate={"p"}),
+            self.settings(["p"], separate={"p"}),
+        )
+
+        self.assertEqual(result.old_summary["input_length"], len(html))
+        self.assertEqual(result.new_summary["output_length"], len(result.new_html))
+        self.assertIn("span", result.policy_changes["tags_removed"])
+        self.assertEqual(result["old_html"], result.old_html)
+
+    def test_marker_attribute_collision_does_not_change_results(self):
+        old = Sanitizer(
+            self.settings(
+                ["p", "span"],
+                separate={"p"},
+                attributes={"span": {"data-hs-preview-node"}},
+            )
+        )
+        new = Sanitizer(self.settings(["p"], separate={"p"}))
+        result = old.preview(
+            '<p><span data-hs-preview-node="source">Hello</span></p>', new
+        )
+
+        self.assertIn('data-hs-preview-node="source"', result.old_html)
+        self.assertEqual(result.new_html, "<p>Hello</p>")
+        self.assertEqual(result.differences[0].path, "/p[1]/span[1]")

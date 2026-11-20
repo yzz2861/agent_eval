@@ -39,7 +39,11 @@ dependencies = [
   "lxml>=5.2",
   "lxml-html-clean>=0.4",
 ]
+
 urls.Homepage = "https://github.com/feincms/html-sanitizer/"
+
+[project.scripts]
+html-sanitizer-preview = "html_sanitizer.preview:main"
 
 [tool.hatch]
 version.path = "html_sanitizer/__init__.py"
