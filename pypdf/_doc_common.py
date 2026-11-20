@@ -31,6 +31,7 @@
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import (
     Any,
@@ -48,6 +49,9 @@ from ._utils import (
     logger_warning,
     parse_iso8824_date,
 )
+from .constants import (
+    AnnotationDictionaryAttributes as AA,
+)
 from .constants import CatalogAttributes as CA
 from .constants import (
     CheckboxRadioButtonAttributes,
@@ -58,6 +62,9 @@ from .constants import (
 )
 from .constants import DocumentInformationAttributes as DI
 from .constants import FieldDictionaryAttributes as FA
+from .constants import (
+    InteractiveFormDictEntries as IF,
+)
 from .constants import PageAttributes as PG
 from .errors import LimitReachedError, PdfReadError, PyPdfError
 from .generic import (
@@ -117,6 +124,172 @@ class _PageTreeItem(NamedTuple):
 _PageTreeFrame = tuple[_PageTreeItem, Iterator[PdfObject]]
 
 _UNSET = object()
+
+
+class _DisplayStateAccess:
+    """Provide mapping-style access to the immutable display-state results."""
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return a result entry or *default* when it does not exist."""
+        return getattr(self, key, default)
+
+    def keys(self) -> tuple[str, ...]:
+        """Return the available result entry names."""
+        return tuple(self.__dataclass_fields__)  # type: ignore[attr-defined]
+
+
+@dataclass(frozen=True)
+class WidgetDisplayState(_DisplayStateAccess):
+    """
+    The structurally determinable display state of one widget annotation.
+
+    A field can have several widgets, for example when the same checkbox is
+    placed on multiple pages. Each widget is reported separately, because the
+    PDF stores the visible state on the widget (``/AS``), not on the field.
+    """
+
+    page_number: int | None
+    """Zero-based page number, or ``None`` when no page can be associated."""
+
+    widget: IndirectObject | None
+    """Indirect reference to the widget annotation, when available."""
+
+    state: str | tuple[str, ...] | None
+    """
+    Button: the active ``/AS`` name (for example ``/Yes`` or ``/Off``).
+
+    Choice: the display value(s) selected by ``/V`` and/or ``/I``.
+
+    ``None`` when the display state cannot be established from the structure.
+    """
+
+    determined: bool
+    """Whether :attr:`state` can be established without rendering the page."""
+
+    reason: str | None = None
+    """Why the display state could not be determined (or a structural warning)."""
+
+    object_reference: IndirectObject | None = None
+    """Reference to the object that supports or blocks the conclusion."""
+
+    is_selected: bool | None = None
+    """Button selection derived from ``/AS``; ``None`` for choice/unknown states."""
+
+    selected_values: tuple[str, ...] = ()
+    """Choice values selected by the widget's inherited field value."""
+
+    selected_indices: tuple[int, ...] = ()
+    """Choice indices selected by ``/I``."""
+
+    source: str = "unknown"
+    """``appearance_state``, ``field_value`` or ``unknown``."""
+
+    appearance_present: bool | None = None
+    """Whether an ``/AP`` normal appearance is present."""
+
+    needs_appearance_regeneration: bool = False
+    """Whether ``/NeedAppearances`` may make a reader regenerate the appearance."""
+
+    page_confirmed: bool = True
+    """Whether the widget was found in the page's ``/Annots`` array."""
+
+    declared_page_number: int | None = None
+    """Page from the widget's ``/P`` entry, if it differs from the observed page."""
+
+    @property
+    def page(self) -> int | None:
+        """Alias for :attr:`page_number`."""
+        return self.page_number
+
+    @property
+    def display_state(self) -> str | tuple[str, ...] | None:
+        """Alias for :attr:`state`."""
+        return self.state
+
+    @property
+    def widget_reference(self) -> IndirectObject | None:
+        """Alias for :attr:`widget`."""
+        return self.widget
+
+
+@dataclass(frozen=True)
+class FieldDisplayState(_DisplayStateAccess):
+    """
+    Read-only structural display information for one form field.
+
+    The field value is reported exactly once on this object. Per-page visual
+    states are reported in :attr:`widgets`, so repeated widgets do not duplicate
+    the saved field value.
+    """
+
+    name: str
+    """Qualified field name."""
+
+    field_type: str | None
+    """Inherited field type (``/Btn``, ``/Ch``, ...), if available."""
+
+    value: Any | None
+    """The field's inherited ``/V`` value, reported once."""
+
+    widgets: tuple[WidgetDisplayState, ...]
+    """Display state for each widget occurrence, in page order."""
+
+    determined: bool
+    """Whether the complete display state can be established structurally."""
+
+    reason: str | None = None
+    """Why the field-level display state could not be determined."""
+
+    field_reference: IndirectObject | None = None
+    """Indirect reference to the field dictionary, when available."""
+
+    object_reference: IndirectObject | None = None
+    """Reference supporting a field-level conclusion."""
+
+    selected_values: tuple[str, ...] = ()
+    """Choice values selected by the field's inherited value."""
+
+    selected_indices: tuple[int, ...] = ()
+    """Choice indices selected by the field's ``/I`` entry."""
+
+    needs_appearance_regeneration: bool = False
+    """Whether the document requests appearance regeneration."""
+
+    @property
+    def states(self) -> tuple[WidgetDisplayState, ...]:
+        """Alias for :attr:`widgets`."""
+        return self.widgets
+
+    @property
+    def display_states(self) -> tuple[WidgetDisplayState, ...]:
+        """Alias for :attr:`widgets`."""
+        return self.widgets
+
+    @property
+    def pages(self) -> tuple[int | None, ...]:
+        """Page numbers covered by the widget states."""
+        return tuple(state.page_number for state in self.widgets)
+
+    @property
+    def state(self) -> str | tuple[str, ...] | None:
+        """The state of the only widget, or ``None`` for a multi-widget field."""
+        return self.widgets[0].state if len(self.widgets) == 1 else None
+
+    @property
+    def page_number(self) -> int | None:
+        """The page of the only widget occurrence, if there is exactly one."""
+        return self.widgets[0].page_number if len(self.widgets) == 1 else None
+
+    @property
+    def widget(self) -> IndirectObject | None:
+        """The widget reference when exactly one occurrence is selected."""
+        return self.widgets[0].widget if len(self.widgets) == 1 else None
 
 
 class DocumentInformation(DictionaryObject):
@@ -975,6 +1148,708 @@ class PdfDocCommon(ABC):
             else (self.pages[self._get_page_number_by_indirect(x.indirect_reference)])  # type: ignore[index, union-attr]
             for x in ret
         ]
+
+    @staticmethod
+    def _display_resolve(obj: Any) -> Any:
+        """Resolve indirect objects without changing the underlying document."""
+        return obj.get_object() if isinstance(obj, IndirectObject) else obj
+
+    @staticmethod
+    def _display_is_true(obj: Any) -> bool:
+        """Interpret PDF boolean-like values without relying on truthiness."""
+        obj = obj.get_object() if isinstance(obj, IndirectObject) else obj
+        if is_null_or_none(obj):
+            return False
+        return bool(getattr(obj, "value", obj))
+
+    def _get_display_acro_form(self) -> DictionaryObject | None:
+        """Return the AcroForm dictionary, if any, without validating all fields."""
+        entry = self.root_object.get(CA.ACRO_FORM)
+        if is_null_or_none(entry):
+            return None
+        acro_form = self._display_resolve(entry)
+        return acro_form if isinstance(acro_form, DictionaryObject) else None
+
+    def _get_display_inherited(
+        self,
+        obj: DictionaryObject,
+        key: str,
+        field: DictionaryObject,
+        default: Any = None,
+    ) -> Any:
+        """Read an inheritable field entry, tolerating broken Parent chains."""
+        try:
+            value = obj.get_inherited(key, _UNSET)
+        except Exception:
+            value = _UNSET
+        if value is not _UNSET:
+            return value
+        if obj is field:
+            return default
+        try:
+            return field.get_inherited(key, default)
+        except Exception:
+            return default
+
+    def _display_field_name(self, field: DictionaryObject) -> str:
+        """Get the qualified name without failing on a malformed hierarchy."""
+        try:
+            return self._get_qualified_field_name(parent=field)
+        except Exception:
+            return str(field.get(FA.TM, field.get(FA.T, "")))
+
+    def _iter_display_fields(
+        self, acro_form: DictionaryObject
+    ) -> Iterator[tuple[str, DictionaryObject]]:
+        """Walk named fields in the AcroForm tree without building Field copies."""
+        fields = self._display_resolve(acro_form.get(IF.Fields))
+        if not isinstance(fields, ArrayObject):
+            return
+        maximum_depth = get_configuration().form_fields_maximum_depth
+        visited: set[int] = set()
+
+        def walk(obj: Any, depth: int) -> Iterator[tuple[str, DictionaryObject]]:
+            obj = self._display_resolve(obj)
+            if not isinstance(obj, DictionaryObject) or depth > maximum_depth:
+                return
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+            if FA.T in obj or FA.TM in obj:
+                yield self._display_field_name(obj), obj
+            kids = self._display_resolve(obj.get(FA.Kids))
+            if isinstance(kids, ArrayObject):
+                for kid in kids:
+                    yield from walk(kid, depth + 1)
+
+        for field in fields:
+            yield from walk(field, 0)
+
+    @staticmethod
+    def _is_display_widget(obj: DictionaryObject) -> bool:
+        """Check whether an object can act as a widget annotation."""
+        if obj.get(AA.Subtype) == "/Widget":
+            return True
+        if AA.AP not in obj:
+            return False
+        return AA.Rect in obj or AA.P in obj or not obj.get(FA.Kids)
+
+    def _collect_display_widgets(
+        self, field: DictionaryObject
+    ) -> list[DictionaryObject]:
+        """Collect the field itself and all descendant widgets."""
+        widgets: list[DictionaryObject] = []
+        visited: set[int] = set()
+
+        def walk(obj: Any) -> None:
+            obj = self._display_resolve(obj)
+            if not isinstance(obj, DictionaryObject):
+                return
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+            if self._is_display_widget(obj):
+                widgets.append(obj)
+            kids = self._display_resolve(obj.get(FA.Kids))
+            if isinstance(kids, ArrayObject):
+                for kid in kids:
+                    walk(kid)
+
+        walk(field)
+        return widgets
+
+    @staticmethod
+    def _same_display_object(first: Any, second: Any) -> bool:
+        """Compare PDF objects by identity/reference only, never by value."""
+        if first is second:
+            return True
+        first_ref = first if isinstance(first, IndirectObject) else getattr(first, "indirect_reference", None)
+        second_ref = second if isinstance(second, IndirectObject) else getattr(second, "indirect_reference", None)
+        return first_ref is not None and first_ref == second_ref
+
+    def _get_display_declared_page(self, widget: DictionaryObject) -> int | None:
+        """Resolve the optional /P page of a widget."""
+        declared = widget.get(AA.P)
+        if is_null_or_none(declared):
+            return None
+        if isinstance(declared, IndirectObject):
+            return self._get_page_number_by_indirect(declared)
+        for page_number, page in enumerate(self.pages):
+            if self._same_display_object(page, declared):
+                return page_number
+        return None
+
+    def _get_display_page_occurrences(
+        self, widget: DictionaryObject
+    ) -> list[tuple[int | None, bool, int | None]]:
+        """
+        Locate a widget in page /Annots arrays.
+
+        Returns:
+            Tuples of ``(page_number, page_confirmed, declared_page_number)``.
+            A widget can occur on several pages. If it is not listed in any
+            /Annots array, its /P page is returned as an unconfirmed fallback.
+        """
+        occurrences: list[tuple[int | None, bool, int | None]] = []
+        declared_page = self._get_display_declared_page(widget)
+        for page_number, page in enumerate(self.pages):
+            annotations = self._display_resolve(page.get(PG.ANNOTS))
+            if not isinstance(annotations, ArrayObject):
+                continue
+            for annotation in annotations:
+                if self._same_display_object(annotation, widget) or self._same_display_object(
+                    self._display_resolve(annotation), widget
+                ):
+                    occurrences.append((page_number, True, declared_page))
+                    break
+        if not occurrences:
+            occurrences.append((declared_page, False, declared_page))
+        return occurrences
+
+    @staticmethod
+    def _display_page_filter_value(page: int | PageObject | None) -> int | None:
+        """Normalize a page filter to a zero-based page number."""
+        if page is None:
+            return None
+        if isinstance(page, bool):
+            raise ValueError("page must be a page number or PageObject")
+        if isinstance(page, int):
+            return page
+        if isinstance(page, PageObject):
+            page_number = page.page_number
+            if page_number is None:
+                raise ValueError("PageObject is not attached to a document")
+            return page_number
+        raise ValueError("page must be a page number or PageObject")
+
+    def _get_display_field_object(
+        self, field: str | Field | PdfObject | IndirectObject
+    ) -> DictionaryObject:
+        """Resolve a public field argument to its dictionary in the PDF."""
+        if isinstance(field, str):
+            acro_form = self._get_display_acro_form()
+            if acro_form is not None:
+                for name, candidate in self._iter_display_fields(acro_form):
+                    if name == field:
+                        return candidate
+            raise ValueError(f"Field not found: {field}")
+        obj = self._display_resolve(field)
+        if isinstance(obj, Field) and obj.indirect_reference is not None:
+            obj = self._display_resolve(obj.indirect_reference)
+        if isinstance(obj, DictionaryObject) and obj.get(AA.Subtype) == "/Widget":
+            has_field_entries = any(key in obj for key in (FA.T, FA.TM, FA.Kids, FA.FT))
+            if FA.Parent in obj and not has_field_entries:
+                parent = self._display_resolve(obj[FA.Parent])
+                if isinstance(parent, DictionaryObject):
+                    obj = parent
+        if not isinstance(obj, DictionaryObject):
+            raise ValueError("Field type is invalid")
+        return obj
+
+    def _resolve_button_widget_state(
+        self,
+        widget: DictionaryObject,
+        field: DictionaryObject,
+        page_number: int | None,
+        page_confirmed: bool,
+        declared_page_number: int | None,
+        needs_appearance_regeneration: bool,
+    ) -> WidgetDisplayState:
+        """Derive a button's visible state from /AS and the matching /AP stream."""
+        widget_ref = widget.indirect_reference or field.indirect_reference
+        field_flags = int(self._get_display_inherited(widget, FA.Ff, field, 0) or 0)
+
+        if field_flags & FA.FfBits.Pushbutton:
+            return WidgetDisplayState(
+                page_number=page_number,
+                widget=widget_ref,
+                state=None,
+                determined=False,
+                reason="Pushbutton widgets do not have a persistent selected state.",
+                object_reference=widget_ref,
+                source="unknown",
+                needs_appearance_regeneration=needs_appearance_regeneration,
+                page_confirmed=page_confirmed,
+                declared_page_number=declared_page_number,
+            )
+
+        appearance = self._get_display_inherited(widget, AA.AP, field)
+        appearance_obj = self._display_resolve(appearance)
+        if not isinstance(appearance_obj, DictionaryObject):
+            reason = "Widget has no /AP appearance dictionary."
+            if needs_appearance_regeneration:
+                reason += " /NeedAppearances is set, so the appearance may need to be regenerated."
+            return WidgetDisplayState(
+                page_number=page_number,
+                widget=widget_ref,
+                state=None,
+                determined=False,
+                reason=reason,
+                object_reference=widget_ref,
+                source="unknown",
+                appearance_present=False,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+                page_confirmed=page_confirmed,
+                declared_page_number=declared_page_number,
+            )
+
+        normal = self._display_resolve(appearance_obj.get("/N"))
+        if not isinstance(normal, DictionaryObject) or isinstance(normal, StreamObject):
+            return WidgetDisplayState(
+                page_number=page_number,
+                widget=widget_ref,
+                state=None,
+                determined=False,
+                reason="Normal appearance is not a multi-state dictionary; /AS cannot be confirmed.",
+                object_reference=widget_ref,
+                source="unknown",
+                appearance_present=normal is not None,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+                page_confirmed=page_confirmed,
+                declared_page_number=declared_page_number,
+            )
+
+        state_entry = widget.get(AA.AS)
+        if is_null_or_none(state_entry):
+            return WidgetDisplayState(
+                page_number=page_number,
+                widget=widget_ref,
+                state=None,
+                determined=False,
+                reason="Widget has no /AS appearance state.",
+                object_reference=widget_ref,
+                source="unknown",
+                appearance_present=True,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+                page_confirmed=page_confirmed,
+                declared_page_number=declared_page_number,
+            )
+
+        active_state = str(self._display_resolve(state_entry))
+        available_states = {str(key) for key in normal}
+        if active_state not in available_states and active_state != "/Off":
+            return WidgetDisplayState(
+                page_number=page_number,
+                widget=widget_ref,
+                state=active_state,
+                determined=False,
+                reason=f"/AS {active_state!r} has no matching /AP /N appearance stream.",
+                object_reference=widget_ref,
+                is_selected=None,
+                source="appearance_state",
+                appearance_present=True,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+                page_confirmed=page_confirmed,
+                declared_page_number=declared_page_number,
+            )
+
+        return WidgetDisplayState(
+            page_number=page_number,
+            widget=widget_ref,
+            state=active_state,
+            determined=True,
+            object_reference=widget_ref,
+            is_selected=active_state != "/Off",
+            source="appearance_state",
+            appearance_present=True,
+            needs_appearance_regeneration=needs_appearance_regeneration,
+            page_confirmed=page_confirmed,
+            declared_page_number=declared_page_number,
+        )
+
+    @staticmethod
+    def _display_options(value: Any) -> list[tuple[str, str]]:
+        """Normalize /Opt entries to ``(export_value, display_value)`` pairs."""
+        if not isinstance(value, ArrayObject):
+            return []
+        options: list[tuple[str, str]] = []
+        for entry in value:
+            if isinstance(entry, IndirectObject):
+                entry = entry.get_object()
+            if isinstance(entry, (ArrayObject, list)) and len(entry) >= 2:
+                export = entry[0].get_object() if isinstance(entry[0], IndirectObject) else entry[0]
+                display = entry[1].get_object() if isinstance(entry[1], IndirectObject) else entry[1]
+                options.append((str(export), str(display)))
+            else:
+                text = str(entry)
+                options.append((text, text))
+        return options
+
+    @staticmethod
+    def _display_value_list(value: Any) -> list[str]:
+        """Normalize a /V entry to a list of strings."""
+        if is_null_or_none(value):
+            return []
+        if isinstance(value, IndirectObject):
+            value = value.get_object()
+        if isinstance(value, (ArrayObject, list)):
+            values: list[str] = []
+            for entry in value:
+                if isinstance(entry, IndirectObject):
+                    entry = entry.get_object()
+                if not is_null_or_none(entry):
+                    values.append(str(entry))
+            return values
+        if value == "":
+            return []
+        return [str(value)]
+
+    def _display_appearance_present(
+        self, widget: DictionaryObject, field: DictionaryObject
+    ) -> bool:
+        """Return whether the widget has an inherited normal appearance."""
+        appearance = self._display_resolve(self._get_display_inherited(widget, AA.AP, field))
+        if not isinstance(appearance, DictionaryObject):
+            return False
+        return self._display_resolve(appearance.get("/N")) is not None
+
+    def _resolve_choice_state(
+        self,
+        widget: DictionaryObject,
+        field: DictionaryObject,
+        page_number: int | None,
+        page_confirmed: bool,
+        declared_page_number: int | None,
+        needs_appearance_regeneration: bool,
+    ) -> WidgetDisplayState:
+        """Derive selected choice values from the inherited /V, /I and /Opt."""
+        widget_ref = widget.indirect_reference or field.indirect_reference
+        value = self._get_display_inherited(widget, FA.V, field)
+        indices_entry = self._get_display_inherited(widget, "/I", field)
+        options = self._display_options(self._get_display_inherited(widget, FA.Opt, field))
+        values = self._display_value_list(value)
+
+        indices: list[int] = []
+        if not is_null_or_none(indices_entry):
+            indices_obj = self._display_resolve(indices_entry)
+            if isinstance(indices_obj, (ArrayObject, list)):
+                for index in indices_obj:
+                    index = self._display_resolve(index)
+                    try:
+                        indices.append(int(index))
+                    except (TypeError, ValueError):
+                        return WidgetDisplayState(
+                            page_number=page_number,
+                            widget=widget_ref,
+                            state=None,
+                            determined=False,
+                            reason="The /I entry contains a non-numeric index.",
+                            object_reference=widget_ref,
+                            source="unknown",
+                            needs_appearance_regeneration=needs_appearance_regeneration,
+                            page_confirmed=page_confirmed,
+                            declared_page_number=declared_page_number,
+                        )
+            else:
+                return WidgetDisplayState(
+                    page_number=page_number,
+                    widget=widget_ref,
+                    state=None,
+                    determined=False,
+                    reason="The /I entry is not an array.",
+                    object_reference=widget_ref,
+                    source="unknown",
+                    needs_appearance_regeneration=needs_appearance_regeneration,
+                    page_confirmed=page_confirmed,
+                    declared_page_number=declared_page_number,
+                )
+
+        selected_values = list(values)
+        if indices:
+            if any(index < 0 or index >= len(options) for index in indices):
+                return WidgetDisplayState(
+                    page_number=page_number,
+                    widget=widget_ref,
+                    state=None,
+                    determined=False,
+                    reason="The /I entry references an index outside /Opt.",
+                    object_reference=widget_ref,
+                    source="unknown",
+                    needs_appearance_regeneration=needs_appearance_regeneration,
+                    page_confirmed=page_confirmed,
+                    declared_page_number=declared_page_number,
+                )
+            indexed_values = [options[index][0] for index in indices]
+            if selected_values:
+                if selected_values != indexed_values:
+                    return WidgetDisplayState(
+                        page_number=page_number,
+                        widget=widget_ref,
+                        state=None,
+                        determined=False,
+                        reason="The /V and /I entries select different options.",
+                        object_reference=widget_ref,
+                        source="unknown",
+                        needs_appearance_regeneration=needs_appearance_regeneration,
+                        page_confirmed=page_confirmed,
+                        declared_page_number=declared_page_number,
+                    )
+            else:
+                selected_values = indexed_values
+
+        export_to_display = dict(options)
+        labels = [export_to_display.get(item, item) for item in selected_values]
+        if not indices:
+            if options:
+                indices = [
+                    position
+                    for position, (export, _display) in enumerate(options)
+                    if export in selected_values
+                ]
+            else:
+                indices = []
+        field_flags = int(self._get_display_inherited(widget, FA.Ff, field, 0) or 0)
+        if not labels:
+            state: str | tuple[str, ...] = ()
+        elif len(labels) == 1 and not (field_flags & FA.FfBits.MultiSelect):
+            state = labels[0]
+        else:
+            state = tuple(labels)
+
+        return WidgetDisplayState(
+            page_number=page_number,
+            widget=widget_ref,
+            state=state,
+            determined=True,
+            object_reference=widget_ref,
+            selected_values=tuple(selected_values),
+            selected_indices=tuple(indices),
+            source="field_value",
+            appearance_present=self._display_appearance_present(widget, field),
+            needs_appearance_regeneration=needs_appearance_regeneration,
+            page_confirmed=page_confirmed,
+            declared_page_number=declared_page_number,
+        )
+
+    def _build_display_state(
+        self, field: DictionaryObject, page_filter: int | None
+    ) -> FieldDisplayState:
+        """Build a :class:`FieldDisplayState` for one field."""
+        acro_form = self._get_display_acro_form()
+        needs_appearance_regeneration = (
+            self._display_is_true(acro_form.get(IF.NeedAppearances))
+            if acro_form is not None
+            else False
+        )
+        field_type_raw = self._get_display_inherited(field, FA.FT, field)
+        field_type = str(field_type_raw) if field_type_raw is not None else None
+        field_name = self._display_field_name(field)
+        value_raw = self._get_display_inherited(field, FA.V, field)
+        field_value = self._display_resolve(value_raw)
+        selected_values: tuple[str, ...] = ()
+        selected_indices: tuple[int, ...] = ()
+        field_ref = field.indirect_reference
+
+        if field_type not in ("/Btn", "/Ch"):
+            return FieldDisplayState(
+                name=field_name,
+                field_type=field_type,
+                value=field_value,
+                widgets=(),
+                determined=False,
+                reason=f"Unsupported field type {field_type!r}; only /Btn and /Ch are audited.",
+                field_reference=field_ref,
+                object_reference=field_ref,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+            )
+
+        if field_type == "/Ch":
+            field_selection = self._resolve_choice_state(
+                field, field, None, False, None, needs_appearance_regeneration
+            )
+            if field_selection.determined:
+                selected_values = field_selection.selected_values
+                selected_indices = field_selection.selected_indices
+
+        widgets = self._collect_display_widgets(field)
+        states: list[WidgetDisplayState] = []
+        for widget in widgets:
+            if field_type == "/Btn":
+                for page_number, page_confirmed, declared_page in self._get_display_page_occurrences(widget):
+                    states.append(
+                        self._resolve_button_widget_state(
+                            widget,
+                            field,
+                            page_number,
+                            page_confirmed,
+                            declared_page,
+                            needs_appearance_regeneration,
+                        )
+                    )
+            else:
+                for page_number, page_confirmed, declared_page in self._get_display_page_occurrences(widget):
+                    state = self._resolve_choice_state(
+                        widget,
+                        field,
+                        page_number,
+                        page_confirmed,
+                        declared_page,
+                        needs_appearance_regeneration,
+                    )
+                    states.append(state)
+
+        if page_filter is not None:
+            states = [state for state in states if state.page_number == page_filter]
+
+        if not states:
+            reason = (
+                "No widget annotation is attached to this field."
+                if page_filter is None
+                else f"No widget annotation for this field was found on page {page_filter}."
+            )
+            return FieldDisplayState(
+                name=field_name,
+                field_type=field_type,
+                value=field_value,
+                widgets=(),
+                determined=False,
+                reason=reason,
+                field_reference=field_ref,
+                object_reference=field_ref,
+                selected_values=selected_values,
+                selected_indices=selected_indices,
+                needs_appearance_regeneration=needs_appearance_regeneration,
+            )
+
+        determined = all(state.determined for state in states)
+        if determined:
+            reason = None
+        else:
+            reasons = []
+            for state in states:
+                if not state.determined and state.reason and state.reason not in reasons:
+                    reasons.append(state.reason)
+            reason = reasons[0] if len(reasons) == 1 else "One or more widget display states cannot be determined."
+        object_reference = field_ref
+        if not determined:
+            object_reference = next(
+                (
+                    state.object_reference
+                    for state in states
+                    if not state.determined and state.object_reference is not None
+                ),
+                field_ref,
+            )
+        return FieldDisplayState(
+            name=field_name,
+            field_type=field_type,
+            value=field_value,
+            widgets=tuple(states),
+            determined=determined,
+            reason=reason,
+            field_reference=field_ref,
+            object_reference=object_reference,
+            selected_values=selected_values,
+            selected_indices=selected_indices,
+            needs_appearance_regeneration=needs_appearance_regeneration,
+        )
+
+    def get_field_display_state(
+        self,
+        field: str | Field | PdfObject | IndirectObject,
+        page: int | PageObject | None = None,
+    ) -> FieldDisplayState:
+        """
+        Report the structurally confirmable display state of a form field.
+
+        This is a read-only check. It does not render the document, run
+        appearance-generation code or execute document actions.
+
+        For button fields the visible state comes from each widget's ``/AS``
+        entry and the matching ``/AP /N`` appearance stream. Consequently a
+        field with several widgets can have different visible states on
+        different pages even though it has a single ``/V`` value. For choice
+        fields the selected option is derived from the inherited ``/V``,
+        ``/I`` and ``/Opt`` entries.
+
+        Args:
+            field: a field name, a :class:`Field`, a field dictionary or an
+                indirect reference to one. Widget annotations are accepted and
+                resolved to their parent field when necessary.
+            page: an optional zero-based page number or :class:`PageObject`.
+                Only widget occurrences on that page are returned. The field
+                value is still reported exactly once.
+
+        Returns:
+            A :class:`FieldDisplayState`. Elements whose display cannot be
+            confirmed from the PDF structure have ``determined=False``, a
+            ``reason`` and an ``object_reference`` pointing at the relevant
+            widget/field object.
+
+        Raises:
+            ValueError: If *field* cannot be resolved to a field dictionary.
+        """
+        page_filter = self._display_page_filter_value(page)
+        field_obj = self._get_display_field_object(field)
+        return self._build_display_state(field_obj, page_filter)
+
+    def get_form_field_display_states(
+        self, page: int | PageObject | None = None
+    ) -> dict[str, FieldDisplayState]:
+        """
+        Report display states for all button and choice fields in the document.
+
+        This is the document-wide counterpart of
+        :meth:`get_field_display_state`. When *page* is given, only fields with
+        a widget occurrence on that page are returned and their ``widgets``
+        tuples are restricted to that page.
+        """
+        page_filter = self._display_page_filter_value(page)
+        acro_form = self._get_display_acro_form()
+        if acro_form is None:
+            return {}
+        result: dict[str, FieldDisplayState] = {}
+        for name, field in self._iter_display_fields(acro_form):
+            try:
+                state = self._build_display_state(field, page_filter)
+            except Exception as exc:
+                field_ref = field.indirect_reference
+                state = FieldDisplayState(
+                    name=name,
+                    field_type=None,
+                    value=None,
+                    widgets=(),
+                    determined=False,
+                    reason=f"Could not inspect field: {exc}",
+                    field_reference=field_ref,
+                    object_reference=field_ref,
+                )
+            if state.field_type not in ("/Btn", "/Ch"):
+                continue
+            if page_filter is not None and not state.widgets:
+                continue
+            result[name] = state
+        return result
+
+    def get_field_display_states(
+        self, page: int | PageObject | None = None
+    ) -> dict[str, FieldDisplayState]:
+        """Alias for :meth:`get_form_field_display_states`."""
+        return self.get_form_field_display_states(page=page)
+
+    def get_form_field_display_state(
+        self,
+        field: str | Field | PdfObject | IndirectObject,
+        page: int | PageObject | None = None,
+    ) -> FieldDisplayState:
+        """Alias for :meth:`get_field_display_state`."""
+        return self.get_field_display_state(field=field, page=page)
+
+    def get_field_state(
+        self,
+        field: str | Field | PdfObject | IndirectObject,
+        page: int | PageObject | None = None,
+    ) -> FieldDisplayState:
+        """Alias for :meth:`get_field_display_state`."""
+        return self.get_field_display_state(field=field, page=page)
+
+    def get_field_states(
+        self, page: int | PageObject | None = None
+    ) -> dict[str, FieldDisplayState]:
+        """Alias for :meth:`get_form_field_display_states`."""
+        return self.get_form_field_display_states(page=page)
 
     @property
     def open_destination(

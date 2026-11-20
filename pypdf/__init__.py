@@ -9,7 +9,7 @@ You can read the full docs at https://pypdf.readthedocs.io/.
 
 from ._configuration import Configuration, apply_configuration, get_configuration, overwrite_configuration
 from ._crypt_providers import crypt_provider
-from ._doc_common import DocumentInformation
+from ._doc_common import DocumentInformation, FieldDisplayState, WidgetDisplayState
 from ._encryption import PasswordType
 from ._page import PageObject, Transformation
 from ._reader import PdfReader
@@ -34,6 +34,7 @@ _debug_versions = (
 __all__ = [
     "Configuration",
     "DocumentInformation",
+    "FieldDisplayState",
     "ImageType",
     "ObjectDeletionFlag",
     "PageObject",
@@ -43,6 +44,7 @@ __all__ = [
     "PdfReader",
     "PdfWriter",
     "Transformation",
+    "WidgetDisplayState",
     "__version__",
     "_debug_versions",
     "apply_configuration",

@@ -5,6 +5,7 @@
 ```{testsetup}
 pypdf_test_setup("user/forms", {
     "form.pdf": "../resources/form.pdf",
+    "pdflatex-forms.pdf": "../resources/pdflatex-forms.pdf",
 })
 ```
 
@@ -118,3 +119,42 @@ In case of missing _field_ objects in `/Fields`, `writer.reattach_fields()` will
 To ease locating page fields you can use `get_pages_showing_field` of PdfReader or PdfWriter. This method accepts a field object, a *PdfObject* that represents a field (as extracted from `_root_object["/AcroForm"]["/Fields"]`). The method returns a list of pages, because a field can have multiple widgets as mentioned previously (e.g., radio buttons or text displayed on multiple pages).
 
 The page numbers can then be retrieved as usual by using `page.page_number`.
+
+
+## Audit the state shown by a widget
+
+The field value (`/V`) is stored once per field, while the visual state is
+stored per widget annotation (`/AS` and `/AP`). This matters when the same
+checkbox is shown on several pages: the field can still have one saved value
+while the widgets expose different appearance states.
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("pdflatex-forms.pdf")
+state = reader.get_field_display_state("Check")
+
+state.value          # the saved field value, reported once
+state.widgets        # one entry per widget occurrence
+state.determined     # False if the structure is not sufficient
+```
+
+`WidgetDisplayState` contains the zero-based `page_number`, the widget
+reference, the confirmed `state` and, for indeterminate entries, a `reason`
+and an `object_reference`. Use `page=` to query one page:
+
+```{testcode}
+page_state = reader.get_field_display_state("Check", page=0)
+```
+
+For button fields the state is derived from the widget `/AS` and the matching
+`/AP /N` appearance stream. For choice fields it is derived from the inherited
+`/V`, `/I` and `/Opt` entries. `get_form_field_display_states()` performs this
+check for every button and choice field in the document.
+
+This API is intentionally read-only and structural. It does not render the PDF,
+execute JavaScript or document actions, or run appearance-generation code. If
+`/NeedAppearances` is set, `needs_appearance_regeneration` is reported; the
+selection is still derived from the field value, but the exact rendered
+appearance is left to the reader. Missing or contradictory appearance data is
+reported as `determined=False` rather than being guessed.
