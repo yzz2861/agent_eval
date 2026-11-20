@@ -1,0 +1,94 @@
+{
+  "artifact": {
+    "binding": "caller-provided-artifact",
+    "digest": {
+      "sha256": "5ab798d88820b9ba78f5bc1ca25ec12170a9d7c26a3df1fceb31548689d6e002"
+    },
+    "digestAlgorithm": "sha256",
+    "name": "artifact.txt",
+    "size": 13
+  },
+  "conclusion": {
+    "failedKeyids": [],
+    "passed": true,
+    "recomputable": true,
+    "status": "verified",
+    "threshold": 1,
+    "unverifiableKeyids": [],
+    "verifiedKeyids": [
+      "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc"
+    ]
+  },
+  "envelope": {
+    "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGUiOnsiY2xhaW0iOiJ2ZXJpZmllZCJ9LCJwcmVkaWNhdGVUeXBlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9kc3NlLWV2aWRlbmNlL3YxIiwic3ViamVjdCI6W3siZGlnZXN0Ijp7InNoYTI1NiI6IjVhYjc5OGQ4ODgyMGI5YmE3OGY1YmMxY2EyNWVjMTIxNzBhOWQ3YzI2YTNkZjFmY2ViMzE1NDg2ODlkNmUwMDIifSwibmFtZSI6ImFydGlmYWN0LnR4dCJ9XX0=",
+    "payloadType": "application/vnd.in-toto+json",
+    "signatures": [
+      {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "sig": "YjQEpg6uHYigiG0mXQcMNTyIAq5N1K1so8lx4M+jeJ3VfvzlYVwearmgrRjs3U0eCjcf5m0e+wsfHURX+ZsRDw=="
+      }
+    ]
+  },
+  "evidenceVersion": "1",
+  "kind": "securesystemslib.dsse.verification-evidence",
+  "signatureInput": {
+    "artifactDigest": {
+      "sha256": "5ab798d88820b9ba78f5bc1ca25ec12170a9d7c26a3df1fceb31548689d6e002"
+    },
+    "description": "DSSEv1 <len(payloadType)> <payloadType> <len(payload)> <payload>",
+    "encoding": "bytes",
+    "pae": "RFNTRXYxIDI4IGFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24gMjU0IHsiX3R5cGUiOiJodHRwczovL2luLXRvdG8uaW8vU3RhdGVtZW50L3YxIiwicHJlZGljYXRlIjp7ImNsYWltIjoidmVyaWZpZWQifSwicHJlZGljYXRlVHlwZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vZHNzZS1ldmlkZW5jZS92MSIsInN1YmplY3QiOlt7ImRpZ2VzdCI6eyJzaGEyNTYiOiI1YWI3OThkODg4MjBiOWJhNzhmNWJjMWNhMjVlYzEyMTcwYTlkN2MyNmEzZGYxZmNlYjMxNTQ4Njg5ZDZlMDAyIn0sIm5hbWUiOiJhcnRpZmFjdC50eHQifV19",
+    "paeBase64": "RFNTRXYxIDI4IGFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24gMjU0IHsiX3R5cGUiOiJodHRwczovL2luLXRvdG8uaW8vU3RhdGVtZW50L3YxIiwicHJlZGljYXRlIjp7ImNsYWltIjoidmVyaWZpZWQifSwicHJlZGljYXRlVHlwZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vZHNzZS1ldmlkZW5jZS92MSIsInN1YmplY3QiOlt7ImRpZ2VzdCI6eyJzaGEyNTYiOiI1YWI3OThkODg4MjBiOWJhNzhmNWJjMWNhMjVlYzEyMTcwYTlkN2MyNmEzZGYxZmNlYjMxNTQ4Njg5ZDZlMDAyIn0sIm5hbWUiOiJhcnRpZmFjdC50eHQifV19",
+    "paeEncoding": "base64",
+    "paeSha256": "sha256:e3702048f604fad25af4dc97c48f9ff5b3ba91843d417ffb197e8817fbeaa014",
+    "payloadLength": 254,
+    "payloadSha256": "sha256:dd99a4d07666b8394594ae686c24d16369a1d65c0c49433acf4245257f90e06d",
+    "payloadType": "application/vnd.in-toto+json",
+    "payloadTypeUtf8Length": 28,
+    "rule": "DSSEv1-PAE"
+  },
+  "signatures": [
+    {
+      "algorithm": {
+        "keytype": "ed25519",
+        "scheme": "ed25519"
+      },
+      "backend": {
+        "available": true,
+        "name": "pyca/cryptography"
+      },
+      "implementation": "securesystemslib.signer._key.SSlibKey",
+      "key": {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "keytype": "ed25519",
+        "keyval": {
+          "public": "4f66dabebcf30628963786001984c0b75c175cdcf3bc4855933a2628f0cd0a0f"
+        },
+        "scheme": "ed25519"
+      },
+      "keyFingerprint": "sha256:c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+      "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+      "keytype": "ed25519",
+      "sealedVerdict": {
+        "reason": null,
+        "recomputable": true,
+        "status": "verified"
+      },
+      "scheme": "ed25519",
+      "signature": {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "sig": "YjQEpg6uHYigiG0mXQcMNTyIAq5N1K1so8lx4M+jeJ3VfvzlYVwearmgrRjs3U0eCjcf5m0e+wsfHURX+ZsRDw=="
+      },
+      "signatureEncoding": "base64",
+      "signedBytes": {
+        "artifactDigest": {
+          "sha256": "5ab798d88820b9ba78f5bc1ca25ec12170a9d7c26a3df1fceb31548689d6e002"
+        },
+        "paeSha256": "sha256:e3702048f604fad25af4dc97c48f9ff5b3ba91843d417ffb197e8817fbeaa014",
+        "rule": "DSSEv1-PAE"
+      },
+      "spkiSha256": "sha256:0f930f5ce4a828751465e98a728243a6b0758c5c754e0fb84e3c325ed6b54e06"
+    }
+  ],
+  "threshold": 1
+}

@@ -50,3 +50,11 @@ class UnverifiedSignatureError(Error):
 
 class VerificationError(UnverifiedSignatureError):
     """Signature could not be verified because something failed in the process"""
+
+
+class EvidenceError(Error):
+    """Indicate an error while creating or handling offline evidence."""
+
+
+class EvidenceFormatError(FormatError, EvidenceError):
+    """Indicate that an offline evidence document is malformed."""

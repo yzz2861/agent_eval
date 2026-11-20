@@ -121,13 +121,43 @@ class Envelope:
 
         return signature
 
-    def verify(self, keys: list[Key], threshold: int) -> dict[str, Key]:
+    def verify(  # noqa: PLR0913
+        self,
+        keys: list[Key],
+        threshold: int,
+        *,
+        artifact: Any = None,
+        artifact_name: str | None = None,
+        evidence: Any = None,
+        certificates: Any = None,
+        disabled_backends: Any = None,
+        disabled_algorithms: Any = None,
+        backend_status: Any = None,
+        key_factories: Any = None,
+    ) -> dict[str, Key]:
         """Verify the payload with the provided Keys.
 
         Arguments:
             keys: A list of public keys to verify the signatures.
             threshold: Number of signatures needed to pass the verification.
-
+            artifact: Optional artifact bytes, path, or file object that the
+                verification input refers to. Used with the evidence output.
+            artifact_name: Optional artifact name to record in evidence.
+            evidence: Optional offline evidence destination. A path writes a
+                JSON document, a callable receives the evidence object, a
+                writable object receives JSON, and ``True`` stores the evidence
+                on ``self.last_evidence``.
+            certificates: Optional caller-provided certificates used to
+                establish the recorded public key identity.
+            disabled_backends: Optional verifier backends that are no longer
+                available. Their sealed conclusions are preserved but are not
+                counted as recomputable.
+            disabled_algorithms: Optional ``scheme`` or ``keytype/scheme``
+                values that may not be used for recomputation.
+            backend_status: Optional mapping of backend name to a status such
+                as ``"retired"``.
+            key_factories: Optional mapping from recorded implementation names
+                to custom key factories.
         Raises:
             ValueError: If "threshold" is not valid.
             VerificationError: If the enclosed signatures do not pass the
@@ -143,6 +173,41 @@ class Envelope:
             signature.
         """
 
+        if (
+            artifact is None
+            and artifact_name is None
+            and evidence is None
+            and certificates is None
+            and disabled_backends is None
+            and disabled_algorithms is None
+            and backend_status is None
+            and key_factories is None
+        ):
+            return self._verify_legacy(keys, threshold)
+
+        evidence_obj = self.verify_with_evidence(
+            keys,
+            threshold,
+            artifact=artifact,
+            artifact_name=artifact_name,
+            certificates=certificates,
+            disabled_backends=disabled_backends,
+            disabled_algorithms=disabled_algorithms,
+            backend_status=backend_status,
+            key_factories=key_factories,
+        )
+        self._emit_evidence(evidence, evidence_obj)
+        conclusion = evidence_obj.to_dict()["conclusion"]
+        if conclusion["status"] != "verified":
+            error = exceptions.VerificationError(
+                conclusion.get("message")
+                or "Evidence verification did not reach the required threshold"
+            )
+            error.evidence = evidence_obj  # type: ignore[attr-defined]
+            raise error
+        return evidence_obj.accepted_keys
+
+    def _verify_legacy(self, keys: list[Key], threshold: int) -> dict[str, Key]:
         accepted_keys = {}
         pae = self.pae()
 
@@ -178,3 +243,98 @@ class Envelope:
             )
 
         return accepted_keys
+
+    def verify_with_evidence(  # noqa: PLR0913
+        self,
+        keys: Any,
+        threshold: int = 1,
+        *,
+        artifact: Any = None,
+        artifact_name: str | None = None,
+        certificates: Any = None,
+        disabled_backends: Any = None,
+        disabled_algorithms: Any = None,
+        backend_status: Any = None,
+        key_factories: Any = None,
+    ) -> Evidence:
+        """Verify once and return a sealed offline evidence document.
+
+        Unlike :meth:`verify`, this method returns the evidence object even
+        when the recorded conclusion is not ``verified``: the evidence states
+        whether recomputation was possible and why it failed.
+        """
+
+        return seal_evidence(
+            self,
+            keys,
+            threshold,
+            artifact=artifact,
+            artifact_name=artifact_name,
+            certificates=certificates,
+            disabled_backends=disabled_backends,
+            disabled_algorithms=disabled_algorithms,
+            backend_status=backend_status,
+            key_factories=key_factories,
+        )
+
+    def seal_evidence(
+        self,
+        keys: Any,
+        threshold: int = 1,
+        **kwargs: Any,
+    ) -> Evidence:
+        """Alias for :meth:`verify_with_evidence`."""
+
+        return self.verify_with_evidence(keys, threshold, **kwargs)
+
+    def _emit_evidence(self, destination: Any, evidence: Evidence) -> None:
+        if destination is None:
+            return
+        if destination is True:
+            self.last_evidence = evidence
+            return
+        if callable(destination):
+            destination(evidence)
+            return
+        if hasattr(destination, "write"):
+            evidence.write(destination)
+            return
+        evidence.write(destination)
+
+
+from securesystemslib.dsse_evidence import (  # noqa: E402
+    EVIDENCE_KIND,
+    EVIDENCE_VERSION,
+    REPORT_KIND,
+    REPORT_VERSION,
+    Evidence,
+    EvidenceBundle,
+    EvidenceError,
+    EvidenceFormatError,
+    EvidenceReport,
+    VerificationReport,
+    create_evidence,
+    load_evidence,
+    seal_evidence,
+    verify_evidence,
+    verify_evidence_bundle,
+)
+
+__all__ = [
+    "EVIDENCE_KIND",
+    "EVIDENCE_VERSION",
+    "REPORT_KIND",
+    "REPORT_VERSION",
+    "Envelope",
+    "Evidence",
+    "EvidenceBundle",
+    "EvidenceError",
+    "EvidenceFormatError",
+    "EvidenceReport",
+    "VerificationReport",
+    "create_evidence",
+    "load_evidence",
+    "seal_evidence",
+    "verify_evidence",
+    "verify_evidence_bundle",
+]

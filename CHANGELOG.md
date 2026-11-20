@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+* DSSE verification can seal and later recompute offline evidence containing
+  the exact PAE bytes, artifact digest, and per-signer public key and algorithm
+  snapshots. Unverifiable conclusions are reported separately from
+  recomputable verification failures.
+
 ## 1.6.0
 
 ### Changed
