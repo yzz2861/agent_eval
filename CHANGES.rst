@@ -4,7 +4,14 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add ``RestrictedPython.OutputProjection``: a small host-side output
+  projection mechanism.  ``OutputPolicy`` declares which data shapes may be
+  published from a restricted script and records protected values together
+  with their source; ``project`` validates nested result containers
+  (detecting aliases by identity) and ``guarded_print_collector`` extends
+  the ``print`` interface so protected values cannot reach the collected
+  buffer.  Violations raise ``OutputProjectionError`` naming the output
+  position without exposing the rejected value.
 
 
 9.0 (2026-11-04)

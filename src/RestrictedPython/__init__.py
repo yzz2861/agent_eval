@@ -35,6 +35,11 @@ from RestrictedPython.Utilities import utility_builtins  # isort:skip
 from RestrictedPython.PrintCollector import PrintCollector  # isort:skip
 from RestrictedPython.compile import CompileResult  # isort:skip
 
+# Output projection
+from RestrictedPython.OutputProjection import OutputPolicy  # isort:skip
+from RestrictedPython.OutputProjection import OutputProjectionError  # isort:skip
+from RestrictedPython.OutputProjection import guarded_print_collector  # isort:skip
+
 # Policy
 from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:skip
 
