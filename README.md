@@ -41,6 +41,36 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 
 Working with python-evtx is really easy!
 
+Incremental handoff
+-------------------
+When a collector snapshots a live `.evtx` file every few seconds, the final chunk may still be open and only partially written.  The `Evtx.Incremental` module provides a single-source, resumable handoff entry point for this situation:
+
+* only complete, checksum-verified chunks are handed off, so an unfinished tail chunk is deferred until a later snapshot proves it stable;
+* the `Checkpoint` binds a source identifier to the confirmed byte range plus a digest of that range; resuming against a different source or rewritten bytes raises `ForkDetectedError`;
+* each record uses a stable `handoff_key` derived from the source and its physical position, so a lost acknowledgement can be retried safely without creating duplicates;
+* `InMemoryEvidenceStore` is a dictionary-backed reference store; the locator stored with each entry lets you find the original record again.
+
+Example:
+
+    import Evtx.Incremental as inc
+
+    source_id = "host://C:/Windows/System32/winevt/Logs/System.evtx"
+    store = inc.InMemoryEvidenceStore()
+    checkpoint = None
+
+    # called once per collection snapshot
+    records, checkpoint = inc.handoff_file_incremental(
+        source_id, "/path/to/System.evtx", store, checkpoint
+    )
+    for record in records:
+        ...  # record.entry holds the XML and its RecordLocator
+
+    # persist the checkpoint between runs (JSON) and resume next time:
+    state = checkpoint.to_json()
+    checkpoint = inc.Checkpoint.from_json(state)
+
+Every stable record enters the store exactly once, and the stored locator's `key` recovers the same entry from the store.
+
 
 Installation
 ------------
@@ -71,4 +101,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-
