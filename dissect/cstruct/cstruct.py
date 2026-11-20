@@ -33,7 +33,7 @@ from dissect.cstruct.types import (
 from dissect.cstruct.types.base import normalize_endianness
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator, Iterable, Mapping
     from typing import TypeAlias
 
     from dissect.cstruct.types import (
@@ -438,6 +438,109 @@ class cstruct:
             The parsed data.
         """
         return self.resolve(name).read(stream)
+
+    def mapped(
+        self,
+        segments: Mapping[int, Any] | Iterable[Any] = (),
+        *,
+        position: int = 0,
+        partial: bool = False,
+        strict_bounds: bool = True,
+    ) -> Any:
+        """Create a read-only logical address view for fragmented evidence.
+
+        The returned view can be used directly with all cstruct types, including
+        pointer dereferences. Segments are copied on construction, so the view
+        and any pointers parsed from it remain stable when another mapping is
+        created later.
+
+        Args:
+            segments: Mapping of logical addresses to bytes, or an iterable of
+                segments or ``(address, data)`` pairs.
+            position: Initial logical cursor position.
+            partial: Retain mapping faults as unconfirmed structure fields.
+            strict_bounds: Treat reads beyond the highest mapped address as
+                missing pages instead of end-of-file.
+        """
+        from dissect.cstruct.mapped import MappedStream
+
+        if isinstance(segments, MappedStream):
+            view = segments._clone(position=position, partial=partial, strict_bounds=strict_bounds)
+            if view._cs is None:
+                view._cs = self
+            return view
+        return MappedStream(segments, position=position, partial=partial, strict_bounds=strict_bounds, cs=self)
+
+    address_space = mapped
+    map_segments = mapped
+    load_mapped = mapped
+    memory_map = mapped
+    map = mapped
+
+    def from_segments(self, *segments: Any, **kwargs: Any) -> Any:
+        """Create a logical address view from positional segments."""
+        return self.mapped(segments, **kwargs)
+
+    def parse_at(
+        self,
+        address: int,
+        name: str | type[BaseType],
+        segments: Any = None,
+        *,
+        view: Any = None,
+        endian: AllowedEndianness | None = None,
+        partial: bool = False,
+        context: dict[str, Any] | None = None,
+    ) -> Any:
+        """Parse a type at a logical address in a fragmented address space.
+
+        The usual form is ``parse_at(address, type, segments)``. For convenience
+        the type or the view may also come first, as in ``parse_at(type,
+        address, segments)`` or ``parse_at(view, address, type)``.
+
+        ``segments`` may be a mapping, an iterable of segments, or a view that
+        was created earlier. The caller's cursor of the view is preserved.
+        """
+        if not isinstance(address, int):
+            if isinstance(address, (str, type)):
+                address, name = name, address
+                segments = segments if segments is not None else view
+            else:
+                view, address, name = address, name, segments
+            if not isinstance(address, int):
+                raise TypeError("parse_at() requires a logical address")
+
+        view = view or segments
+        if view is None:
+            raise TypeError("parse_at() requires segments or a view")
+        if not hasattr(view, "parse"):
+            view = self.mapped(view)
+        return view.parse(self.resolve(name), address, endian=endian, partial=partial, context=context)
+
+    def read_at(
+        self,
+        address: int,
+        size: int = -1,
+        segments: Any = None,
+        *,
+        view: Any = None,
+    ) -> bytes:
+        """Read bytes at a logical address without changing the view cursor.
+
+        Accepts ``read_at(address, size, segments)`` as well as
+        ``read_at(segments, address, size)``.
+        """
+        if not isinstance(address, int):
+            if not isinstance(size, int):
+                raise TypeError("read_at() requires a logical address")
+            view, address, size = address, size, segments
+
+        view = view or segments
+        if view is None:
+            raise TypeError("read_at() requires segments or a view")
+        if not hasattr(view, "read_at"):
+            view = self.mapped(view)
+        return view.read_at(address, size)
 
     def resolve(self, name: type[BaseType] | str) -> type[BaseType]:
         """Resolve a type name to get the actual type object.

@@ -52,6 +52,8 @@ class MetaType(type):
                 return cls._read(BytesIO(obj), endian=cls.__cs__.endian)
 
             if hasattr(obj, "read") and not isinstance(obj, cls):
+                if (reader := getattr(obj, "_read_type", None)) is not None:
+                    return reader(cls, endian=cls.__cs__.endian)
                 return cls._read(obj, endian=cls.__cs__.endian)
 
             if not _is_buffer_type(obj):
@@ -130,6 +132,8 @@ class MetaType(type):
             raise TypeError("Invalid object type")
 
         endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
+        if (reader := getattr(obj, "_read_type", None)) is not None:
+            return reader(cls, endian=endian)
         return cls._read(obj, endian=endian)
 
     def write(cls, stream: BinaryIO, value: Any, *, endian: AllowedEndianness | None = None) -> int:
@@ -468,7 +472,11 @@ def _read_null_terminated(stream: BinaryIO, width: int) -> bytes:
     terminator = b"\x00" * width
     buf = []
     while True:
-        chunk = stream.read(128 * width)
+        # A mapped view can only return bytes up to the next hole. Use its
+        # contiguous reader so a terminator in the current segment is found
+        # before the hole is encountered.
+        read = getattr(stream, "read_some", None) or stream.read
+        chunk = read(128 * width)
         if not isinstance(chunk, (bytes, bytearray)):
             # E.g. a memoryview, which doesn't support find()
             chunk = bytes(chunk)

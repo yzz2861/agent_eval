@@ -163,6 +163,28 @@ Each structure is registered in a cstruct instance, which can be passed with the
 > runtime-evaluated-base-classes = ["dissect.cstruct.declarative.Struct", "dissect.cstruct.declarative.Union"]
 > ```
 
+### Fragmented address spaces
+Firmware dumps are often stored as a few physically separate fragments while the structures inside them use logical addresses. `MappedStream` (also exported as `AddressSpace`, `MappedView` and `MemoryView`) presents those fragments as one immutable, read-only, seekable address space. Ordinary fields and lazy pointer dereferences both read through that view.
+
+```python
+from dissect.cstruct import cstruct
+from dissect.cstruct.exception import AccessDenied, MissingPage, SegmentConflict
+from dissect.cstruct.mapped import MappedStream, Segment
+
+cs = cstruct(pointer="uint32")
+cs.load("struct header { uint32 *payload; };\nstruct payload { uint32 value; };")
+
+view = MappedStream([
+    Segment(0x1000, b"\x08\x10\x00\x00", label="boot-rom"),
+    Segment(0x1008, b"\x2a\x00\x00\x00", label="payload-flash"),
+])
+
+header = view.parse(cs.header, 0x1000)
+assert header.payload.dereference().value == 42
+```
+
+A read that crosses two logically adjacent segments succeeds even if the segments came from different regions. Holes, contradictory overlaps and explicitly unreadable segments are kept distinct: they raise `MissingPage`, `SegmentConflict` and `AccessDenied` respectively. Views snapshot their segment bytes and mapping, so a pointer parsed from one exhibit cannot start reading bytes from a later mapping. `parse` and `parse_partial` restore the caller cursor even on failure. With `parse_partial`, fields that hit a hole or forbidden region are retained as `Unresolved` values in `obj.__unconfirmed__` while later fixed-size fields can still be confirmed. See `examples/firmware_dump.py` for a small two-exhibit forensic walkthrough.
+
 ### Type parsing
 Aside from loading structure definitions, any of the supported types can be used individually for parsing data. For example, the following is all supported:
 

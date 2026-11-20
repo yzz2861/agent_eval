@@ -108,15 +108,26 @@ class Pointer(int, BaseType, Generic[T]):
         if issubclass(self.__type__, Void):
             return None
 
+        if (dereference_view := getattr(self.__stream, "dereference_view", None)) is not None:
+            # A mapped stream owns an immutable snapshot of the evidence it was parsed
+            # from. Dereferencing uses an independent cursor, so neither a new parse nor
+            # a remapped view can change what this pointer resolves to.
+            stream = dereference_view(int(self))
+            if issubclass(self.__type__, Char):
+                return self.__type__._read_0(stream, context=self.__context, endian=endian)
+            return self.__type__._read(stream, context=self.__context, endian=endian)
+
         position = self.__stream.tell()
         self.__stream.seek(self)
 
-        if issubclass(self.__type__, Char):
-            # This makes the assumption that a char pointer is a null-terminated string
-            value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
-        else:
-            value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+        try:
+            if issubclass(self.__type__, Char):
+                # This makes the assumption that a char pointer is a null-terminated string
+                value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
+            else:
+                value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+        finally:
+            # Restore the caller's position even when the read raises.
+            self.__stream.seek(position)
 
-        # Restore the stream position after reading the value
-        self.__stream.seek(position)
         return value

@@ -14,8 +14,10 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cstruct.bitbuffer import BitBuffer
+from dissect.cstruct.exception import MappingError
 from dissect.cstruct.expression import Expression
 from dissect.cstruct.lexer import IDENTIFIER_TYPES
+from dissect.cstruct.mapped import Unresolved
 from dissect.cstruct.types.base import (
     _BUFFER_TYPES,
     _IMMUTABLE_TYPES,
@@ -52,6 +54,16 @@ class Field:
         return f"<Field {self.name} {self.type.__name__}{bits_str}>"
 
 
+def _unresolved(field: Field, address: int | None, error: MappingError) -> Unresolved:
+    """Create a placeholder for a field whose backing bytes could not be confirmed."""
+    reason = {
+        "MissingPage": "missing-page",
+        "AccessDenied": "forbidden",
+        "SegmentConflict": "conflicting-segment",
+    }.get(type(error).__name__, "mapping-error")
+    return Unresolved(address, field.type.__size__, reason, error)
+
+
 class StructureMetaType(MetaType):
     """Base metaclass for cstruct structure type classes."""
 
@@ -83,6 +95,8 @@ class StructureMetaType(MetaType):
                 return cls._read(io.BytesIO(obj), endian=cls.__cs__.endian)
 
             if hasattr(obj, "read") and not isinstance(obj, cls):
+                if (reader := getattr(obj, "_read_type", None)) is not None:
+                    return reader(cls, endian=cls.__cs__.endian)
                 return cls._read(obj, endian=cls.__cs__.endian)
 
         if not args and not kwargs:
@@ -244,6 +258,8 @@ class StructureMetaType(MetaType):
 
         result = {}
         sizes = {}
+        unconfirmed = {}
+        partial = bool(getattr(stream, "partial", False))
         for field in cls.__fields__:
             offset = stream.tell()
 
@@ -257,26 +273,51 @@ class StructureMetaType(MetaType):
                 offset += -offset & (field.alignment - 1)
                 stream.seek(offset)
 
-            if field.bits:
-                if bit_buffer is None:
-                    bit_buffer = BitBuffer(stream, endian=endian)
+            try:
+                if field.bits:
+                    if bit_buffer is None:
+                        bit_buffer = BitBuffer(stream, endian=endian)
 
-                if isinstance(field.type, EnumMetaType):
-                    value = field.type(bit_buffer.read(field.type.__type__, field.bits))
+                    if isinstance(field.type, EnumMetaType):
+                        value = field.type(bit_buffer.read(field.type.__type__, field.bits))
+                    else:
+                        value = bit_buffer.read(field.type, field.bits)
+
+                    result[field._name] = value
+                    continue
+
+                if bit_buffer is not None:
+                    bit_buffer.reset()
+
+                reader = getattr(stream, "_read_type", None)
+                if reader is not None:
+                    value = reader(field.type, context=result, endian=endian)
                 else:
-                    value = bit_buffer.read(field.type, field.bits)
+                    value = field.type._read(stream, context=result, endian=endian)
 
                 result[field._name] = value
-                continue
+                if field.type.__dynamic__:
+                    sizes[field._name] = stream.tell() - offset
+            except MappingError as error:
+                if not partial:
+                    raise
 
-            if bit_buffer is not None:
-                bit_buffer.reset()
+                unconfirmed[field._name] = _unresolved(field, offset, error)
+                result[field._name] = unconfirmed[field._name]
 
-            value = field.type._read(stream, context=result, endian=endian)
+                # A bit field or dynamic field has no trustworthy end position. Marking
+                # the rest unconfirmed avoids interpreting unrelated bytes as fields.
+                if field.bits or field.type.__size__ is None:
+                    remaining = cls.__fields__[cls.__fields__.index(field) + 1 :]
+                    for item in remaining:
+                        item_address = struct_start + item.offset if item.offset is not None else None
+                        unconfirmed[item._name] = _unresolved(item, item_address, error)
+                        result[item._name] = unconfirmed[item._name]
+                    break
 
-            result[field._name] = value
-            if field.type.__dynamic__:
-                sizes[field._name] = stream.tell() - offset
+                # Fixed-size fields have a known successor, so later fields can
+                # still be confirmed (possibly at an explicit or aligned offset).
+                stream.seek(offset + field.type.__size__)
 
         if cls.__align__:
             # Align the stream
@@ -286,6 +327,11 @@ class StructureMetaType(MetaType):
         # This is faster than calling cls() and bypasses the metaclass __call__ method
         obj = type.__call__(cls, **result)
         obj.__dynamic_sizes__ = sizes
+        if unconfirmed:
+            obj.__unconfirmed__ = unconfirmed
+            object.__setattr__(obj, "__unconfirmed_names__", tuple(unconfirmed))
+            object.__setattr__(obj, "__unconfirmed_fields__", tuple(unconfirmed))
+            object.__setattr__(obj, "__mapping_errors__", {name: value.error for name, value in unconfirmed.items()})
         return obj
 
     def _read_0(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> list[Self]:  # type: ignore

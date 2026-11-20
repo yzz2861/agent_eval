@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Read-only logical address views for fragmented evidence in `dissect.cstruct.mapped`, with distinct missing-page, conflicting-overlap and forbidden-access faults, stable pointer snapshots, partial reads that retain unconfirmed fields, and a forensic example.
 
 ### Changed
 
