@@ -1,0 +1,79 @@
+{
+  "rules": [
+    {
+      "id": "LEGACY-EDGE-GROUP",
+      "basis": "device",
+      "description": "旧资产组豁免；只对下列资产 ID 生效，不升级为同型号产品范围。",
+      "cpes": [
+        "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+      ],
+      "device_ids": [
+        "EDGE-N-01",
+        "EDGE-S-01"
+      ]
+    },
+    {
+      "id": "PRODUCT-AP-3.2",
+      "basis": "product",
+      "description": "分支 AP 3.2.0/3.2.1 的产品范围豁免。",
+      "cpes": [
+        "cpe:2.3:h:acme:branch_ap:3.2.0:*:*:*:*:*:*:*",
+        "cpe:2.3:h:acme:branch_ap:3.2.1:*:*:*:*:*:*:*"
+      ]
+    }
+  ],
+  "inheritances": [
+    {
+      "child_asset_id": "EDGE-S-02",
+      "parent_asset_id": "EDGE-S-01",
+      "evidence": [
+        "handover:HTO-2026-041"
+      ]
+    },
+    {
+      "child_asset_id": "EDGE-S-03",
+      "parent_asset_id": "EDGE-S-01",
+      "evidence": []
+    }
+  ],
+  "inventories": [
+    {
+      "name": "north",
+      "devices": [
+        {
+          "asset_id": "EDGE-N-01",
+          "cpe": "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+        },
+        {
+          "asset_id": "EDGE-N-02",
+          "cpe": "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+        },
+        {
+          "asset_id": "AP-N-01",
+          "cpe": "cpe:2.3:h:acme:branch_ap:3.2.0:*:*:*:*:*:*:*"
+        }
+      ]
+    },
+    {
+      "name": "south",
+      "devices": [
+        {
+          "asset_id": "EDGE-S-01",
+          "cpe": "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+        },
+        {
+          "asset_id": "EDGE-S-02",
+          "cpe": "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+        },
+        {
+          "asset_id": "EDGE-S-03",
+          "cpe": "cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*"
+        },
+        {
+          "asset_id": "AP-S-01",
+          "cpe": "cpe:2.3:h:acme:branch_ap:3.2.1:*:*:*:*:*:*:*"
+        }
+      ]
+    }
+  ]
+}

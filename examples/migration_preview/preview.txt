@@ -1,0 +1,32 @@
+设备豁免迁移预览
+规则: 2 (device=1, product=1)
+清单: 2; 设备: 7
+批准: 5 (device=2, inheritance=1, product=2)
+待审: 2
+
+重点核对（CPE 同型号但资产未获批）:
+  - north/EDGE-N-02
+
+NORTH (3)
+ASSET_ID   DECISION                BASIS     DETAIL
+EDGE-N-01  approved_device         device    LEGACY-EDGE-GROUP
+EDGE-N-02  pending_review          -         CPE 与设备型规则 LEGACY-EDGE-GROUP 同型号，但该资产 ID 未被批准，也没有产品范围规则或带证据的继承关系。  <-- FOCUS
+AP-N-01    approved_product_scope  product   PRODUCT-AP-3.2
+
+SOUTH (4)
+ASSET_ID   DECISION                BASIS     DETAIL
+EDGE-S-01  approved_device         device    LEGACY-EDGE-GROUP
+EDGE-S-02  approved_inheritance    device    LEGACY-EDGE-GROUP
+EDGE-S-03  pending_review          -         继承关系存在，但证据缺失；应回到待审（来源资产：EDGE-S-01）。
+AP-S-01    approved_product_scope  product   PRODUCT-AP-3.2
+
+待审清单:
+  - north/EDGE-N-02: CPE 与设备型规则 LEGACY-EDGE-GROUP 同型号，但该资产 ID 未被批准，也没有产品范围规则或带证据的继承关系。 [cpe_match_without_device_approval]
+  - south/EDGE-S-03: 继承关系存在，但证据缺失；应回到待审（来源资产：EDGE-S-01）。 [inheritance_evidence_missing]
+
+关注设备: north/EDGE-N-02
+  CPE: cpe:2.3:h:acme:edge_gateway:2.4.1:*:*:*:*:*:*:*
+  结论: pending_review
+  原因: CPE 与设备型规则 LEGACY-EDGE-GROUP 同型号，但该资产 ID 未被批准，也没有产品范围规则或带证据的继承关系。
+  CPE 命中:
+    - LEGACY-EDGE-GROUP [device] 型号匹配; 批准资产: EDGE-N-01, EDGE-S-01
