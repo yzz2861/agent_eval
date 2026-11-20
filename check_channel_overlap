@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+
+"""check_channel_overlap - offline audit of target sharing across channels.
+
+Reads a local TUF metadata directory (no network access), verifies the
+metadata chain the same way the reference client does, and computes which
+targets are actually visible under each delegation ("channel"), following
+client delegation order and terminating semantics.
+
+Targets with identical content (same hashes and length) that appear under
+more than one channel are then classified:
+
+* ``allowed_mirrors``: copies covered by an approved sharing scope between
+  the two channels (see ``--approved-shares``).
+* ``unproven_identical``: identical files shared across channels without an
+  approved scope: provenance cannot currently be proven, review required.
+* ``inconsistent_same_name``: same target path claimed by different
+  channels with different content. The report states which role's claim is
+  effective according to client delegation order and terminating semantics.
+
+Every finding names the concrete roles and target files involved so each
+case can be traced back to a controlled mirror or a channel mix-up.
+
+Exit code is 0 when only approved sharing is found, 1 when findings need
+review, and 2 when the metadata cannot be verified or read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import logging
+import os
+import sys
+from dataclasses import dataclass
+from typing import Any
+
+from tuf.api import exceptions
+from tuf.api.metadata import TargetFile, Targets
+from tuf.ngclient._internal.trusted_metadata_set import TrustedMetadataSet
+from tuf.ngclient.config import EnvelopeType
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_DELEGATIONS = 32
+
+
+@dataclass
+class TargetClaim:
+    """A role's claim on a target path, with the role's channel."""
+
+    role: str
+    channel: str
+    path: str
+    target: TargetFile
+
+    def content_key(self) -> tuple[int, tuple[tuple[str, str], ...]]:
+        """Return a hashable identity of the claimed file content."""
+        return (self.target.length, tuple(sorted(self.target.hashes.items())))
+
+
+def _read_metadata(metadata_dir: str, role: str) -> bytes:
+    path = os.path.join(metadata_dir, f"{role}.json")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _delegated_role_names(targets: Targets) -> list[str]:
+    """Return the names of all roles delegated by ``targets``."""
+    delegations = targets.delegations
+    if delegations is None:
+        return []
+    if delegations.roles is not None:
+        return list(delegations.roles)
+    succinct = delegations.succinct_roles
+    if succinct is None:
+        raise RuntimeError("Delegations has neither roles nor succinct roles")
+    return [
+        f"{succinct.name_prefix}-{index:0{succinct.suffix_len}x}"
+        for index in range(succinct.number_of_bins)
+    ]
+
+
+def load_trusted_roles(metadata_dir: str) -> dict[str, Targets]:
+    """Verify and load the full targets delegation tree from a directory.
+
+    Applies the same checks as the reference client (signature threshold,
+    expiry, snapshot length/hash and version consistency) but works fully
+    offline against the files in ``metadata_dir``.
+    """
+    trusted_set = TrustedMetadataSet(
+        _read_metadata(metadata_dir, "root"), EnvelopeType.METADATA
+    )
+    trusted_set.update_timestamp(_read_metadata(metadata_dir, "timestamp"))
+    trusted_set.update_snapshot(_read_metadata(metadata_dir, "snapshot"))
+
+    roles = {
+        Targets.type: trusted_set.update_targets(
+            _read_metadata(metadata_dir, Targets.type)
+        )
+    }
+    queue = [Targets.type]
+    while queue:
+        parent = queue.pop(0)
+        for child in _delegated_role_names(roles[parent]):
+            if child in roles:
+                continue
+            roles[child] = trusted_set.update_delegated_targets(
+                _read_metadata(metadata_dir, child), child, parent
+            )
+            queue.append(child)
+    return roles
+
+
+def find_effective_role(
+    roles: dict[str, Targets], target_path: str, max_delegations: int
+) -> str | None:
+    """Return the role whose claim on ``target_path`` a client would use.
+
+    Mirrors the reference client's preorder depth-first walk: roles are
+    considered in delegation order and a terminating delegation stops the
+    search instead of backtracking.
+    """
+    to_visit = [Targets.type]
+    visited: set[str] = set()
+    while len(visited) <= max_delegations and to_visit:
+        role_name = to_visit.pop()
+        if role_name in visited:
+            continue
+        targets = roles.get(role_name)
+        if targets is None:
+            continue
+        if target_path in targets.targets:
+            return role_name
+        visited.add(role_name)
+        if targets.delegations is not None:
+            children = []
+            for (
+                child_name,
+                terminating,
+            ) in targets.delegations.get_roles_for_target(target_path):
+                children.append(child_name)
+                if terminating:
+                    # Terminating delegation: do not backtrack.
+                    to_visit.clear()
+                    break
+            children.reverse()
+            to_visit.extend(children)
+    return None
+
+
+def assign_channels(roles: dict[str, Targets]) -> dict[str, str]:
+    """Map every role to its channel.
+
+    A channel is the top-level targets role itself or a role directly
+    delegated by it; deeper delegations inherit their ancestor's channel.
+    """
+    channels = {Targets.type: Targets.type}
+    queue = [Targets.type]
+    while queue:
+        parent = queue.pop(0)
+        for child in _delegated_role_names(roles[parent]):
+            if child in channels or child not in roles:
+                continue
+            channels[child] = (
+                child if parent == Targets.type else channels[parent]
+            )
+            queue.append(child)
+    return channels
+
+
+def find_share_approval(
+    approved_shares: list[dict[str, Any]],
+    channel_a: str,
+    channel_b: str,
+    paths: list[str],
+) -> dict[str, Any] | None:
+    """Return the approved sharing scope covering these copies, if any."""
+    for share in approved_shares:
+        channels = set(share.get("channels", []))
+        patterns = share.get("paths", [])
+        if {channel_a, channel_b} <= channels and all(
+            any(fnmatch.fnmatchcase(path, p) for p in patterns)
+            for path in paths
+        ):
+            return share
+    return None
+
+
+def _classify_mirrors(
+    visible_claims: list[TargetClaim],
+    approved_shares: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split cross-channel identical files into allowed and unproven."""
+    by_content: dict[tuple[int, Any], list[TargetClaim]] = {}
+    for claim in visible_claims:
+        by_content.setdefault(claim.content_key(), []).append(claim)
+
+    allowed: list[dict[str, Any]] = []
+    unproven: list[dict[str, Any]] = []
+    for (length, hashes), claims in sorted(by_content.items()):
+        channels_present = sorted({c.channel for c in claims})
+        if len(channels_present) < 2:
+            continue
+        copies = [
+            {"channel": c.channel, "role": c.role, "path": c.path}
+            for c in sorted(claims, key=lambda c: (c.channel, c.path))
+        ]
+        entry: dict[str, Any] = {
+            "length": length,
+            "hashes": dict(hashes),
+            "copies": copies,
+        }
+        approvals = []
+        unapproved = False
+        for index, channel_a in enumerate(channels_present):
+            for channel_b in channels_present[index + 1 :]:
+                paths = [
+                    c["path"]
+                    for c in copies
+                    if c["channel"] in (channel_a, channel_b)
+                ]
+                approval = find_share_approval(
+                    approved_shares, channel_a, channel_b, paths
+                )
+                if approval is None:
+                    unapproved = True
+                    break
+                approvals.append(
+                    {"channels": [channel_a, channel_b], "paths": paths}
+                )
+            if unapproved:
+                break
+        if unapproved:
+            unproven.append(entry)
+        else:
+            entry["approved_by"] = approvals
+            allowed.append(entry)
+    return allowed, unproven
+
+
+def _find_inconsistent_paths(
+    claims: list[TargetClaim],
+    effective: dict[str, str],
+    channel_filter: set[str] | None,
+) -> list[dict[str, Any]]:
+    """Find paths claimed by multiple channels with different content."""
+    claims_by_path: dict[str, list[TargetClaim]] = {}
+    for claim in claims:
+        if channel_filter is not None and claim.channel not in channel_filter:
+            continue
+        claims_by_path.setdefault(claim.path, []).append(claim)
+
+    inconsistent = []
+    for path, path_claims in sorted(claims_by_path.items()):
+        if len({c.channel for c in path_claims}) < 2:
+            continue
+        if len({c.content_key() for c in path_claims}) < 2:
+            continue
+        winner = effective.get(path)
+        inconsistent.append(
+            {
+                "path": path,
+                "effective_role": winner,
+                "claims": [
+                    {
+                        "channel": c.channel,
+                        "role": c.role,
+                        "length": c.target.length,
+                        "hashes": c.target.hashes,
+                        "effective": c.role == winner,
+                    }
+                    for c in sorted(
+                        path_claims, key=lambda c: (c.channel, c.role)
+                    )
+                ],
+            }
+        )
+    return inconsistent
+
+
+def audit_channels(
+    roles: dict[str, Targets],
+    approved_shares: list[dict[str, Any]],
+    max_delegations: int = DEFAULT_MAX_DELEGATIONS,
+    channel_filter: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the offline channel-overlap report for verified roles."""
+    channels = assign_channels(roles)
+    keep = set(channel_filter) if channel_filter is not None else None
+
+    all_claims = [
+        TargetClaim(role_name, channels[role_name], path, target)
+        for role_name, targets in roles.items()
+        if role_name in channels
+        for path, target in targets.targets.items()
+    ]
+
+    # The effective claim per path follows client delegation order and
+    # terminating semantics, exactly as the reference client resolves it.
+    effective: dict[str, str] = {}
+    for path in {claim.path for claim in all_claims}:
+        winner = find_effective_role(roles, path, max_delegations)
+        if winner is not None:
+            effective[path] = winner
+
+    visible_claims = [
+        c
+        for c in all_claims
+        if effective.get(c.path) == c.role
+        and (keep is None or c.channel in keep)
+    ]
+
+    visible_targets: dict[str, dict[str, Any]] = {}
+    for claim in visible_claims:
+        visible_targets.setdefault(claim.channel, {})[claim.path] = {
+            "role": claim.role,
+            "length": claim.target.length,
+            "hashes": claim.target.hashes,
+        }
+
+    allowed, unproven = _classify_mirrors(visible_claims, approved_shares)
+    inconsistent = _find_inconsistent_paths(all_claims, effective, keep)
+
+    channel_names = sorted(
+        {c.channel for c in all_claims if keep is None or c.channel in keep}
+    )
+    return {
+        "channels": channel_names,
+        "visible_targets": visible_targets,
+        "findings": {
+            "allowed_mirrors": allowed,
+            "unproven_identical": unproven,
+            "inconsistent_same_name": inconsistent,
+        },
+        "summary": {
+            "allowed_mirrors": len(allowed),
+            "unproven_identical": len(unproven),
+            "inconsistent_same_name": len(inconsistent),
+        },
+    }
+
+
+def print_summary(report: dict[str, Any]) -> None:
+    """Print a human-readable summary of the report."""
+    print(f"Channels: {', '.join(report['channels']) or '(none)'}")
+    for channel, targets in report["visible_targets"].items():
+        print(f"  {channel}: {len(targets)} visible target(s)")
+
+    findings = report["findings"]
+    for entry in findings["allowed_mirrors"]:
+        copies = ", ".join(f"{c['role']}:{c['path']}" for c in entry["copies"])
+        print(f"ALLOWED MIRROR: {copies}")
+    for entry in findings["unproven_identical"]:
+        copies = ", ".join(f"{c['role']}:{c['path']}" for c in entry["copies"])
+        print(f"UNPROVEN IDENTICAL (review needed): {copies}")
+    for entry in findings["inconsistent_same_name"]:
+        claims = ", ".join(
+            f"{c['role']} ({'effective' if c['effective'] else 'shadowed'})"
+            for c in entry["claims"]
+        )
+        print(f"INCONSISTENT NAME: {entry['path']}: {claims}")
+
+    summary = report["summary"]
+    print(
+        "Summary: "
+        f"{summary['allowed_mirrors']} allowed mirror(s), "
+        f"{summary['unproven_identical']} unproven identical, "
+        f"{summary['inconsistent_same_name']} inconsistent name(s)"
+    )
+
+
+def main() -> int:
+    """Run the offline channel-overlap check."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "metadata_dir",
+        help="Directory with local TUF metadata (root, timestamp, snapshot,"
+        " targets and delegated roles). Checked offline.",
+    )
+    parser.add_argument(
+        "--channels",
+        nargs="+",
+        metavar="NAME",
+        help="Restrict the report to these channels (default: all).",
+    )
+    parser.add_argument(
+        "--approved-shares",
+        metavar="FILE",
+        help="JSON file with approved sharing scopes between channel pairs:"
+        ' {"allowed_shares": [{"channels": ["a", "b"], "paths": ["x/*"]}]}',
+    )
+    parser.add_argument(
+        "--report",
+        metavar="FILE",
+        help="Write the full JSON report to FILE.",
+    )
+    parser.add_argument(
+        "--max-delegations",
+        type=int,
+        default=DEFAULT_MAX_DELEGATIONS,
+        help="Maximum number of delegations visited per target lookup"
+        f" (default: {DEFAULT_MAX_DELEGATIONS}).",
+    )
+    args = parser.parse_args()
+
+    approved_shares: list[dict[str, Any]] = []
+    if args.approved_shares:
+        with open(args.approved_shares) as f:
+            approved_shares = json.load(f).get("allowed_shares", [])
+
+    try:
+        roles = load_trusted_roles(args.metadata_dir)
+    except (OSError, exceptions.RepositoryError, ValueError) as e:
+        print(f"ERROR: cannot verify metadata in {args.metadata_dir}: {e}")
+        return 2
+
+    report = audit_channels(
+        roles, approved_shares, args.max_delegations, args.channels
+    )
+    report["metadata_dir"] = args.metadata_dir
+
+    print_summary(report)
+
+    if args.report:
+        with open(args.report, "w") as f:
+            json.dump(report, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"Wrote report to {args.report}")
+
+    findings = report["findings"]
+    if findings["unproven_identical"] or findings["inconsistent_same_name"]:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

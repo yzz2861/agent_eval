@@ -112,6 +112,9 @@ ignore = [
     "S603",   # bandit: this flags all uses of subprocess.run as vulnerable
     "T201",   # print is ok in verify_release
 ]
+"check_channel_overlap" = [
+    "T201",   # print is ok in check_channel_overlap
+]
 ".github/scripts/*" = [
     "T201",   # print is ok in conformance client
 ]
