@@ -7,6 +7,7 @@ from .nodes import *
 
 from .loader import *
 from .dumper import *
+from .release import *
 
 __version__ = '7.0.0.dev0'
 try:
@@ -387,4 +388,3 @@ class YAMLObject(metaclass=YAMLObjectMetaclass):
         """
         return dumper.represent_yaml_object(cls.yaml_tag, data, cls,
                 flow_style=cls.yaml_flow_style)
-

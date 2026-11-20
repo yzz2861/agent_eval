@@ -45,6 +45,23 @@ To test with a specific Python version:
 
     make test PYTHON-VERSION=3.13.5
 
+## Offline release checks
+
+`yaml.release_check()` parses a configuration with `SafeLoader` and checks
+secret identifiers after YAML aliases and merge keys have been expanded.  It
+does not construct Python objects or read a secret store.  The caller supplies
+the identifiers and the consumer locations that may use them:
+
+    report = yaml.release_check(
+        source,
+        {"secret://payments/db": ["/release/token"]},
+    )
+
+Each finding retains the destination path and location.  Alias findings also
+carry the anchor name and definition location, but never the source scalar
+value.  The inverse rule form is available with
+`consumer_rules={"/release/token": {"secret://payments/db"}}`.
+
 ## Further Information
 
 * For more information, check the
