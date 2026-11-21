@@ -43,6 +43,11 @@ from .bad_xmlrpc_use import BadXmlrpcUseLinter
 from .bad_xmlsec_module_attribute_use import BadXmlsecModuleAttributeUseLinter
 from .bad_yaml_use import BadYAMLUseLinter
 from .bad_zipfile_use import BadZipfileUseLinter
+from .digest_source_mismatch import (  # noqa F401
+    BadDigestSourceUseLinter,
+    DigestSourceMismatchLinter,
+    MismatchedDigestSourceLinter,
+)
 
 from .twisted.inlinecallbacks_yield_statement import InlineCallbacksYieldStatementLinter
 from .twisted.returnvalue_in_inlinecallbacks import ReturnValueInInlineCallbacksLinter
@@ -84,6 +89,7 @@ ALL = (
     BadXmlsecModuleAttributeUseLinter,
     BadYAMLUseLinter,
     BadZipfileUseLinter,
+    DigestSourceMismatchLinter,
     InlineCallbacksYieldStatementLinter,
     ReturnValueInInlineCallbacksLinter,
     YieldReturnStatementLinter,
