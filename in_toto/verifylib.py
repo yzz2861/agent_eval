@@ -46,6 +46,7 @@ from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
     RuleVerificationError,
+    SeparationOfDutiesError,
     SignatureVerificationError,
     ThresholdVerificationError,
 )
@@ -399,7 +400,9 @@ def verify_metadata_signatures(metadata, keys_dict):
         metadata.verify_signature(verify_key)
 
 
-def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR0912
+def verify_link_signature_thresholds(  # noqa: C901, PLR0912
+    layout, steps_metadata, signing_evidence=None, layout_path=""
+):
     """
     <Purpose>
       Verify that for each step of the layout there are at least `threshold`
@@ -426,6 +429,19 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
                   ...
                 }, ...
               }
+
+      signing_evidence:
+              An optional list. If passed, a record with the original step
+              name, the layout path and the actual signing identity (keyid)
+              is appended for each link whose signature was successfully
+              verified with an authorized key. The records can be used for a
+              subsequent cross-layout separation of duties check, see
+              `verify_cross_layout_separation_of_duties`.
+
+      layout_path:
+              An optional path identifying the layout in a (possibly nested)
+              layout hierarchy. It is only used for the records appended to
+              `signing_evidence`.
 
     <Exceptions>
       ThresholdVerificationError
@@ -534,6 +550,18 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
 
             # Keep only links with valid and authorized signature
             verified_key_link_dict[link_keyid] = link
+
+            # Keep evidence of the original step and the actual signing
+            # identity for a subsequent cross-layout separation of duties
+            # check
+            if signing_evidence is not None:
+                signing_evidence.append(
+                    {
+                        "layout": layout_path,
+                        "step": step.name,
+                        "keyid": link_keyid,
+                    }
+                )
 
         # For each step, verify that we have enough validly signed links from
         # distinct authorized functionaries. Links signed by different subkeys of
@@ -1323,8 +1351,13 @@ def reduce_chain_links(chain_link_dict):
     return reduced_chain_link_dict
 
 
-def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+def verify_sublayouts(  # noqa: PLR0913
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    signing_evidence=None,
+    layout_path="",
 ):
     """
     <Purpose>
@@ -1357,6 +1390,16 @@ def verify_sublayouts(
       inspect_timeout:
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
+
+      signing_evidence:
+              An optional list, passed on to the recursive verification of
+              each sublayout, where records about validly signed links are
+              collected. See `verify_link_signature_thresholds`.
+
+      layout_path:
+              An optional path identifying the current layout in a (possibly
+              nested) layout hierarchy. The path of a sublayout is derived
+              from it and the name of the delegating step.
 
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
@@ -1405,6 +1448,10 @@ def verify_sublayouts(
                     superlayout_link_dir_path, sub_link_dir
                 )
 
+                sublayout_path = (
+                    f"{layout_path}/{step_name}" if layout_path else step_name
+                )
+
                 # Make a recursive call to in_toto_verify with the
                 # layout and the extracted key object
                 summary_link = in_toto_verify(
@@ -1413,6 +1460,8 @@ def verify_sublayouts(
                     link_dir_path=sublayout_link_dir_path,
                     step_name=step_name,
                     inspect_timeout=inspect_timeout,
+                    signing_evidence=signing_evidence,
+                    layout_path=sublayout_path,
                 )
 
                 # Replace the layout object with the link object returned
@@ -1423,6 +1472,166 @@ def verify_sublayouts(
         chain_link_dict[step_name] = key_link_dict
 
     return chain_link_dict
+
+
+def verify_cross_layout_separation_of_duties(signing_evidence, entity_map):
+    """
+    <Purpose>
+      Cross-layout separation of duties check, to be performed after regular
+      in-toto verification (see `in_toto_verify`) passed for each layout of
+      the supply chain individually.
+
+      Per-layout threshold verification guarantees that enough *distinct keys*
+      signed the links of a step. It does not, however, detect that keys with
+      different identities (keyids) belong to the same real-world entity, e.g.
+      an outsourcing party that signs a build step in a sublayout with one key
+      and the corresponding acceptance step in the superlayout with another
+      key. This check uses an offline provided entity map to detect such
+      conflicts across layout boundaries.
+
+      Pairs of steps from different layouts that were signed with the *same*
+      key (e.g. a public key authorized under aliases in multiple layouts) are
+      transparently attributable to one functionary and are not considered a
+      conflict.
+
+      Pairs of steps where at least one signing key is not mapped to an entity
+      cannot be assessed. They do not fail the check but are returned as
+      suspensions, so that the caller can put them on hold separately.
+
+    <Arguments>
+      signing_evidence:
+              A list of records as collected by passing the `signing_evidence`
+              argument to `in_toto_verify`, e.g.:
+              [
+                {
+                  "layout": "<layout path>",
+                  "step": "<original step name>",
+                  "keyid": "<actual signing identity>",
+                },
+                ...
+              }
+
+      entity_map:
+              A dictionary that maps functionary keyids to real-world entity
+              identifiers, provided offline by the caller, e.g.:
+              {
+                "<keyid>": "<entity identifier>",
+                ...
+              }
+
+    <Exceptions>
+      SeparationOfDutiesError
+              If a confirmed conflict is found, i.e. links of steps in
+              different layouts were validly signed by different keys that map
+              to the same entity. The exception carries the minimal
+              conflicting step combinations in its `conflicts` attribute and
+              the suspended pairs in its `suspensions` attribute.
+
+    <Returns>
+      A list of suspended step pairs, whose independence could not be
+      assessed because at least one signing key is not mapped to an entity.
+      Each suspension is a dictionary with the original evidence records of
+      the pair and a reason, e.g.:
+              {
+                "reason": "unknown entity for keyid(s): <keyid>",
+                "steps": [<record>, <record>],
+              }
+
+    """
+    # Confirmed conflicts, aggregated to minimal step combinations, i.e. pairs
+    # of steps in different layouts signed by the same entity. All actual
+    # signing identities (keyids) of the entity are kept as evidence per step.
+    conflicts = {}
+    # Cross-layout step pairs whose independence cannot be assessed
+    suspensions = []
+
+    for index, record in enumerate(signing_evidence):
+        for other in signing_evidence[index + 1 :]:
+            # Separation of duties is only checked across layouts
+            if record["layout"] == other["layout"]:
+                continue
+
+            # Links signed with the same key, e.g. a public key authorized
+            # under aliases in multiple layouts, are transparently
+            # attributable to one functionary and not a conflict
+            if record["keyid"] == other["keyid"]:
+                continue
+
+            entity = entity_map.get(record["keyid"])
+            other_entity = entity_map.get(other["keyid"])
+
+            # Order the pair deterministically by layout, step and keyid
+            pair = sorted(
+                (record, other),
+                key=lambda r: (r["layout"], r["step"], r["keyid"]),
+            )
+
+            if entity is None or other_entity is None:
+                unknown_keyids = sorted(
+                    r["keyid"]
+                    for r, e in ((record, entity), (other, other_entity))
+                    if e is None
+                )
+                suspensions.append(
+                    {
+                        "reason": "unknown entity for keyid(s): {}".format(
+                            ", ".join(unknown_keyids)
+                        ),
+                        "steps": [dict(pair[0]), dict(pair[1])],
+                    }
+                )
+                continue
+
+            if entity != other_entity:
+                continue
+
+            # Confirmed conflict: aggregate by the minimal step combination
+            # and keep all of the entity's signing identities as evidence
+            step_pair = tuple((r["layout"], r["step"]) for r in pair)
+            conflict_key = (entity, step_pair)
+            conflict = conflicts.setdefault(
+                conflict_key,
+                {
+                    "entity": entity,
+                    "steps": [
+                        {
+                            "layout": pair[0]["layout"],
+                            "step": pair[0]["step"],
+                            "keyids": [],
+                        },
+                        {
+                            "layout": pair[1]["layout"],
+                            "step": pair[1]["step"],
+                            "keyids": [],
+                        },
+                    ],
+                },
+            )
+            for step_evidence, pair_record in zip(conflict["steps"], pair):
+                if pair_record["keyid"] not in step_evidence["keyids"]:
+                    step_evidence["keyids"].append(pair_record["keyid"])
+
+    if conflicts:
+        conflict_list = list(conflicts.values())
+        message_parts = [
+            "Separation of duties violation: "
+            "entity '{}' signed steps '{}' ({}) and '{}' ({}) in different "
+            "layouts.".format(
+                conflict["entity"],
+                conflict["steps"][0]["step"],
+                conflict["steps"][0]["layout"],
+                conflict["steps"][1]["step"],
+                conflict["steps"][1]["layout"],
+            )
+            for conflict in conflict_list
+        ]
+        raise SeparationOfDutiesError(
+            " ".join(message_parts),
+            conflicts=conflict_list,
+            suspensions=suspensions,
+        )
+
+    return suspensions
 
 
 def get_summary_link(layout, reduced_chain_link_dict, name):
@@ -1489,6 +1698,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    signing_evidence=None,
+    layout_path="",
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1547,6 +1758,19 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      signing_evidence (optional): A list to collect, for each validly signed
+          link of this layout and all (nested) sublayouts, a record with the
+          original step name, the layout path and the actual signing identity
+          (keyid). After regular verification passed, the collected evidence
+          can be checked for cross-layout separation of duties with
+          `verify_cross_layout_separation_of_duties`, using an offline
+          provided entity map.
+
+      layout_path (optional): A path identifying this layout in a (possibly
+          nested) layout hierarchy, used for the records appended to
+          `signing_evidence`. Defaults to `step_name`, or "<root>" for the
+          top-level layout.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1600,12 +1824,21 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     LOG.info("Reading link metadata files...")
     steps_metadata = load_links_for_layout(layout, link_dir_path)
 
+    current_layout_path = layout_path or step_name or "<root>"
+
     LOG.info("Verifying link metadata signatures...")
-    steps_metadata = verify_link_signature_thresholds(layout, steps_metadata)
+    steps_metadata = verify_link_signature_thresholds(
+        layout, steps_metadata, signing_evidence, current_layout_path
+    )
 
     LOG.info("Verifying sublayouts...")
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout,
+        steps_metadata,
+        link_dir_path,
+        inspect_timeout,
+        signing_evidence,
+        current_layout_path,
     )
 
     LOG.info("Verifying alignment of reported commands...")
