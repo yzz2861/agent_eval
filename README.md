@@ -315,11 +315,17 @@ defuse_stdlib() (*experimental*)
 **NOTE** `defusedxml.cElementTree` is deprecated and will be removed in
 a future release. Import from `defusedxml.ElementTree` instead.
 
-parse(), iterparse(), fromstring(), XMLParser
+parse(), iterparse(), fromstring(), XMLParser, XMLPullParser
 
 ### defusedxml.ElementTree
 
-parse(), iterparse(), fromstring(), XMLParser
+parse(), iterparse(), fromstring(), XMLParser, XMLPullParser
+
+XMLPullParser.feed() stages a bounded prefix, read_events() publishes ready
+events, and flush() releases events deferred by Expat. close() is the
+document-completion boundary; progress exposes (bytes, events, complete).
+iterparse() closes only a source it opened itself and provides close() and
+the context-manager protocol for deterministic early exit.
 
 ### defusedxml.expatreader
 
@@ -327,7 +333,14 @@ create_parser(), DefusedExpatParser
 
 ### defusedxml.sax
 
-parse(), parseString(), make_parser()
+parse(), parseString(), make_parser(), IncrementalReader
+
+IncrementalReader.stage(data) feeds bounded chunks and publishes SAX events
+to the application handler immediately. finish() is the completion boundary
+and emits endDocument once; close() is the application-exit boundary and
+leaves an incomplete document incomplete. A handler exception aborts the
+reader and propagates unchanged. from_source() closes only a filename it
+opened itself and leaves caller-provided streams open.
 
 ### defusedxml.expatbuilder
 
@@ -339,7 +352,15 @@ parse(), parseString()
 
 ### defusedxml.pulldom
 
-parse(), parseString()
+parse(), parseString(), DOMEventStream, Progress
+
+DOMEventStream provides explicit staging and publication boundaries.
+stage(data) feeds a bounded chunk, publish() returns the next event, and
+finish() declares end of input and runs the final parser checks. Only after
+a successful finish() does commit() return the staged document. A successful
+parse publishes END_DOCUMENT exactly once. parse() closes only sources it
+opened itself; caller-provided streams remain open, including when iteration
+exits early.
 
 ### defusedxml.xmlrpc
 

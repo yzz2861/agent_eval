@@ -3,6 +3,7 @@ from __future__ import print_function
 import io
 import os
 import sys
+import tempfile
 import unittest
 import warnings
 from unittest import mock
@@ -579,6 +580,236 @@ class TestDefusedGzip(DefusedTestCase):
             self.decode_response(response, 4095, 8192)
 
 
+class TestPullParserBoundaries(DefusedTestCase):
+    def test_defused_pull_parser(self):
+        parser = ElementTree.XMLPullParser(events=("start", "end"))
+        with self.assertRaises(EntitiesForbidden):
+            parser.feed(b'<!DOCTYPE root [<!ENTITY a "b">]><root>&a;</root>')
+
+    def test_stage_publish_and_completion(self):
+        parser = ElementTree.XMLPullParser(events=("start", "end"))
+        parser.feed(b"<root>")
+        parser.flush()
+        first = [(event, elem.tag) for event, elem in parser.read_events()]
+        self.assertEqual(first, [("start", "root")])
+        self.assertEqual(parser.progress[1], 1)
+        self.assertFalse(parser.complete)
+
+        parser.feed(b"<a/>")
+        parser.flush()
+        second = [(event, elem.tag) for event, elem in parser.read_events()]
+        self.assertEqual(second, [("start", "a"), ("end", "a")])
+
+        parser.feed(b"</root>")
+        parser.close()
+        final = [(event, elem.tag) for event, elem in parser.read_events()]
+        self.assertEqual(final, [("end", "root")])
+        self.assertEqual(list(parser.read_events()), [])
+        self.assertTrue(parser.complete)
+        self.assertTrue(parser.can_commit)
+        with self.assertRaises(ValueError):
+            parser.feed(b"<later/>")
+
+    def test_incomplete_pull_close_is_a_boundary(self):
+        parser = ElementTree.XMLPullParser(events=("start", "end"))
+        parser.feed(b"<root><a/>")
+        parser.flush()
+        list(parser.read_events())
+        with self.assertRaises(ElementTree.ParseError):
+            parser.close()
+
+    def test_iterparse_source_ownership(self):
+        data = b"<root><a/></root>"
+        caller_stream = io.BytesIO(data)
+        events = ElementTree.iterparse(caller_stream, events=("start", "end"))
+        self.assertEqual(next(events)[0], "start")
+        events.close()
+        self.assertFalse(caller_stream.closed)
+
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            os.write(fd, data)
+            os.close(fd)
+            events = ElementTree.iterparse(path, events=("start", "end"))
+            self.assertEqual(next(events)[0], "start")
+            owned = events._owned_source
+            self.assertIsNotNone(owned)
+            events.close()
+            self.assertTrue(owned.closed)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+class TestPulldomBoundaries(DefusedTestCase):
+    def test_end_document_at_every_buffer_size(self):
+        data = "<root><a/><b/></root>"
+        for bufsize in (1, 3, len(data), 4096):
+            events = pulldom.parseString(data)
+            events.bufsize = bufsize
+            names = [event for event, _ in events]
+            self.assertEqual(names.count(pulldom.END_DOCUMENT), 1)
+            self.assertEqual(names[-1], pulldom.END_DOCUMENT)
+            self.assertTrue(events.complete)
+            self.assertEqual(events.commit().documentElement.tagName, "root")
+
+    def test_source_ownership(self):
+        data = b"<root/>"
+        caller_stream = io.BytesIO(data)
+        events = pulldom.parse(caller_stream, bufsize=2)
+        list(events)
+        self.assertFalse(caller_stream.closed)
+
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            os.write(fd, data)
+            os.close(fd)
+            events = pulldom.parse(path, bufsize=2)
+            list(events)
+            self.assertTrue(events.stream.closed)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_stage_publish_progress_and_commit_boundary(self):
+        reader = pulldom.parseString("<root><a/><b/></root>")
+        reader.stage("<root>")
+        self.assertFalse(reader.can_commit)
+        with self.assertRaises(NotSupportedError):
+            reader.commit()
+
+        event, node = reader.publish()
+        self.assertEqual(event, pulldom.START_DOCUMENT)
+        self.assertEqual(reader.progress.events, 1)
+        self.assertGreaterEqual(reader.progress.pending, 1)
+
+        reader.stage("<a/>")
+        before = reader.progress
+        reader.stage("<b/></root>")
+        after = reader.progress
+        self.assertNotEqual(before.pending, after.pending)
+
+        reader.finish()
+        self.assertTrue(reader.complete)
+        self.assertTrue(reader.can_commit)
+        for _event, _node in list(reader):
+            pass
+        self.assertEqual(reader.commit().documentElement.tagName, "root")
+
+    def test_stand_in_parser_without_stream(self):
+        from xml.sax.xmlreader import AttributesImpl
+
+        class StandInParser(object):
+            def setContentHandler(self, handler):
+                self.handler = handler
+
+            def setFeature(self, name, value):
+                pass
+
+            def parse(self, unused):
+                handler = self.handler
+                handler.startDocument()
+                handler.startElement("root", AttributesImpl({}))
+                handler.endElement("root")
+                handler.endDocument()
+
+        events = pulldom.DOMEventStream(None, StandInParser(), 12)
+        names = [event for event, node in events]
+        self.assertEqual(names[-1], pulldom.END_DOCUMENT)
+        self.assertTrue(events.complete)
+
+    def test_early_exit_does_not_commit(self):
+        reader = pulldom.parseString("<root><a/></root>")
+        reader.publish()
+        reader.close()
+        self.assertFalse(reader.complete)
+        self.assertFalse(reader.can_commit)
+        with self.assertRaises(NotSupportedError):
+            reader.commit()
+
+
+class TestIncrementalSaxReader(DefusedTestCase):
+    def test_stage_and_finish_boundary(self):
+        seen = []
+
+        class Recorder(object):
+            def startDocument(self):
+                seen.append("startDocument")
+
+            def endDocument(self):
+                seen.append("endDocument")
+
+            def startElement(self, name, attrs):
+                seen.append(("start", name))
+
+            def endElement(self, name):
+                seen.append(("end", name))
+
+            def characters(self, text):
+                seen.append(("text", text))
+
+        reader = sax.IncrementalReader(Recorder())
+        reader.stage(b"<root>")
+        first = reader.progress
+        self.assertFalse(reader.complete)
+        self.assertFalse(reader.can_commit)
+        reader.stage(b"<a/>")
+        second = reader.progress
+        self.assertNotEqual(first[1], second[1])
+        reader.stage(b"</root>")
+        reader.finish()
+        self.assertTrue(reader.complete)
+        self.assertTrue(reader.can_commit)
+        self.assertEqual(seen[-1], "endDocument")
+        self.assertEqual([item for item in seen if item == "endDocument"], ["endDocument"])
+
+    def test_handler_exit_propagates_and_closes_owned_source(self):
+        class Boom(Exception):
+            pass
+
+        class Recorder(object):
+            def startElement(self, name, attrs):
+                raise Boom()
+
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            os.write(fd, b"<root/>")
+            os.close(fd)
+            with self.assertRaises(Boom):
+                sax.IncrementalReader.from_source(path, Recorder(), bufsize=2)
+            os.unlink(path)
+            path = None
+        finally:
+            if path is not None:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    def test_from_source_ownership(self):
+        data = b"<root/>"
+        caller_stream = io.BytesIO(data)
+        reader = sax.IncrementalReader.from_source(caller_stream, bufsize=2)
+        self.assertTrue(reader.complete)
+        self.assertFalse(caller_stream.closed)
+
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            os.write(fd, data)
+            os.close(fd)
+            reader = sax.IncrementalReader.from_source(path, bufsize=2)
+            self.assertTrue(reader.complete)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def test_main():
     suite = unittest.TestSuite()
     cls = [
@@ -588,6 +819,9 @@ def test_main():
         TestDefusedMinidomWithParser,
         TestDefusedPulldom,
         TestDefusedSax,
+        TestPullParserBoundaries,
+        TestPulldomBoundaries,
+        TestIncrementalSaxReader,
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,

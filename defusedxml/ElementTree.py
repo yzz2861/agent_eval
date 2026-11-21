@@ -3,16 +3,18 @@
 # Copyright (c) 2013-2020 by Christian Heimes <christian@python.org>
 # Licensed to PSF under a Contributor Agreement.
 # See https://www.python.org/psf/license for licensing details.
-"""Defused xml.etree.ElementTree facade
-"""
+"""Defused xml.etree.ElementTree facade"""
+
 from __future__ import print_function, absolute_import
 
 import sys
 import warnings
+from collections import namedtuple
 from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import TreeBuilder as _TreeBuilder
 from xml.etree.ElementTree import parse as _parse
 from xml.etree.ElementTree import tostring
+from xml.etree.ElementTree import XMLPullParser as _XMLPullParser
 
 import importlib
 
@@ -52,15 +54,18 @@ def _get_py3_cls():
 
     _XMLParser = pure_pymod.XMLParser
     _iterparse = pure_pymod.iterparse
+    _pullparser = getattr(pure_pymod, "XMLPullParser", None) or _XMLPullParser
     # patch pure module to use ParseError from C extension
     pure_pymod.ParseError = ParseError
 
-    return _XMLParser, _iterparse
+    return _XMLParser, _iterparse, _pullparser
 
 
-_XMLParser, _iterparse = _get_py3_cls()
+_XMLParser, _iterparse, _pure_XMLPullParser = _get_py3_cls()
 
 _sentinel = object()
+
+Progress = namedtuple("Progress", "bytes events complete")
 
 
 class DefusedXMLParser(_XMLParser):
@@ -114,6 +119,75 @@ class DefusedXMLParser(_XMLParser):
         raise ExternalReferenceForbidden(context, base, sysid, pubid)
 
 
+class DefusedXMLPullParser(_pure_XMLPullParser):
+    # Defused incremental pull parser.  feed() stages a bounded prefix and
+    # read_events() publishes ready events.  flush() publishes events that
+    # Expat still holds for reparse deferral, while close() is the document
+    # completion boundary.
+    def __init__(
+        self,
+        events=None,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+        target=None,
+        encoding=None,
+        _parser=None,
+    ):
+        if _parser is None:
+            parser = DefusedXMLParser(
+                target=target if target is not None else _TreeBuilder(),
+                encoding=encoding,
+                forbid_dtd=forbid_dtd,
+                forbid_entities=forbid_entities,
+                forbid_external=forbid_external,
+            )
+        else:
+            parser = _parser
+        self.bytes_read = 0
+        self.events_read = 0
+        parent = _pure_XMLPullParser
+        try:
+            parent.__init__(self, events=events, _parser=parser)
+        except TypeError:  # older pull-parser signatures
+            parent.__init__(self, events=events)
+            self._parser = parser
+            if events is None:
+                events = ("end",)
+            parser._setevents(self._events_queue, events)
+
+    @property
+    def complete(self):
+        # XMLPullParser releases its parser only after close() succeeded.
+        # A queued syntax exception means read_events() has not yet reported
+        # the failure, so the document is not committable.
+        if self._parser is not None:
+            return False
+        return not any(isinstance(event, Exception) for event in self._events_queue)
+
+    @property
+    def can_commit(self):
+        return self.complete
+
+    @property
+    def progress(self):
+        return Progress(self.bytes_read, self.events_read, self.complete)
+
+    def feed(self, data):
+        if data and not self.complete:
+            self.bytes_read += len(data)
+        return _pure_XMLPullParser.feed(self, data)
+
+    def read_events(self):
+        events = _pure_XMLPullParser.read_events(self)
+        for event in events:
+            self.events_read += 1
+            yield event
+
+
+XMLPullParser = DefusedXMLPullParser
+
+
 # aliases
 # XMLParse is a typo, keep it for backwards compatibility
 XMLTreeBuilder = XMLParse = XMLParser = DefusedXMLParser
@@ -130,6 +204,70 @@ def parse(source, parser=None, forbid_dtd=False, forbid_entities=True, forbid_ex
     return _parse(source, parser)
 
 
+class _IterParseHandle:
+    # Iterator wrapper with deterministic input-source ownership.  Only a
+    # source opened by iterparse() is closed; a caller stream is never closed.
+    def __init__(self, iterator, owned_source=None):
+        self._iterator = iterator
+        self._owned_source = owned_source
+        self._closed = False
+        self._exhausted = False
+        self.events = 0
+
+    @property
+    def root(self):
+        return getattr(self._iterator, "root", None)
+
+    @property
+    def complete(self):
+        return self._exhausted
+
+    @property
+    def progress(self):
+        return (self.events, self._exhausted)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        try:
+            event = next(self._iterator)
+        except StopIteration:
+            self._exhausted = True
+            self.close()
+            raise
+        except BaseException:
+            self.close()
+            raise
+        else:
+            self.events += 1
+            return event
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        source = self._owned_source
+        self._owned_source = None
+        if source is not None:
+            source.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def iterparse(
     source,
     events=None,
@@ -138,6 +276,14 @@ def iterparse(
     forbid_entities=True,
     forbid_external=True,
 ):
+    # A filename or path is opened and closed here.  A caller-owned stream is
+    # never closed, whether iteration completes, raises, or exits early.
+    # Events are consumed in bounded chunks; close() (or exhaustion) is the
+    # document-completion boundary.
+    owned_source = None
+    if not hasattr(source, "read"):
+        owned_source = open(source, "rb")
+        source = owned_source
     if parser is None:
         parser = DefusedXMLParser(
             target=_TreeBuilder(),
@@ -145,7 +291,13 @@ def iterparse(
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
         )
-    return _iterparse(source, events, parser)
+    try:
+        iterator = _iterparse(source, events, parser)
+    except BaseException:
+        if owned_source is not None:
+            owned_source.close()
+        raise
+    return _IterParseHandle(iterator, owned_source)
 
 
 def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=True):
@@ -176,12 +328,15 @@ def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_exte
 
 __all__ = [
     "ParseError",
+    "Progress",
     "XML",
     "XMLParse",
     "XMLParser",
+    "XMLPullParser",
     "XMLTreeBuilder",
     "fromstring",
     "fromstringlist",
+    "DefusedXMLPullParser",
     "iterparse",
     "parse",
     "tostring",

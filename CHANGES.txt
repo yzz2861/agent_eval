@@ -8,6 +8,12 @@ defusedxml 0.8.0
 
 - Fix testing without lxml
 - Test on 3.13-dev and PyPy 3.9
+- Add defusedxml.ElementTree.XMLPullParser and explicit source ownership
+  for iterparse().
+- Give defusedxml.pulldom.DOMEventStream staging, publication and completion
+  boundaries, publish END_DOCUMENT once, and close only owned input sources.
+- Add defusedxml.sax.IncrementalReader for bounded SAX staging with explicit
+  handler-exit, completion and source-ownership semantics.
 
 
 defusedxml 0.8.0rc2
