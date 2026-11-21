@@ -1,0 +1,123 @@
+[build-system]
+requires = ["flit_core >=3.2,<5"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "pip_audit"
+dynamic = ["version"]
+description = "A tool for scanning Python environments for known vulnerabilities"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Alex Cameron" },
+    { name = "Dustin Ingram", email = "di@python.org" },
+    { name = "William Woodruff", email = "william@trailofbits.com" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
+dependencies = [
+    "CacheControl[filecache] >= 0.13.0",
+    "cyclonedx-python-lib >= 5,< 12",
+    "packaging>=23.0.0",                 # https://github.com/pypa/pip-audit/issues/464
+    "pip-api>=0.0.28",
+    "pip-requirements-parser>=32.0.0",
+    "requests >= 2.31.0",
+    "rich >= 12.4",
+    "tomli >= 2.2.1",
+    "tomli-w >= 1.2.0",
+    "platformdirs >= 4.2.0",
+]
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+cov = [
+    "coverage[toml] ~= 7.0, != 7.3.3", # https://github.com/nedbat/coveragepy/issues/1713
+]
+test = ["pretend", "pytest", "pip-audit[cov]"]
+lint = [
+    "ruff >= 0.14",
+    "interrogate ~= 1.6",
+    "mypy",
+    "types-requests",
+    "types-toml",
+    "typos",
+]
+doc = ["pdoc"]
+dev = ["build", "pip-audit[doc,test,lint]"]
+
+[project.scripts]
+pip-audit = "pip_audit._cli:audit"
+
+[project.urls]
+Homepage = "https://pypi.org/project/pip-audit/"
+Issues = "https://github.com/pypa/pip-audit/issues"
+Source = "https://github.com/pypa/pip-audit"
+
+[tool.coverage.paths]
+# This is used for path mapping when combining coverage data
+# from multiple machines. The first entry is the local path,
+# and subsequent entries are the remote paths that get remapped
+# to the local path.
+# See: https://coverage.readthedocs.io/en/latest/config.html#paths
+source = ["pip_audit", "*/pip_audit", "*\\pip_audit"]
+
+[tool.coverage.run]
+source = ["pip_audit"]
+parallel = true
+relative_files = true
+
+[tool.interrogate]
+# don't enforce documentation coverage for packaging, testing, the virtual
+# environment, or the CLI (which is documented separately).
+exclude = ["env", "test", "pip_audit/_cli.py"]
+ignore-semiprivate = true
+fail-under = 100
+
+[tool.mypy]
+allow_redefinition = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+show_error_codes = true
+sqlite_cache = true
+strict_equality = true
+warn_no_return = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[tool.bump]
+input = "pip_audit/__init__.py"
+reset = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",        # pycodestyle (errors)
+    "W",        # pycodestyle (warnings)
+    "F",        # pyflakes
+    "I",        # isort (imports ordering)
+    "UP",       # pyupgrade
+    "C4",       # comprehensions
+    "PERF",     # perflint
+]
+
+# Never enforce `E501` (line length violations).
+ignore = ["E501"]
