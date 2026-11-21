@@ -276,5 +276,88 @@ class FileHandleCloseTest(unittest.TestCase):
     #     self.assertTrue(file_handle.closed)
 
 
+class TestForensicSession(unittest.TestCase):
+    def setUp(self):
+        self.ole_file = u'tests/images/test-ole-file.doc'
+        self.copy_file = u'tests/images/test-ole-file-forensic.doc'
+        if os.path.isfile(self.copy_file):
+            os.remove(self.copy_file)
+        copy2(self.ole_file, self.copy_file)
+        self.ole = olefile.OleFileIO(self.copy_file, write_mode=True)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.ole.close()
+        if os.path.isfile(self.copy_file):
+            os.remove(self.copy_file)
+
+    def test_completed_write_keeps_old_snapshot(self):
+        session = self.ole.forensic_session()
+        name = u'worddocument'
+        old = session.openstream(name)
+        original = old.read()
+        old.seek(0)
+        new_data = b'X' * len(original)
+        session.write_stream(name, new_data)
+        self.assertEqual(old.read(), original)
+        self.assertTrue(old.is_stale)
+        self.assertTrue(old.needs_reopen)
+        self.assertFalse(session.can_reuse(old))
+        fresh = session.openstream(name)
+        self.assertEqual(fresh.read(), new_data)
+        self.assertEqual(fresh.generation, 1)
+        self.assertTrue(fresh.is_current)
+
+    def test_interrupted_write_rolls_back(self):
+        session = self.ole.forensic_session()
+        name = u'worddocument'
+        old = session.openstream(name)
+        original = old.read()
+        old.seek(0)
+        original_write_sect = self.ole.write_sect
+        calls = [0]
+
+        def interrupted_write_sect(sect, data, padding=b'\x00'):
+            if calls[0]:
+                raise RuntimeError('injected interruption')
+            calls[0] += 1
+            return original_write_sect(sect, data, padding=padding)
+
+        self.ole.write_sect = interrupted_write_sect
+        self.addCleanup(setattr, self.ole, 'write_sect', original_write_sect)
+        with self.assertRaises(RuntimeError):
+            session.write_stream(name, b'Y' * len(original))
+        self.assertTrue(session.last_write_interrupted)
+        self.assertTrue(session.last_rollback_succeeded)
+        self.assertEqual(session.generation, 0)
+        old.seek(0)
+        self.assertEqual(old.read(), original)
+        self.assertTrue(old.is_current)
+        self.assertEqual(session.openstream(name).read(), original)
+
+    def test_interrupted_mini_stream_write_rolls_back(self):
+        session = self.ole.forensic_session()
+        name = u'\x01compobj'
+        old = session.openstream(name)
+        original = old.read()
+        old.seek(0)
+        original_write = self.ole._write_mini_sect
+        calls = [0]
+
+        def interrupted_write(fp_pos, data, padding=b'\x00'):
+            if calls[0]:
+                raise RuntimeError('injected mini interruption')
+            calls[0] += 1
+            return original_write(fp_pos, data, padding=padding)
+
+        self.ole._write_mini_sect = interrupted_write
+        self.addCleanup(setattr, self.ole, '_write_mini_sect', original_write)
+        with self.assertRaises(RuntimeError):
+            session.write_stream(name, b'Z' * len(original))
+        old.seek(0)
+        self.assertEqual(old.read(), original)
+        self.assertEqual(session.openstream(name).read(), original)
+
+
 if __name__ == '__main__':
     unittest.main()

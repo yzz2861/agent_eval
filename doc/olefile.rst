@@ -16,6 +16,9 @@ Summary
     olefile.isOleFile
     olefile.OleFileIO
     olefile.OleMetadata
+    olefile.ForensicSession
+    olefile.ForensicStream
+    olefile.open_forensic_session
     olefile.enable_logging
 
 

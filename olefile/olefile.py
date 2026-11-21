@@ -98,7 +98,11 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'ForensicSession', 'ForensicStream',
+           'ForensicSessionError', 'ForensicSessionClosed',
+           'StaleForensicStream', 'ForensicWriteInterrupted',
+           'open_forensic_session', 'OleForensicSession',
+           'ForensicReadSession'
 ]
 
 import io
@@ -577,6 +581,43 @@ class OleFileIONotClosed(RuntimeWarning):
             return msg
 
 
+class ForensicSessionError(OleFileError):
+    """Base class for errors raised by :class:`ForensicSession`."""
+
+
+class ForensicSessionClosed(ForensicSessionError):
+    """Raised when a forensic session is used after it was closed."""
+
+
+class StaleForensicStream(ForensicSessionError):
+    """
+    Raised when a reader opened before a committed write is treated as a
+    view of the current contents of the container.
+
+    The stream itself is still readable: it retains the bytes it observed
+    when it was opened.  The error only means that it must be reopened to
+    observe the current contents.
+    """
+
+
+class ForensicWriteInterrupted(ForensicSessionError):
+    """
+    Describes an interrupted write.
+
+    The original exception is re-raised by the session so that callers keep
+    seeing the failure which actually interrupted the write.  This class is
+    exposed for code which wants to annotate or inspect that failure.  Its
+    ``rollback_succeeded`` attribute states whether the on-disk image was
+    restored.
+    """
+
+    def __init__(self, message, original_exception=None,
+                 rollback_succeeded=True):
+        super(ForensicWriteInterrupted, self).__init__(message)
+        self.original_exception = original_exception
+        self.rollback_succeeded = rollback_succeeded
+
+
 # --- OleStream ---------------------------------------------------------------
 
 class OleStream(io.BytesIO):
@@ -599,7 +640,9 @@ class OleStream(io.BytesIO):
     # the fat chain, and load new sectors on demand instead of
     # loading it all in one go.
 
-    def __init__(self, fp, sect, size, offset, sectorsize, fat, filesize, olefileio):
+    def __init__(self, fp, sect, size, offset, sectorsize, fat, filesize, olefileio,
+                 forensic_session=None, forensic_path=None,
+                 forensic_generation=None):
         """
         Constructor for OleStream class.
 
@@ -617,6 +660,9 @@ class OleStream(io.BytesIO):
         log.debug('  sect=%d (%X), size=%d, offset=%d, sectorsize=%d, len(fat)=%d, fp=%s'
             %(sect,sect,size,offset,sectorsize,len(fat), repr(fp)))
         self.ole = olefileio
+        self._forensic_session = forensic_session
+        self._forensic_path = forensic_path
+        self._forensic_generation = forensic_generation
         # this check is necessary, otherwise when attempting to open a stream
         # from a closed OleFileIO, a stream of size zero is returned without
         # raising an exception. (see issue #81)
@@ -725,6 +771,82 @@ class OleStream(io.BytesIO):
         # when all data is read in memory, BytesIO constructor is called
         io.BytesIO.__init__(self, data)
         # Then the OleStream object can be used as a read-only file object.
+
+    @property
+    def forensic_session(self):
+        """The :class:`ForensicSession` which opened this stream, or None."""
+        return self._forensic_session
+
+    @property
+    def forensic_path(self):
+        """Path of this stream, for streams opened by a forensic session."""
+        return self._forensic_path
+
+    @property
+    def generation(self):
+        """Container generation observed when this stream was opened."""
+        return self._forensic_generation
+
+    @property
+    def is_current(self):
+        """
+        True if this snapshot still describes the session's current image.
+
+        The bytes in this object never change.  After a committed write the
+        old object remains readable but is stale; reopen it to observe the
+        new contents.  An interrupted write does not advance the generation,
+        so an old object stays current.
+        """
+        if self._forensic_session is None:
+            return True
+        return self._forensic_session.is_current(self)
+
+    @property
+    def is_stale(self):
+        """Inverse of :attr:`is_current`."""
+        return not self.is_current
+
+    @property
+    def needs_reopen(self):
+        """True when this object must be reopened to see current contents."""
+        return self.is_stale
+
+    requires_reopen = needs_reopen
+    reopen_required = needs_reopen
+    stale = is_stale
+    snapshot_generation = generation
+
+    def assert_current(self):
+        """
+        Raise :class:`StaleForensicStream` if this snapshot is stale.
+
+        This does not make the snapshot unreadable or destroy the evidence
+        it contains; it only prevents using it as a view of an image which
+        has since been committed to disk.
+        """
+        if self.is_stale:
+            raise StaleForensicStream(
+                "stream %r was opened before a committed write; "
+                "close and reopen it to read the current image"
+                % (self._forensic_path,))
+        return self
+
+    def reopen(self):
+        """Close this snapshot and open a fresh stream from its session."""
+        if self._forensic_session is None:
+            raise ForensicSessionError(
+                "this stream was not opened through a ForensicSession")
+        return self._forensic_session.reopen(self)
+
+
+class ForensicStream(OleStream):
+    """
+    An immutable reader snapshot opened through a :class:`ForensicSession`.
+
+    It has the same file-like API as :class:`OleStream`.  The bytes held by
+    the object are the bytes observed at open time, independently of later
+    in-place edits in the container.
+    """
 
 
 # --- OleDirectoryEntry -------------------------------------------------------
@@ -1839,7 +1961,8 @@ class OleFileIO:
         """
         self.root.dump()
 
-    def _open(self, start, size = UNKNOWN_SIZE, force_FAT=False):
+    def _open(self, start, size = UNKNOWN_SIZE, force_FAT=False,
+              stream_class=OleStream, stream_kwargs=None):
         """
         Open a stream, either in FAT or MiniFAT according to its size.
         (openstream helper)
@@ -1848,7 +1971,11 @@ class OleFileIO:
         :param size: size of stream (or nothing if size is unknown)
         :param force_FAT: if False (default), stream will be opened in FAT or MiniFAT
             according to size. If True, it will always be opened in FAT.
+        :param stream_class: class used to build the returned stream object.
+        :param stream_kwargs: optional extra keyword arguments for stream_class.
         """
+        if stream_kwargs is None:
+            stream_kwargs = {}
         log.debug('OleFileIO.open(): sect=%Xh, size=%d, force_FAT=%s' %
             (start, size, str(force_FAT)))
         # stream size is compared to the mini_stream_cutoff_size threshold:
@@ -1864,17 +1991,17 @@ class OleFileIO:
                     (self.root.isectStart, size_ministream))
                 self.ministream = self._open(self.root.isectStart,
                     size_ministream, force_FAT=True)
-            return OleStream(fp=self.ministream, sect=start, size=size,
-                             offset=0, sectorsize=self.minisectorsize,
-                             fat=self.minifat, filesize=self.ministream.size,
-                             olefileio=self)
+            return stream_class(fp=self.ministream, sect=start, size=size,
+                                offset=0, sectorsize=self.minisectorsize,
+                                fat=self.minifat, filesize=self.ministream.size,
+                                olefileio=self, **stream_kwargs)
         else:
             # standard stream
-            return OleStream(fp=self.fp, sect=start, size=size,
-                             offset=self.sectorsize,
-                             sectorsize=self.sectorsize, fat=self.fat,
-                             filesize=self._filesize,
-                             olefileio=self)
+            return stream_class(fp=self.fp, sect=start, size=size,
+                                offset=self.sectorsize,
+                                sectorsize=self.sectorsize, fat=self.fat,
+                                filesize=self._filesize,
+                                olefileio=self, **stream_kwargs)
 
     def _list(self, files, prefix, node, streams=True, storages=False):
         """
@@ -1969,6 +2096,38 @@ class OleFileIO:
             raise IOError("this file is not a stream")
         return self._open(entry.isectStart, entry.size)
 
+    def forensic_session(self, write_mode=None):
+        """
+        Start an explicit forensic read/write session for this container.
+
+        The session opens streams as immutable snapshots.  A snapshot opened
+        before a successful equal-length edit keeps returning the original
+        bytes; after the edit it is marked as stale and must be reopened to
+        observe the new contents.  If an edit is interrupted, the write is
+        rolled back and the session generation is not advanced, so previously
+        opened snapshots remain current.
+
+        :param write_mode: optional bool, if not None require the container to
+            have been opened in the requested mode.
+        :returns: a :class:`ForensicSession`
+
+        The ordinary :meth:`openstream` and :meth:`write_stream` methods are
+        unchanged and can still be used without a session.
+        """
+        if write_mode is not None and bool(write_mode) != bool(self.write_mode):
+            raise ValueError(
+                "OLE file was opened with write_mode=%r, not %r"
+                % (self.write_mode, write_mode))
+        return ForensicSession(self)
+
+    def open_forensic_session(self, write_mode=None):
+        """Alias for :meth:`forensic_session`."""
+        return self.forensic_session(write_mode=write_mode)
+
+    def begin_forensic_session(self, write_mode=None):
+        """Alias for :meth:`forensic_session`."""
+        return self.forensic_session(write_mode=write_mode)
+
     def _write_mini_stream(self, entry, data_to_write):
         if not entry.sect_chain:
             entry.build_sect_chain(self)
@@ -1986,6 +2145,7 @@ class OleFileIO:
             else:
                 data_per_sector = data_to_write[idx * self.mini_sector_size:]
             self._write_mini_sect(fp_pos, data_per_sector)
+        self.ministream = None
 
     def write_stream(self, stream_name, data):
         """
@@ -2538,6 +2698,414 @@ class OleFileIO:
             return data
 
         return data
+
+
+class ForensicSession(object):
+    """
+    Explicit read/write session with immutable reader snapshots.
+
+    A session is the recommended API when a container is edited in place for
+    forensic purposes while reader objects opened earlier may still be in
+    use.  Streams opened through :meth:`openstream` are snapshots: they retain
+    the bytes observed when they were opened, no matter what happens to the
+    underlying file afterwards.
+
+    The session keeps a monotonically increasing ``generation``.  A completed
+    equal-length write advances it; old snapshots remain readable but report
+    ``is_current == False`` / ``needs_reopen == True``.  An interrupted write
+    restores the touched file image and does *not* advance the generation, so
+    the old snapshot is still current and a fresh read sees the original
+    contents.
+
+    ``openstream`` and ``write_stream`` on :class:`OleFileIO` are unchanged.
+    This class only adds the explicit snapshot policy when it is requested.
+    """
+
+    def __init__(self, ole, write_mode=None, close_ole=False):
+        """
+        Create a forensic session.
+
+        :param ole: an :class:`OleFileIO` instance, a filename, bytes
+            containing an OLE image, or a seekable file-like object.
+        :param write_mode: when opening a new container, open it read/write
+            if True (the default for new containers).  When ``ole`` is an
+            existing :class:`OleFileIO`, a non-None value is checked against
+            its current mode.
+        :param close_ole: if True, closing the session also closes a supplied
+            :class:`OleFileIO`.  Containers created by the session are always
+            closed with it.
+        """
+        if isinstance(ole, OleFileIO):
+            self.ole = ole
+            self._owns_ole = bool(close_ole)
+            if write_mode is not None and bool(write_mode) != bool(ole.write_mode):
+                raise ValueError(
+                    "OLE file was opened with write_mode=%r, not %r"
+                    % (ole.write_mode, write_mode))
+        else:
+            if write_mode is None:
+                write_mode = True
+            self.ole = OleFileIO(ole, write_mode=write_mode)
+            self._owns_ole = True
+
+        self._closed = False
+        self._generation = 0
+        self._writing = False
+        self._last_interrupted = False
+        self._last_error = None
+        self._last_rollback_succeeded = None
+        self._last_backup = None
+
+    def __getattr__(self, name):
+        if name.startswith('_') or name == 'ole':
+            raise AttributeError(name)
+        return getattr(self.ole, name)
+
+    def __enter__(self):
+        self._check_open()
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __del__(self):
+        try:
+            if self._owns_ole and not self._closed:
+                self.close()
+        except Exception:
+            pass
+
+    @property
+    def generation(self):
+        """Generation of the committed container image."""
+        return self._generation
+
+    @property
+    def revision(self):
+        """Alias for :attr:`generation`."""
+        return self._generation
+
+    @property
+    def epoch(self):
+        """Alias for :attr:`generation`."""
+        return self._generation
+
+    @property
+    def closed(self):
+        """True once :meth:`close` has been called."""
+        return self._closed
+
+    @property
+    def last_write_interrupted(self):
+        """True if the most recent write was interrupted and rolled back."""
+        return self._last_interrupted
+
+    @property
+    def last_error(self):
+        """Exception which interrupted the most recent write, or None."""
+        return self._last_error
+
+    @property
+    def last_rollback_succeeded(self):
+        """Result of the rollback for the most recent interrupted write."""
+        return self._last_rollback_succeeded
+
+    def _check_open(self):
+        if self._closed:
+            raise ForensicSessionClosed("forensic session is closed")
+        if self.ole.fp is None or getattr(self.ole.fp, 'closed', False):
+            raise ForensicSessionClosed(
+                "the OLE file underlying this forensic session is closed")
+
+    def is_current(self, stream):
+        """
+        Return True if ``stream`` was opened at the current generation.
+
+        This is about whether the snapshot still describes the current image;
+        stale snapshots remain readable and still contain their original
+        bytes.
+        """
+        if not isinstance(stream, OleStream):
+            return False
+        if getattr(stream, '_forensic_session', None) is not self:
+            return False
+        return getattr(stream, '_forensic_generation', None) == self._generation
+
+    def is_stale(self, stream):
+        """Inverse of :meth:`is_current`."""
+        return not self.is_current(stream)
+
+    def can_reuse(self, stream):
+        """
+        True if the snapshot may still be treated as the current image.
+
+        An interrupted write does not change the generation, so an old reader
+        remains reusable.  After a completed write the old reader must be
+        reopened for that purpose; it can still be read as the original
+        snapshot.
+        """
+        return self.is_current(stream)
+
+    def can_read_original(self, stream):
+        """True for any snapshot opened by this session; it never mutates."""
+        return (isinstance(stream, OleStream)
+                and getattr(stream, '_forensic_session', None) is self)
+
+    def openstream(self, filename):
+        """
+        Open an immutable stream snapshot at the current generation.
+
+        :param filename: stream path, using the same syntax as
+            :meth:`OleFileIO.openstream`.
+        :returns: :class:`ForensicStream`
+        """
+        self._check_open()
+        if isinstance(filename, basestring):
+            path = filename
+        else:
+            path = '/'.join(filename)
+        if self._last_interrupted and self._last_backup is not None:
+            return self._openstream_from_image(filename, path)
+        sid = self.ole._find(filename)
+        entry = self.ole.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            raise IOError("this file is not a stream")
+        return self.ole._open(
+            entry.isectStart, entry.size,
+            stream_class=ForensicStream,
+            stream_kwargs=dict(
+                forensic_session=self,
+                forensic_path=path,
+                forensic_generation=self._generation,
+            ))
+
+    def _openstream_from_image(self, filename, path):
+        """Open a snapshot from the before-image of an interrupted write."""
+        before = self._last_backup[0]
+        image = OleFileIO(before)
+        try:
+            sid = image._find(filename)
+            entry = image.direntries[sid]
+            if entry.entry_type != STGTY_STREAM:
+                raise IOError("this file is not a stream")
+            return image._open(
+                entry.isectStart, entry.size,
+                stream_class=ForensicStream,
+                stream_kwargs=dict(
+                    forensic_session=self,
+                    forensic_path=path,
+                    forensic_generation=self._generation,
+                ))
+        finally:
+            image.close()
+            if image.fp is not None:
+                image.fp.close()
+
+    def _snapshot_fp(self):
+        fp = self.ole.fp
+        pos = fp.tell()
+        try:
+            fp.seek(0)
+            data = fp.read()
+        finally:
+            fp.seek(pos)
+        return data, pos
+
+    def _restore_fp(self, data, pos):
+        """Restore a full before-image, including on partial writes."""
+        fp = self.ole.fp
+        try:
+            fp.seek(0)
+            fp.write(data)
+            try:
+                fp.truncate(len(data))
+            except Exception:
+                pass
+            try:
+                fp.flush()
+            except Exception:
+                pass
+            fp.seek(pos)
+            return True
+        except BaseException:
+            try:
+                fd = fp.fileno()
+                if hasattr(os, 'pwrite'):
+                    os.pwrite(fd, data, 0)
+                    try:
+                        fp.flush()
+                    except Exception:
+                        pass
+                    fp.seek(pos)
+                    return True
+            except Exception:
+                pass
+            try:
+                if isinstance(fp, io.BytesIO):
+                    io.BytesIO.seek(fp, 0)
+                    io.BytesIO.write(fp, data)
+                    io.BytesIO.truncate(fp, len(data))
+                    io.BytesIO.seek(fp, pos)
+                    return True
+            except Exception:
+                pass
+            return False
+
+    def _run_write(self, writer, stream_name=None):
+        self._check_open()
+        if self._writing:
+            raise ForensicSessionError("a write is already in progress")
+        before, pos = self._snapshot_fp()
+        self._writing = True
+        try:
+            writer()
+        except BaseException as exc:
+            rollback_ok = self._restore_fp(before, pos)
+            self._last_interrupted = True
+            self._last_error = exc
+            self._last_rollback_succeeded = rollback_ok
+            self._last_backup = (before, pos, stream_name)
+            if not rollback_ok:
+                raise ForensicWriteInterrupted(
+                    "write to %r was interrupted and the before-image could "
+                    "not be restored" % (stream_name,),
+                    original_exception=exc,
+                    rollback_succeeded=False) from exc
+            raise
+        else:
+            self._generation += 1
+            if hasattr(self.ole, 'ministream'):
+                self.ole.ministream = None
+            self._last_interrupted = False
+            self._last_error = None
+            self._last_rollback_succeeded = None
+            self._last_backup = (before, pos, stream_name)
+        finally:
+            self._writing = False
+
+    def write_stream(self, stream_name, data):
+        """
+        Replace a stream with equal-length data as one atomic session write.
+
+        If the write or any sector operation raises, the container is restored
+        to its before-image and the exception is re-raised.  On success the
+        session generation advances exactly once.
+        """
+        self._check_open()
+        if not isinstance(data, bytes):
+            raise TypeError("write_stream: data must be a bytes string")
+        sid = self.ole._find(stream_name)
+        entry = self.ole.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            raise IOError("this is not a stream")
+        if entry.size != len(data):
+            raise ValueError(
+                "write_stream: data must be the same size as the existing stream")
+        self._run_write(
+            lambda: self.ole.write_stream(stream_name, data),
+            stream_name=stream_name,
+        )
+
+    open_stream = openstream
+    read_stream = openstream
+
+    def write_sect(self, sect, data, padding=b'\x00'):
+        """
+        Write one sector as an atomic session operation.
+
+        This is provided for forensic callers which need the raw sector API.
+        A successful call advances the generation, making all older snapshots
+        stale (they remain readable as their original bytes).
+        """
+        self._run_write(
+            lambda: self.ole.write_sect(sect, data, padding=padding),
+            stream_name='sector %r' % (sect,),
+        )
+
+    write = write_stream
+
+    def commit(self):
+        """
+        Return the current generation.
+
+        Session writes are applied atomically per call, so there is no
+        separate buffered transaction to flush.  This method exists as an
+        explicit checkpoint for callers which use a begin/commit style.
+        """
+        self._check_open()
+        return self._generation
+
+    def rollback(self):
+        """
+        Restore the before-image of the most recent session write, if any.
+
+        This is mainly useful after :meth:`commit`; interrupted writes are
+        already rolled back automatically.  Returns True if an image was
+        restored, False if there was nothing to roll back.
+        """
+        self._check_open()
+        if self._last_backup is None:
+            return False
+        before, pos, stream_name = self._last_backup
+        if not self._restore_fp(before, pos):
+            raise ForensicSessionError(
+                "could not restore the before-image")
+        self._last_backup = None
+        if hasattr(self.ole, 'ministream'):
+            self.ole.ministream = None
+        self._last_interrupted = False
+        self._last_error = None
+        self._last_rollback_succeeded = None
+        self._generation += 1
+        return True
+
+    abort = rollback
+    checkpoint = commit
+
+    def reopen(self, stream):
+        """
+        Close an old snapshot and open a fresh one from the same path.
+        """
+        self._check_open()
+        if isinstance(stream, (basestring, list, tuple)):
+            return self.openstream(stream)
+        if not isinstance(stream, OleStream):
+            raise TypeError("reopen requires a stream or a stream path")
+        path = getattr(stream, '_forensic_path', None)
+        if path is None:
+            raise ForensicSessionError(
+                "the stream was not opened through this forensic session")
+        stream.close()
+        return self.openstream(path)
+
+    def close(self):
+        """Close the session and any container it created."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_ole:
+            self.ole.close()
+
+
+def open_forensic_session(source, write_mode=None, **kwargs):
+    """
+    Convenience function returning a :class:`ForensicSession`.
+
+    ``source`` may be an existing :class:`OleFileIO` or anything accepted by
+    its constructor.  New path-backed containers are opened read/write by
+    default so the session can perform equal-length edits.
+    """
+    if isinstance(source, ForensicSession):
+        return source
+    if isinstance(source, OleFileIO):
+        return source.forensic_session(write_mode=write_mode)
+    if write_mode is None:
+        write_mode = True
+    return ForensicSession(source, write_mode=write_mode, **kwargs)
+
+
+OleForensicSession = ForensicSession
+ForensicReadSession = ForensicSession
 
 
 # --------------------------------------------------------------------

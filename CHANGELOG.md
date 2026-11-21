@@ -3,6 +3,11 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* unreleased:
+    - added ForensicSession / ForensicStream and open_forensic_session for explicit
+      immutable-reader sessions over in-place, equal-length edits
+    - forensic writes roll back to the before-image when interrupted, while the
+      existing openstream/write_stream API remains unchanged
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

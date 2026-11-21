@@ -344,6 +344,33 @@ For example, you may change text in a MS Word document:
 
 (new in v0.40)
 
+Forensic edit sessions
+----------------------
+
+When a container is edited in place while earlier readers may still be in use, open an explicit
+forensic session.  Streams opened through the session are immutable snapshots of the bytes read
+at open time:
+
+::
+
+    with olefile.open_forensic_session('copy.doc') as session:
+        old = session.openstream('WordDocument')
+        original = old.read()
+        session.write_stream('WordDocument', equal_length_replacement)
+
+        # old still contains the original bytes, but is stale:
+        assert old.read() == original
+        assert old.needs_reopen
+        fresh = old.reopen()
+        assert fresh.is_current
+
+A successful write_stream advances the session generation and makes older snapshots stale;
+they remain readable as evidence of the original bytes and must be reopened to observe the new
+contents.  If a write raises part-way through (for example between sectors), the session restores
+the before-image, does not advance the generation, and re-raises the original exception.  A fresh
+read after an interrupted write therefore still sees the original contents.  The existing
+OleFileIO.openstream and OleFileIO.write_stream methods are unchanged.
+
 Extract metadata
 ----------------
 
