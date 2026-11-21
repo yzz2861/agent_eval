@@ -5,9 +5,14 @@ Interfaces for formatting vulnerability results into a string representation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import pip_audit._fix as fix
 import pip_audit._service as service
+
+if TYPE_CHECKING:
+    from pip_audit._audit_cache import IncompleteDependency
 
 
 def vuln_id_url(vuln_id: str) -> str:
@@ -43,8 +48,12 @@ class VulnerabilityFormat(ABC):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        incomplete: Sequence[IncompleteDependency] = (),
     ) -> str:  # pragma: no cover
         """
         Convert a mapping of dependencies to vulnerabilities into a string.
+
+        `incomplete` contains dependencies that could not be queried or whose
+        query failed. Formats that support partial reports should render it.
         """
         raise NotImplementedError

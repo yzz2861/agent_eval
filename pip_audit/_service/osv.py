@@ -52,6 +52,14 @@ class OsvService(VulnerabilityService):
         self.timeout = timeout
         self.osv_url = osv_url
 
+    @property
+    def source_id(self) -> str:
+        """
+        A stable identity for this OSV endpoint.
+        """
+
+        return f"osv:{self.osv_url}"
+
     def query(self, spec: Dependency) -> tuple[Dependency, list[VulnerabilityResult]]:
         """
         Queries OSV for the given `Dependency` specification.

@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from itertools import zip_longest
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from packaging.version import Version
 
@@ -16,6 +16,9 @@ import pip_audit._fix as fix
 import pip_audit._service as service
 
 from .interface import VulnerabilityFormat, pypi_url, vuln_id_url
+
+if TYPE_CHECKING:
+    from pip_audit._audit_cache import IncompleteDependency
 
 _OSC8_RE = re.compile(r"\033]8;;[^\033]*\033\\")
 
@@ -77,6 +80,7 @@ class ColumnsFormat(VulnerabilityFormat):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        incomplete: Sequence[IncompleteDependency] = (),
     ) -> str:
         """
         Returns a column formatted string for a given mapping of dependencies to vulnerability

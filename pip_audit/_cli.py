@@ -550,8 +550,10 @@ def audit() -> None:  # pragma: no cover
         skip_count = 0
         vuln_ignore_count = 0
         vulns_to_ignore = set(args.ignore_vulns)
+        audit_results = None
         try:
-            for spec, vulns in auditor.audit(source):
+            audit_results = auditor.audit(source)
+            for spec, vulns in audit_results:
                 if spec.is_skipped():
                     spec = cast(SkippedDependency, spec)
                     if args.strict:
@@ -581,6 +583,22 @@ def audit() -> None:  # pragma: no cover
                 "Tip: your network may be blocking this service. "
                 "Try another service with `-s SERVICE`"
             )
+
+        incomplete = list(getattr(audit_results, "incomplete", []) or [])
+        if incomplete:
+            failed = sum(1 for item in incomplete if item.status.value == "failed")
+            unqueried = len(incomplete) - failed
+            print(
+                f"Audit incomplete: {failed} failed, {unqueried} not queried",
+                file=sys.stderr,
+            )
+            for item in incomplete:
+                version = f" ({item.version})" if item.version is not None else ""
+                reason = f": {item.reason}" if item.reason is not None else ""
+                print(
+                    f"  {item.name}{version}: {item.status.value}{reason}",
+                    file=sys.stderr,
+                )
 
         # If the `--fix` flag has been applied, find a set of suitable fix versions and upgrade the
         # dependencies at the source
@@ -613,6 +631,11 @@ def audit() -> None:  # pragma: no cover
                         fix = SkippedFixVersion(fix.dep, skip_reason)
                 fixes.append(fix)
 
+    def _format_result() -> str:
+        if incomplete:
+            return formatter.format(result, fixes, incomplete)
+        return formatter.format(result, fixes)
+
     if vuln_count > 0:
         if vuln_ignore_count:
             ignored = f", ignored {vuln_ignore_count}"
@@ -633,7 +656,7 @@ def audit() -> None:  # pragma: no cover
             )
         print(summary_msg, file=sys.stderr)
         with _output_io(args.output) as io:
-            print(formatter.format(result, fixes), file=io)
+            print(_format_result(), file=io)
         if pkg_count != fixed_pkg_count:
             sys.exit(1)
     else:
@@ -647,6 +670,8 @@ def audit() -> None:  # pragma: no cover
         )
         # If our output format is a "manifest" format we always emit it,
         # even if nothing other than a dependency summary is present.
-        if skip_count > 0 or formatter.is_manifest:
+        if skip_count > 0 or incomplete or formatter.is_manifest:
             with _output_io(args.output) as io:
-                print(formatter.format(result, fixes), file=io)
+                print(_format_result(), file=io)
+    if incomplete:
+        sys.exit(1)

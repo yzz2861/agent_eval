@@ -5,10 +5,12 @@ Functionality for formatting vulnerability results as an array of JSON objects.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pip_audit._fix as fix
 import pip_audit._service as service
+from pip_audit._audit_cache import IncompleteDependency
 
 from .interface import VulnerabilityFormat
 
@@ -43,6 +45,7 @@ class JsonFormat(VulnerabilityFormat):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        incomplete: Sequence[IncompleteDependency] = (),
     ) -> str:
         """
         Returns a JSON formatted string for a given mapping of dependencies to vulnerability
@@ -54,6 +57,8 @@ class JsonFormat(VulnerabilityFormat):
             "dependencies": [self._format_dep(dep, vulns) for dep, vulns in result.items()],
             "fixes": [self._format_fix(f) for f in fixes],
         }
+        if incomplete:
+            output_json["incomplete"] = [item.to_dict() for item in incomplete]
         return json.dumps(output_json)
 
     def _format_dep(

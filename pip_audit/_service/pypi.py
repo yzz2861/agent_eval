@@ -48,6 +48,14 @@ class PyPIService(VulnerabilityService):
         self.session = caching_session(cache_dir)
         self.timeout = timeout
 
+    @property
+    def source_id(self) -> str:
+        """
+        A stable identity for the PyPI vulnerability feed.
+        """
+
+        return "pypi"
+
     def query(self, spec: Dependency) -> tuple[Dependency, list[VulnerabilityResult]]:
         """
         Queries PyPI for the given `Dependency` specification.

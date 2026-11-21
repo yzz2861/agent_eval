@@ -27,6 +27,8 @@ from pip_audit._service.interface import (
 
 logger = logging.getLogger(__name__)
 
+_ADVISORY_URL = "https://advisories.ecosyste.ms/api/v1/advisories"
+
 
 class EcosystemsService(VulnerabilityService):
     """
@@ -51,13 +53,21 @@ class EcosystemsService(VulnerabilityService):
         self.session = caching_session(cache_dir, use_pip=False)
         self.timeout = timeout
 
+    @property
+    def source_id(self) -> str:
+        """
+        A stable identity for the Ecosyste.ms advisory feed.
+        """
+
+        return f"esms:{_ADVISORY_URL}"
+
     def query(self, spec: Dependency) -> tuple[Dependency, list[VulnerabilityResult]]:
         """
         Queries Ecosyste.ms for the given `Dependency` specification.
 
         See `VulnerabilityService.query`.
         """
-        url = "https://advisories.ecosyste.ms/api/v1/advisories"
+        url = _ADVISORY_URL
 
         if spec.is_skipped():
             return spec, []

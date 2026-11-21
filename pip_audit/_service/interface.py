@@ -157,6 +157,33 @@ class VulnerabilityService(ABC):
     Represents an abstract provider of Python package vulnerability information.
     """
 
+    _source_id: str | None = None
+
+    @property
+    def source_id(self) -> str:
+        """
+        A stable identity for this vulnerability source.
+
+        Resumable audit caches use this identity together with the query
+        conditions, so that a completed response from one source is never
+        reused for another source.
+        """
+
+        explicit = getattr(self, "_source_id", None)
+        if explicit is not None:
+            return str(explicit)
+
+        named = getattr(self, "source", None)
+        if named is not None:
+            return str(named)
+
+        service_type = type(self)
+        return f"{service_type.__module__}.{service_type.__qualname__}"
+
+    @source_id.setter
+    def source_id(self, value: str) -> None:
+        self._source_id = value
+
     @abstractmethod
     def query(
         self, spec: Dependency

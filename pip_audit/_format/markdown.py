@@ -4,8 +4,9 @@ Functionality for formatting vulnerability results as a Markdown table.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from textwrap import dedent
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from packaging.version import Version
 
@@ -13,6 +14,9 @@ import pip_audit._fix as fix
 import pip_audit._service as service
 
 from .interface import VulnerabilityFormat, pypi_url, vuln_id_url
+
+if TYPE_CHECKING:
+    from pip_audit._audit_cache import IncompleteDependency
 
 
 def _md_link(text: str, url: str) -> str:
@@ -50,6 +54,7 @@ class MarkdownFormat(VulnerabilityFormat):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        incomplete: Sequence[IncompleteDependency] = (),
     ) -> str:
         """
         Returns a Markdown formatted string representing a set of vulnerability results and applied

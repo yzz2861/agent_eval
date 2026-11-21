@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import enum
 import logging
-from typing import cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, cast
 
 from cyclonedx import output
 from cyclonedx.model.bom import Bom
@@ -17,6 +18,9 @@ import pip_audit._fix as fix
 import pip_audit._service as service
 
 from .interface import VulnerabilityFormat
+
+if TYPE_CHECKING:
+    from pip_audit._audit_cache import IncompleteDependency
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,7 @@ class CycloneDxFormat(VulnerabilityFormat):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        incomplete: Sequence[IncompleteDependency] = (),
     ) -> str:
         """
         Returns a CycloneDX formatted string for a given mapping of dependencies to vulnerability

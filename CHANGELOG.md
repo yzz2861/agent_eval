@@ -8,6 +8,14 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* Audits now support a resumable per-query cache. Completed responses are
+  reused only when the advisory source and query conditions match, while empty
+  responses, unqueried packages, and failed queries are recorded separately.
+  Partial audit reports include an `incomplete` list so callers can see which
+  packages still need to be audited.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
