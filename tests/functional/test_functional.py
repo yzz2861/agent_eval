@@ -274,6 +274,26 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("os-chmod.py", expect)
 
+    def test_file_permission_window(self):
+        """Test permission widening before an early publication."""
+        self.run_example("file-permission-window.py")
+        issues = [
+            issue
+            for issue in self.b_mgr.get_issue_list()
+            if issue.test_id == "B114"
+        ]
+        self.assertEqual([10, 17, 24, 34, 43], [i.lineno for i in issues])
+        self.assertEqual(
+            ["HIGH", "MEDIUM", "HIGH", "HIGH", "HIGH"],
+            [i.severity for i in issues],
+        )
+        self.assertEqual(
+            ["HIGH", "HIGH", "HIGH", "HIGH", "MEDIUM"],
+            [i.confidence for i in issues],
+        )
+        for issue in issues:
+            self.assertIn("does not undo the exposure", issue.text)
+
     def test_os_exec(self):
         """Test for `os.exec*`."""
         expect = {
