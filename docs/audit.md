@@ -263,3 +263,87 @@ $ detect-secrets audit --report --only-false .secret.baseline
     }
 ]
 ```
+
+## Distributing Results to Vendors
+
+Large reviews are often split between vendors that must not see files owned by the others. The
+vendor distribution modes use the same baseline as the normal audit command, but they
+export and merge data offline.
+
+### Assigning paths
+
+Create a JSON manifest that assigns repository-relative paths to vendors:
+
+```json
+{
+  "vendors": [
+    {
+      "id": "vendor-a",
+      "paths": ["services/accounts/", "shared/joint/"]
+    },
+    {
+      "id": "vendor-b",
+      "paths": ["services/payments/", "shared/joint/"]
+    }
+  ]
+}
+```
+
+A trailing slash, or a path that is a directory prefix, selects everything below that
+path. Globs are supported. Assignments may overlap: `shared/joint/` above is deliberately
+reviewed by both vendors so that contradictory conclusions can be surfaced. Use a different
+output directory for each baseline or manifest change.
+
+### Export
+
+```bash
+$ detect-secrets audit .secrets.baseline \
+    --vendor-manifest vendors.json \
+    --export-vendors vendor-exports/
+```
+
+This writes one `<vendor>.json` package per vendor and a master-only
+`master-state.json`. A vendor package contains:
+
+- only findings whose paths are assigned to that vendor;
+- no raw secret values and no source snippets;
+- the finding type, line number, opaque finding id, redacted status, and review state.
+
+Paths, scope, summary counts, and review metadata are all scoped to that vendor. Another
+vendor id, path, count, or conclusion is never included in the package.
+
+### Responding offline
+
+Vendors edit their own package and set `status` on each finding to one of
+`true_positive`, `false_positive`, or `unreviewed`. They can also set `signed_off`, `reviewer`,
+and `note`. The package `revision` must be kept when it is returned.
+
+```json
+{
+  "finding_id": "3f2d...",
+  "status": "false_positive",
+  "signed_off": true,
+  "reviewer": "vendor-a",
+  "note": "test fixture"
+}
+```
+
+### Merge and review conflicts
+
+```bash
+$ detect-secrets audit .secrets.baseline \
+    --merge-vendor-responses vendor-exports/vendor-a.json vendor-exports/vendor-b.json \
+    --vendor-state vendor-exports/master-state.json
+
+$ detect-secrets audit --report-conflicts \
+    --vendor-state vendor-exports/master-state.json
+```
+
+The merge output and `--report-conflicts` show both conclusions for a jointly reviewed
+finding. The accepted decision records which vendor it came from and whether it was signed
+off.
+
+Stale responses, or a response with an already-seen revision, are retained as late feedback
+but cannot become the accepted decision. A signed accepted version is immutable: later
+opposite feedback creates a conflict for the primary reviewer instead of replacing it. Use
+`--sign-off-accepted` after review to freeze the currently accepted decisions.

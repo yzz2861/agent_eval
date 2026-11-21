@@ -1,0 +1,18 @@
+{
+  "vendors": [
+    {
+      "id": "vendor-a",
+      "paths": [
+        "test_data/vendor_audit/shared/alpha/",
+        "test_data/vendor_audit/shared/joint/"
+      ]
+    },
+    {
+      "id": "vendor-b",
+      "paths": [
+        "test_data/vendor_audit/shared/beta/",
+        "test_data/vendor_audit/shared/joint/"
+      ]
+    }
+  ]
+}

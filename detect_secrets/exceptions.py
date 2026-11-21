@@ -28,3 +28,8 @@ class NoLineNumberError(Exception):
             'for auditing secret occurrences. Try recreating your baseline to fix '
             'this issue.',
         )
+
+
+class VendorDistributionError(ValueError):
+    # Raised when vendor distribution input is unsafe to process.
+    pass

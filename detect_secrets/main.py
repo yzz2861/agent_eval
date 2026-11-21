@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from typing import List
 from typing import Optional
@@ -29,7 +30,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.action == 'scan':
         handle_scan_action(args)
     elif args.action == 'audit':
-        handle_audit_action(args)
+        return handle_audit_action(args)
 
     return 0
 
@@ -117,9 +118,42 @@ def scan_adhoc_string(line: str) -> str:
     ])
 
 
-def handle_audit_action(args: argparse.Namespace) -> None:
+def handle_audit_action(args: argparse.Namespace) -> int:
     try:
-        if args.stats:
+        if args.export_vendors:
+            summary = audit.vendor.export_vendor_packages(
+                baseline_file=args.filename[0],
+                manifest_file=args.vendor_manifest,
+                output_dir=args.export_vendors,
+            )
+            print(json.dumps(summary, indent=2))
+        elif args.merge_vendor_responses:
+            state_file = args.vendor_state
+            if not state_file:
+                first_response = args.merge_vendor_responses[0]
+                response_dir = (
+                    first_response
+                    if os.path.isdir(first_response)
+                    else os.path.dirname(first_response)
+                ) or '.'
+                state_file = os.path.join(response_dir, 'master-state.json')
+
+            result = audit.vendor.merge_vendor_responses(
+                state_file=state_file,
+                response_files=args.merge_vendor_responses,
+                baseline_file=args.filename[0] if args.filename else None,
+            )
+            print(json.dumps(result, indent=2))
+        elif args.report_conflicts:
+            report = audit.vendor.report_conflicts(args.vendor_state)
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                print(audit.vendor.format_conflict_report(report))
+        elif args.sign_off_accepted:
+            result = audit.vendor.sign_off_accepted(args.vendor_state)
+            print(json.dumps(result, indent=2))
+        elif args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
             if args.diff:
                 # TODO
@@ -151,4 +185,9 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 # Label secrets
                 audit.audit_baseline(args.filename[0])
     except InvalidBaselineError:
-        pass
+        return 0
+    except audit.vendor.VendorDistributionError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    return 0

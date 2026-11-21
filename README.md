@@ -458,6 +458,8 @@ analytics:
   --json        Outputs results in a machine-readable format.
 ```
 
+For splitting audit results across vendors, see docs/audit.md#distributing-results-to-vendors. It covers redacted per-vendor exports, offline merge, conflict review, and signed-off feedback.
+
 ## Configuration
 
 This tool operates through a system of **plugins** and **filters**.
