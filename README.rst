@@ -98,3 +98,25 @@ To run all tests using all supported versions of Python 2 and Python 3 installed
 
     $ tox
     $ tox -e py311   # Run tests using a specific version of Python
+
+Offline ordering review
+-----------------------
+
+The ``review`` package is an offline entry point for auditing sourced
+ordering statements (e.g. "ticket A takes priority over B", "B and C are
+the same tier") against the conditions produced by existing CVSS scoring.
+It reports definite inversions, acceptable ties, and statements that are
+not comparable because they rely on a different CVSS scale, and it lists
+the minimal combinations of statements that conflict with each other.
+Statement updates only take effect for the objects and time windows they
+cover; outside those windows the previous statement still applies.
+
+::
+
+    $ python -m review examples/four_tickets.json --as-of 2026-03-01
+    $ python -m review examples/four_tickets.json --as-of 2026-08-01 --tolerance 0.3
+
+The input JSON lists tickets with their CVSS vectors per scale and the
+ordering statements with author, kind (``prior`` / ``same_tier``), scale,
+and validity window. ``examples/four_tickets.json`` contains four
+fictional tickets reproducing the cross-team review scenario.

@@ -1,0 +1,82 @@
+{
+  "description": "四条虚构整改工单复现：复核一组写“甲优先于乙”，业务二组只认可“乙和丙同档”，双方采用的 CVSS 版本不同。",
+  "tickets": [
+    {
+      "id": "WO-甲",
+      "vectors": {
+        "cvss3": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+      }
+    },
+    {
+      "id": "WO-乙",
+      "vectors": {
+        "cvss3": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N"
+      }
+    },
+    {
+      "id": "WO-丙",
+      "vectors": {
+        "cvss3": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:L"
+      }
+    },
+    {
+      "id": "WO-丁",
+      "vectors": {
+        "cvss4": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:N"
+      }
+    }
+  ],
+  "statements": [
+    {
+      "id": "S1",
+      "author": "复核一组",
+      "kind": "prior",
+      "objects": ["WO-甲", "WO-乙"],
+      "scale": "cvss3",
+      "valid_from": "2026-01-01",
+      "valid_to": null,
+      "note": "甲优先于乙"
+    },
+    {
+      "id": "S2",
+      "author": "业务二组",
+      "kind": "same_tier",
+      "objects": ["WO-乙", "WO-丙"],
+      "scale": "cvss3",
+      "valid_from": "2026-01-01",
+      "valid_to": null,
+      "note": "乙和丙同档"
+    },
+    {
+      "id": "S3",
+      "author": "复核一组",
+      "kind": "prior",
+      "objects": ["WO-丙", "WO-甲"],
+      "scale": "cvss3",
+      "valid_from": "2026-01-01",
+      "valid_to": null,
+      "note": "丙优先于甲"
+    },
+    {
+      "id": "S4",
+      "author": "业务二组",
+      "kind": "prior",
+      "objects": ["WO-丁", "WO-甲"],
+      "scale": "cvss4",
+      "valid_from": "2026-01-01",
+      "valid_to": null,
+      "note": "丁优先于甲（业务二组按 CVSS 4.0 评估）"
+    },
+    {
+      "id": "S5",
+      "author": "复核一组",
+      "kind": "same_tier",
+      "objects": ["WO-甲", "WO-丙"],
+      "scale": "cvss3",
+      "valid_from": "2026-07-01",
+      "valid_to": null,
+      "supersedes": "S3",
+      "note": "更新：甲和丙同档（仅覆盖甲、丙，自 2026-07-01 起）"
+    }
+  ]
+}
