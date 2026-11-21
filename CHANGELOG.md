@@ -2,6 +2,11 @@
 
 ## Development
 
+* Added `ijson.probe` for read-only, budgeted field probing.  It distinguishes
+  natural end of input from exhaustion of the caller byte budget, reports
+  found/excluded/pending/unchecked per prefix, explains cross-chunk and nested
+  matches, and accepts unbuffered chunk iterables as well as regular streams.
+* `ijson.items` and `ijson.kvitems` now accept multiple prefixes.
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).

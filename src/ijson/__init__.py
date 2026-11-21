@@ -15,6 +15,11 @@ the same API and are faster under CPython.
 '''
 from ijson.adapters import from_iter
 from ijson.common import JSONError, IncompleteJSONError, ObjectBuilder
+from ijson.common import (
+    Probe, ProbeCompletion, ProbeCompletionReason, ProbeFieldResult,
+    ProbeOutcome, ProbeResult, ProbeState, ProbeStatus, ProbeStopReason,
+    PrefixProbeResult, PrefixResult,
+)
 
 from ijson.utils import coroutine, sendable_list
 from .version import __version__
@@ -56,5 +61,10 @@ basic_parse_async = backend.basic_parse_async
 parse_async = backend.parse_async
 items_async = backend.items_async
 kvitems_async = backend.kvitems_async
+probe = backend.probe
+probe_gen = backend.probe_gen
+probe_async = backend.probe_async
+probe_coro = backend.probe_coro
+probe_events = backend.probe
 backend_name = backend.backend_name
 backend = backend.backend

@@ -34,11 +34,27 @@ class IterReader:
     def __init__(self, byte_iter):
         self._iter = byte_iter
         self._warned = False
+        self._buffer = b""
 
     def read(self, n: int) -> bytes:
         if n == 0:
             return b""
         chunk, self._warned = _to_bytes(next(self._iter, b""), self._warned)
+        return chunk
+
+    def read_bounded(self, n: int) -> bytes:
+        """Read at most ``n`` bytes, retaining any surplus chunk data."""
+        if n == 0:
+            return b""
+        while not self._buffer:
+            chunk, self._warned = _to_bytes(next(self._iter, b""), self._warned)
+            if not chunk:
+                return b""
+            self._buffer = chunk
+        if n is None or n < 0 or n >= len(self._buffer):
+            chunk, self._buffer = self._buffer, b""
+            return chunk
+        chunk, self._buffer = self._buffer[:n], self._buffer[n:]
         return chunk
 
 
@@ -48,11 +64,29 @@ class AiterReader:
     def __init__(self, byte_aiter):
         self._aiter = byte_aiter
         self._warned = False
+        self._buffer = b""
 
     async def read(self, n: int) -> bytes:
         if n == 0:
             return b""
         chunk, self._warned = _to_bytes(await anext(self._aiter, b""), self._warned)
+        return chunk
+
+    async def read_bounded(self, n: int) -> bytes:
+        """Async counterpart of :meth:`IterReader.read_bounded`."""
+        if n == 0:
+            return b""
+        while not self._buffer:
+            chunk, self._warned = _to_bytes(
+                await anext(self._aiter, b""), self._warned
+            )
+            if not chunk:
+                return b""
+            self._buffer = chunk
+        if n is None or n < 0 or n >= len(self._buffer):
+            chunk, self._buffer = self._buffer, b""
+            return chunk
+        chunk, self._buffer = self._buffer[:n], self._buffer[n:]
         return chunk
 
 

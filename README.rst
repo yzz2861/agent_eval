@@ -153,6 +153,49 @@ using the ``basic_parse`` function:
                     if event == 'map_key' and value == 'name')
 
 
+Bounded probing
+---------------
+
+``ijson.probe`` answers a narrower question than ``items``:
+does a managed field appear in the part of a JSON stream that the caller is
+allowed to inspect?  It accepts one prefix or several prefixes and an optional
+byte budget:
+
+.. code-block:: python
+
+    result = ijson.probe(f, ["meta.owner", "meta.retention"],
+                         max_bytes=4096)
+    if result["meta.owner"].found:
+        ...
+    elif result["meta.owner"].status == "excluded":
+        # the complete selected range was read and the field is absent
+        ...
+    else:
+        # the read budget ran out first; the result is still pending
+        ...
+
+The probe reports two different completion conditions:
+
+* ``natural_end`` means the source was exhausted (or a complete top-level
+  JSON value was read).
+* ``budget_exhausted`` means reading stopped because ``max_bytes`` was
+  consumed.  A field not seen in this case is ``pending``, never ``excluded``.
+
+Each requested prefix gets a ``PrefixProbeResult`` with ``found``,
+``excluded``, ``pending`` or ``unchecked`` state.  ``unchecked`` is used when
+the caller separates the reported field set from the actually selected range
+with ``select=...``.  Results also expose ``crosses_chunks`` and ``nested`` so
+matches found across read boundaries or at a deeper object level are
+explainable.  ``buf_size`` only changes how the input is chunked; it does not
+change ``found``/``excluded`` conclusions once the complete range has been
+read.
+
+Sources may be bytes, text, file-like objects, iterables of chunks, parse
+event iterables, or asynchronous file-like/iterable objects (the latter
+returns an awaitable).  For compatibility, ``items`` and ``kvitems`` also
+accept a list of prefixes and yield their values in document order.
+
+
 Command line
 ------------
 
