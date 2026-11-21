@@ -10,8 +10,16 @@ At their core, all annotation types are DictionaryObjects. That means if pypdf
 does not implement a feature, users can easily extend the given functionality.
 """
 
-
 from ._base import NO_FLAGS, AnnotationDictionary
+from ._evidence import (
+    AnnotationEntity,
+    AnnotationEvidenceIndex,
+    AnnotationEvidenceReport,
+    MissingEvidenceNote,
+    PageAnnotationReference,
+    PageEvidence,
+    ReplyRelation,
+)
 from ._markup_annotations import (
     Ellipse,
     FreeText,
@@ -28,15 +36,22 @@ from ._non_markup_annotations import Link, Popup
 __all__ = [
     "NO_FLAGS",
     "AnnotationDictionary",
+    "AnnotationEntity",
+    "AnnotationEvidenceIndex",
+    "AnnotationEvidenceReport",
     "Ellipse",
     "FreeText",
     "Highlight",
     "Line",
     "Link",
     "MarkupAnnotation",
+    "MissingEvidenceNote",
+    "PageAnnotationReference",
+    "PageEvidence",
     "PolyLine",
     "Polygon",
     "Popup",
     "Rectangle",
+    "ReplyRelation",
     "Text",
 ]
