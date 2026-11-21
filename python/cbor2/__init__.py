@@ -19,6 +19,11 @@ from ._cbor2 import loads as loads
 from ._cbor2 import shareable_decoder as shareable_decoder
 from ._cbor2 import shareable_encoder as shareable_encoder
 from ._cbor2 import undefined as undefined
+from .evidence import Evidence as Evidence
+from .evidence import EvidenceView as EvidenceView
+from .evidence import SharedReferenceError as SharedReferenceError
+from .evidence import load_evidence as load_evidence
+from .evidence import loads_evidence as loads_evidence
 
 if sys.hexversion < 51314855:
     from ._cbor2 import frozendict as frozendict

@@ -17,6 +17,16 @@ Decoding
 .. autoclass:: cbor2.CBORDecoder
 .. autodecorator:: cbor2.shareable_decoder
 
+Safe consumption of sealed logs
+-------------------------------
+
+.. autofunction:: cbor2.loads_evidence
+.. autofunction:: cbor2.load_evidence
+.. autoclass:: cbor2.Evidence
+    :members:
+.. autoclass:: cbor2.EvidenceView
+    :members:
+
 Types
 -----
 
@@ -64,3 +74,4 @@ Exceptions
 .. autoexception:: cbor2.CBOREncodeValueError
 .. autoexception:: cbor2.CBORDecodeError
 .. autoexception:: cbor2.CBORDecodeEOF
+.. autoexception:: cbor2.SharedReferenceError

@@ -1,5 +1,5 @@
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, tzinfo
 from decimal import Decimal
 from email.mime.text import MIMEText
@@ -43,6 +43,8 @@ _T = TypeVar("_T")
 _T_co = TypeVar("_T_co", covariant=True)
 _KT = TypeVar("_KT")
 _VT_co = TypeVar("_VT_co", covariant=True)
+
+_Path: TypeAlias = tuple[Hashable, ...]
 
 TagHook: TypeAlias = Callable[[CBORTag, bool], Any]
 SemanticDecoderCallback: TypeAlias = Callable[[Any, bool], Any]
@@ -153,6 +155,27 @@ class CBOREncodeTypeError(CBOREncodeError, TypeError): ...
 class CBOREncodeValueError(CBOREncodeError, ValueError): ...
 class CBORDecodeError(CBORError): ...
 class CBORDecodeEOF(CBORDecodeError, EOFError): ...
+class SharedReferenceError(CBORDecodeError): ...
+
+@final
+class Evidence:
+    def __new__(cls, data: bytes, root: Any, shared_paths: tuple[_Path, ...]) -> Self: ...
+    @property
+    def data(self) -> bytes: ...
+    @property
+    def digest(self) -> str: ...
+    @property
+    def root(self) -> Any: ...
+    @property
+    def shared_paths(self) -> tuple[_Path, ...]: ...
+    def view(self) -> EvidenceView: ...
+
+@final
+class EvidenceView:
+    @property
+    def evidence(self) -> Evidence: ...
+    @property
+    def data(self) -> Any: ...
 
 @final
 class CBORTag:
@@ -240,6 +263,20 @@ def loads(
     strict_hashable_types: bool = ...,
     immutable: bool = ...,
 ) -> Any: ...
+def load_evidence(
+    fp: IO[bytes],
+    *,
+    protected_paths: Iterable[_Path] = ...,
+    forbid_shared_keys: bool = ...,
+    **decode_kwargs: Any,
+) -> Evidence: ...
+def loads_evidence(
+    data: Buffer,
+    *,
+    protected_paths: Iterable[_Path] = ...,
+    forbid_shared_keys: bool = ...,
+    **decode_kwargs: Any,
+) -> Evidence: ...
 def shareable_encoder(
     wraps: Callable[[CBOREncoder, _T], None], /
 ) -> Callable[[CBOREncoder, _T], None]: ...

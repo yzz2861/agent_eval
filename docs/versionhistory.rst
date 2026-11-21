@@ -5,6 +5,17 @@ Version history
 
 This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added a safe consumption path for sealed logs that use shared values:
+  :func:`~cbor2.loads_evidence` and :func:`~cbor2.load_evidence` decode an artifact
+  once into an immutable, identity-preserving :class:`~cbor2.Evidence`, from which
+  each consumer obtains its own mutable :class:`~cbor2.EvidenceView` via
+  :meth:`~cbor2.Evidence.view`. Annotations made through one view no longer leak
+  into other consumers' readings. Critical fields that must not contain shared
+  references can be declared with ``protected_paths`` (and ``forbid_shared_keys``),
+  producing a :exc:`~cbor2.SharedReferenceError` with a precise diagnostic
+
 **6.3.0** (2026-11-13)
 
 - Added the ``--format=json`` CLI option to encode JSON files or standard input as binary CBOR
