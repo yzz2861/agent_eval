@@ -171,8 +171,13 @@ def __getattr__(name: str) -> Any:
 
 def clear_cache() -> None:
     """Clear the disk cache. Useful for testing or forcing a refresh."""
-    cache = _get_cache()
-    cache.clear()
+    try:
+        cache = _get_cache()
+        cache.clear()
+    except Exception:
+        # Cache clearing is best-effort: a read-only or unavailable cache
+        # (e.g. in restricted environments) must not break callers.
+        pass
 
 
 def set_url(url: str) -> None:

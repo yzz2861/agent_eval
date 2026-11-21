@@ -169,6 +169,8 @@ Each :class:`~sigma.matching.SigmaMatch` exposes:
 * ``timestamp`` — the timestamp of the triggering event.
 * ``group_values`` — for correlation rules, the ``group-by`` field values that formed the
   matching group (``None`` for plain rules).
+* ``evidence_ids`` — the explicit evidence identities (``Event.event_id``) carried by the
+ matched events.
 
 .. code-block:: python
 
@@ -178,6 +180,17 @@ Each :class:`~sigma.matching.SigmaMatch` exposes:
         print(f"Events : {len(m.events)}")
         if m.group_values:
             print(f"Group  : {m.group_values}")
+
+For offline analysis and replay reports, :meth:`~sigma.matching.SigmaMatch.to_dict` renders a
+match as a JSON-serializable dictionary containing the rule name, timestamp, group values,
+evidence identities, and event count:
+
+.. code-block:: python
+
+    import json
+
+    for m in matches:
+        print(json.dumps(m.to_dict()))
 
 Using as a Context Manager
 --------------------------
@@ -243,3 +256,28 @@ Two constructor parameters control memory use for correlation state:
   correlation match to avoid unbounded memory growth on high-cardinality rules.
 * ``max_correlation_state`` (default ``None``, unlimited) — limits the total number of
   entries retained in the sliding window per group key.
+
+Deduplicating Copied Evidence
+-----------------------------
+
+A single real-world event is sometimes retained as several logs whose fields differ slightly,
+for example when a sensor retrofit re-emits the same observation. Fed into an ``event_count``
+correlation, such copies would be mistaken for independent confirmations.
+
+To prevent this, attach an explicit evidence identity to each event via ``Event.event_id``.
+Within a correlation rule's sliding window, a match whose evidence identity was already recorded
+for the same ``group-by`` key is treated as a copy and does not count towards the correlation
+condition again. Events without an ``event_id`` always count individually, preserving the
+previous behavior for logs that carry no identity:
+
+.. code-block:: python
+
+    event = Event(
+        timestamp=datetime.now(timezone.utc),
+        logsource=EventLogSource(category="process_creation", product="windows"),
+        data={"CommandLine": "mimikatz.exe", "host": "WS1"},
+        event_id="EVT-1",  # same identity for every copy of the same real event
+    )
+
+With identities in place, an ``event_count`` confirmation only escalates once a truly
+independent source (a different ``event_id``) is added to the window.

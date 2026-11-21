@@ -48,11 +48,30 @@ class SigmaCorrelationRuleMatcher:
     def receive_match(self, match: SigmaMatch, source_rule_name: str) -> list[SigmaMatch]:
         """Process an incoming match from a base rule and return correlation matches if any."""
         group_key = self._extract_group_key(match)
+        window_matches = self._state.get_window(group_key, match.timestamp)
+        if self._is_duplicate_evidence(match, window_matches):
+            # A copy of already-seen evidence (e.g. a log duplicated by a sensor
+            # with slightly different fields) must not count as another confirmation.
+            return []
         self._state.add(group_key, match)
-
         window_matches = self._state.get_window(group_key, match.timestamp)
         result = self._evaluate(window_matches, group_key, match.timestamp)
         return result
+
+    @staticmethod
+    def _is_duplicate_evidence(match: SigmaMatch, window_matches: list[SigmaMatch]) -> bool:
+        """Check if the match's evidence identity was already recorded in the window.
+
+        Only matches whose events carry an explicit evidence identity (Event.event_id)
+        participate in deduplication; matches without identity always count.
+        """
+        incoming_ids = set(match.evidence_ids)
+        if not incoming_ids:
+            return False
+        for existing in window_matches:
+            if incoming_ids.intersection(existing.evidence_ids):
+                return True
+        return False
 
     def _extract_group_key(self, match: SigmaMatch) -> tuple[Any, ...]:
         """Extract group-by field values from match events."""

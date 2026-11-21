@@ -26,6 +26,7 @@ class Event:
     logsource: EventLogSource
     data: dict[str, Any]
     raw: str | None = None
+    event_id: str | None = None
     _raw_cache: str | None = field(init=False, default=None, repr=False, compare=False)
 
     def get_raw(self) -> str:
