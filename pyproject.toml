@@ -1,0 +1,148 @@
+[build-system]
+# Dependabot cannot do `build-system.requires` (dependabot/dependabot-core#8465)
+# workaround to get reproducibility and auto-updates:
+#   PIP_CONSTRAINT=requirements/build.txt python3 -m build ...
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "in-toto"
+description = "A framework to define and secure the integrity of software supply chains"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [
+    { name = "New York University: Secure Systems Lab", email = "in-toto-dev@googlegroups.com" },
+]
+keywords = [
+    "security",
+    "software",
+    "supply chain",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Security",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "attrs",
+    "iso8601",
+    "pathspec",
+    "python-dateutil",
+    "securesystemslib[crypto]~=1.0",
+]
+dynamic = ["version"]
+
+[project.scripts]
+in-toto-mock = "in_toto.in_toto_mock:main"
+in-toto-record = "in_toto.in_toto_record:main"
+in-toto-run = "in_toto.in_toto_run:main"
+in-toto-sign = "in_toto.in_toto_sign:main"
+in-toto-verify = "in_toto.in_toto_verify:main"
+in-toto-match-products = "in_toto.in_toto_match_products:main"
+
+[project.urls]
+"Bug Reports" = "https://github.com/in-toto/in-toto/issues"
+Homepage = "https://in-toto.io"
+Source = "https://github.com/in-toto/in-toto"
+
+[tool.hatch.version]
+path = "in_toto/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/in_toto",
+    "/tests",
+    "/.coveragerc",
+    "/tox.ini",
+    "/requirements*.txt",
+]
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.lint]
+extend-select = [
+    "YTT",
+    "S",
+    "BLE",
+    "B",
+    "A",
+    "C4",
+    "DTZ",
+    "T10",
+    "EXE",
+    "ISC",
+    "ICN",
+    "LOG",
+    "G",
+    "PIE",
+    "PYI",
+    "Q",
+    "RSE",
+    "RET",
+    "SLF",
+    "SIM",
+    "SLOT",
+    "TID",
+    "ARG",
+    "FLY",
+    "I",
+    "C90",
+    "N",
+    "PERF",
+    "W",
+    "DOC",
+    "PGH",
+    "PLC",
+    "PLE",
+    "PLR",
+    "PLW",
+    "UP",
+    "FURB",
+    "RUF",
+]
+ignore = [
+    "B904",     # raise-without-from-inside-except
+    "PERF203",  # try-except-in-loop
+    "PLR2004",  # magic-value-comparison
+    "RUF005",   # collection-literal-concatenation
+    # https://docs.astral.sh/ruff/formatter/#conflicting-lint-rules
+    "W191",
+    "E111",
+    "E114",
+    "E117",
+    "D206",
+    "D300",
+    "Q000",
+    "Q001",
+    "Q002",
+    "Q003",
+    "COM812",
+    "COM819",
+]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**" = ["S101", "N", "SLF001", "PLR0914"]
+"doc/**" = ["A", "PLR0914", "RUF012"]
+
+[tool.ruff.lint.flake8-comprehensions]
+allow-dict-calls-with-keyword-arguments = true
+
+[tool.ruff.lint.pylint]
+max-locals = 10

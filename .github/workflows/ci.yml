@@ -1,0 +1,14 @@
+name: Run in-toto tests and linter
+
+on:
+  push:
+    branches: ['develop']
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/_test.yml
