@@ -1,0 +1,791 @@
+import re
+import pytest
+from base64 import b64encode
+from typing import Union, Sequence, List
+from sigma.modifiers import (
+    SigmaCaseSensitiveModifier,
+    SigmaExistsModifier,
+    SigmaFieldReferenceModifier,
+    SigmaModifier,
+    SigmaContainsModifier,
+    SigmaRegularExpressionIgnoreCaseFlagModifier,
+    SigmaRegularExpressionMultilineFlagModifier,
+    SigmaRegularExpressionDotAllFlagModifier,
+    SigmaStartswithModifier,
+    SigmaEndswithModifier,
+    SigmaBase64Modifier,
+    SigmaBase64OffsetModifier,
+    SigmaWideModifier,
+    SigmaUTF16Modifier,
+    SigmaUTF16BEModifier,
+    SigmaRegularExpressionModifier,
+    SigmaCIDRModifier,
+    SigmaAllModifier,
+    SigmaNegateModifier,
+    SigmaLessThanModifier,
+    SigmaLessThanEqualModifier,
+    SigmaGreaterThanModifier,
+    SigmaGreaterThanEqualModifier,
+    SigmaNotEqualModifier,
+    SigmaExpandModifier,
+    SigmaWindowsDashModifier,
+    SigmaTimestampMinuteModifier,
+    SigmaTimestampHourModifier,
+    SigmaTimestampDayModifier,
+    SigmaTimestampWeekModifier,
+    SigmaTimestampMonthModifier,
+    SigmaTimestampYearModifier,
+)
+from sigma.rule import SigmaDetectionItem
+from sigma.types import (
+    CompareOperators,
+    SigmaBool,
+    SigmaCasedString,
+    SigmaExists,
+    SigmaExpansion,
+    SigmaFieldReference,
+    SigmaRegularExpressionFlag,
+    SigmaString,
+    Placeholder,
+    SigmaNumber,
+    SigmaRegularExpression,
+    SigmaCompareExpression,
+    SigmaCIDRExpression,
+    SpecialChars,
+    TimestampPart,
+    SigmaTimestampPart,
+)
+from sigma.conditions import ConditionAND
+from sigma.exceptions import SigmaModifiedError, SigmaRuleLocation, SigmaTypeError, SigmaValueError
+
+
+@pytest.fixture
+def dummy_detection_item():
+    return SigmaDetectionItem(None, [], [SigmaString("foobar")])
+
+
+@pytest.fixture
+def dummy_plain_modifier(dummy_detection_item):
+    class DummyPlainModifier(SigmaModifier):
+        def modify(self, val: SigmaString) -> SigmaString:
+            return SigmaString("")
+
+    return DummyPlainModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml"))
+
+
+@pytest.fixture
+def dummy_union_modifier(dummy_detection_item):
+    class DummyUnionModifier(SigmaModifier):
+        def modify(self, val: Union[SigmaString, SigmaNumber]) -> SigmaString:
+            return SigmaString("")
+
+    return DummyUnionModifier(dummy_detection_item, [])
+
+
+@pytest.fixture
+def dummy_list_modifier(dummy_detection_item):
+    class DummyListModifier(SigmaModifier):
+        def modify(self, val: list[SigmaString]) -> list[SigmaString]:
+            return [SigmaString("")]
+
+    return DummyListModifier(dummy_detection_item, [])
+
+
+def test_typecheck_plain(dummy_plain_modifier):
+    assert dummy_plain_modifier.type_check(SigmaString("foobar"))
+
+
+def test_typecheck_plain_wrong(dummy_plain_modifier):
+    assert not dummy_plain_modifier.type_check(SigmaNumber(123))
+
+
+def test_typecheck_plain_wrong_apply(dummy_plain_modifier):
+    with pytest.raises(SigmaTypeError, match="incompatible.*type.*test.yml"):
+        dummy_plain_modifier.apply(SigmaNumber(123))
+
+
+def test_typecheck_apply_list_input(dummy_list_modifier):
+    assert dummy_list_modifier.apply([SigmaString("foobar")]) == [SigmaString("")]
+
+
+def test_typecheck_union(dummy_union_modifier):
+    assert dummy_union_modifier.type_check(SigmaString("foobar"))
+
+
+def test_typecheck_union_wrong(dummy_union_modifier):
+    assert not dummy_union_modifier.type_check(SigmaRegularExpression(".*"))
+
+
+def test_typecheck_sequence(dummy_list_modifier):
+    assert dummy_list_modifier.type_check([SigmaString("foobar")])
+
+
+def test_typecheck_sequence_wrong(dummy_list_modifier):
+    assert not dummy_list_modifier.type_check([SigmaNumber(123)])
+
+
+def test_contains_nowildcards(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).apply(SigmaString("foobar")) == [
+        SigmaString("*foobar*")
+    ]
+
+
+def test_contains_leading_wildcard(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).apply(SigmaString("*foobar")) == [
+        SigmaString("*foobar*")
+    ]
+
+
+def test_contains_trailing_wildcard(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).apply(SigmaString("foobar*")) == [
+        SigmaString("*foobar*")
+    ]
+
+
+def test_contains_leading_and_trailing_wildcard(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).apply(SigmaString("*foobar*")) == [
+        SigmaString("*foobar*")
+    ]
+
+
+def test_contains_trailing_backslash(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).apply(SigmaString(r"foobar\\"))[0].s == [
+        SpecialChars.WILDCARD_MULTI,
+        "foobar\\",
+        SpecialChars.WILDCARD_MULTI,
+    ]
+
+
+def test_startswith_nowildcards(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).apply(SigmaString("foobar")) == [
+        SigmaString("foobar*")
+    ]
+
+
+def test_startswith_trailing_wildcard(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).apply(SigmaString("foobar*")) == [
+        SigmaString("foobar*")
+    ]
+
+
+def test_startswith_trailing_backslash(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).apply(SigmaString(r"foobar\\"))[
+        0
+    ].s == [
+        "foobar\\",
+        SpecialChars.WILDCARD_MULTI,
+    ]
+
+
+def test_endswith_nowildcards(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).apply(SigmaString("foobar")) == [
+        SigmaString("*foobar")
+    ]
+
+
+def test_endswith_trailing_wildcard(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).apply(SigmaString("*foobar")) == [
+        SigmaString("*foobar")
+    ]
+
+
+def test_base64(dummy_detection_item):
+    assert SigmaBase64Modifier(dummy_detection_item, []).apply(SigmaString("foobar")) == [
+        SigmaString("Zm9vYmFy")
+    ]
+
+
+def test_base64_escaped_wildcard(dummy_detection_item):
+    # "x\*y" is the literal value x*y
+    assert SigmaBase64Modifier(dummy_detection_item, []).apply(SigmaString("x\\*y")) == [
+        SigmaString("eCp5")
+    ]
+
+
+def test_base64offset_escaped_wildcard(dummy_detection_item):
+    # "cmd\?.exe" is the literal value cmd?.exe
+    assert SigmaBase64OffsetModifier(dummy_detection_item, []).apply(SigmaString("cmd\\?.exe")) == [
+        SigmaExpansion(
+            [
+                SigmaString("Y21kPy5leG"),
+                SigmaString("NtZD8uZXhl"),
+                SigmaString("jbWQ/LmV4Z"),
+            ]
+        )
+    ]
+
+
+def test_base64_wildcards(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="wildcards is not allowed.*test.yml"):
+        SigmaBase64Modifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaString("foo*bar")
+        )
+
+
+def test_base64offset(dummy_detection_item):
+    assert SigmaBase64OffsetModifier(dummy_detection_item, []).apply(SigmaString("foobar")) == [
+        SigmaExpansion(
+            [
+                SigmaString("Zm9vYmFy"),
+                SigmaString("Zvb2Jhc"),
+                SigmaString("mb29iYX"),
+            ]
+        )
+    ]
+
+
+@pytest.mark.parametrize("value", ["é", "aé", "C:\\Users\\Müller\\ärger.exe", "日本語"])
+def test_base64offset_nonascii(dummy_detection_item, value):
+    # Non-ASCII characters are encoded with multiple UTF-8 bytes. Each variant must occur in the
+    # Base64 encoding of data containing the value at the corresponding offset, and must not be
+    # empty.
+    (expansion,) = SigmaBase64OffsetModifier(dummy_detection_item, []).apply(SigmaString(value))
+    assert isinstance(expansion, SigmaExpansion)
+    data = value.encode()
+    for i, variant in enumerate(expansion.values):
+        assert str(variant) != ""
+        assert str(variant) in b64encode(i * b"x" + data + b"yyy").decode()
+
+
+def test_base64offset_nonascii_expected(dummy_detection_item):
+    assert SigmaBase64OffsetModifier(dummy_detection_item, []).apply(SigmaString("é")) == [
+        SigmaExpansion(
+            [
+                SigmaString("w6"),
+                SigmaString("Op"),
+                SigmaString("Dq"),
+            ]
+        )
+    ]
+
+
+def test_base64offset_wildcards(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="wildcards is not allowed.*test.yml"):
+        SigmaBase64OffsetModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaString("foo*bar")
+        )
+
+
+def test_base64offset_re(dummy_detection_item):
+    with pytest.raises(SigmaTypeError, match="incompatible.*type.*test.yml"):
+        SigmaBase64OffsetModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaRegularExpression("foo.*bar")
+        )
+
+
+def test_wide(dummy_detection_item):
+    assert SigmaWideModifier(dummy_detection_item, []).apply(SigmaString("*foobar*")) == [
+        SigmaString("*f\x00o\x00o\x00b\x00a\x00r\x00*")
+    ]
+
+
+def test_wide_noascii(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="ascii strings.*test.yml"):
+        SigmaWideModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaString("foobär")
+        )
+
+
+def test_utf16be(dummy_detection_item):
+    assert SigmaUTF16BEModifier(dummy_detection_item, []).apply(SigmaString("*foobar*")) == [
+        SigmaString("*\x00f\x00o\x00o\x00b\x00a\x00r*")
+    ]
+
+
+def test_utf16be_noascii(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="UTF-16BE modifier only allowed.*test.yml"):
+        SigmaUTF16BEModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaString("foobär")
+        )
+
+
+def test_utf16(dummy_detection_item):
+    assert SigmaUTF16Modifier(dummy_detection_item, []).apply(SigmaString("*foobar*")) == [
+        SigmaString("\ufeff*f\x00o\x00o\x00b\x00a\x00r\x00*")
+    ]
+
+
+def test_utf16_base64():
+    # BOM must be encoded as UTF-16LE byte order mark FF FE, not as UTF-8 EF BB BF
+    assert SigmaDetectionItem.from_mapping("field|utf16|base64", "foobar").value == [
+        SigmaString(b64encode(b"\xff\xfe" + "foobar".encode("utf-16le")).decode())
+    ]
+    assert SigmaDetectionItem.from_mapping("field|utf16|base64", "foobar").value == [
+        SigmaString("//5mAG8AbwBiAGEAcgA=")
+    ]
+
+
+def test_utf16_base64offset():
+    variants = SigmaDetectionItem.from_mapping("field|utf16|base64offset", "foobar").value
+    assert variants == [
+        SigmaExpansion(
+            [
+                SigmaString("//5mAG8AbwBiAGEAcg"),
+                SigmaString("/+ZgBvAG8AYgBhAHIA"),
+                SigmaString("//mYAbwBvAGIAYQByA"),
+            ]
+        )
+    ]
+    # Each variant occurs in the Base64 encoding of UTF-16 content placed at the corresponding offset
+    data = b"\xff\xfe" + "foobar".encode("utf-16le")
+    for i, variant in enumerate(variants[0].values):
+        assert str(variant) in b64encode(i * b"x" + data + b"yyy").decode()
+
+
+def test_utf16_noascii(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="UTF-16 modifier only allowed.*test.yml"):
+        SigmaUTF16Modifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
+            SigmaString("foobär")
+        )
+
+
+def test_windash(dummy_detection_item):
+    assert SigmaWindowsDashModifier(dummy_detection_item, []).modify(
+        SigmaString("-param-1 -param2")
+    ) == SigmaExpansion(
+        [
+            SigmaString("-param-1 -param2"),
+            SigmaString("-param-1 /param2"),
+            SigmaString("-param-1 –param2"),
+            SigmaString("-param-1 —param2"),
+            SigmaString("-param-1 ―param2"),
+            SigmaString("/param-1 -param2"),
+            SigmaString("/param-1 /param2"),
+            SigmaString("/param-1 –param2"),
+            SigmaString("/param-1 —param2"),
+            SigmaString("/param-1 ―param2"),
+            SigmaString("–param-1 -param2"),
+            SigmaString("–param-1 /param2"),
+            SigmaString("–param-1 –param2"),
+            SigmaString("–param-1 —param2"),
+            SigmaString("–param-1 ―param2"),
+            SigmaString("—param-1 -param2"),
+            SigmaString("—param-1 /param2"),
+            SigmaString("—param-1 –param2"),
+            SigmaString("—param-1 —param2"),
+            SigmaString("—param-1 ―param2"),
+            SigmaString("―param-1 -param2"),
+            SigmaString("―param-1 /param2"),
+            SigmaString("―param-1 –param2"),
+            SigmaString("―param-1 —param2"),
+            SigmaString("―param-1 ―param2"),
+        ]
+    )
+
+
+def test_windash_max_expanded_dashes(dummy_detection_item):
+    with pytest.raises(
+        SigmaModifiedError,
+        match="split multiple dash expansions into separate ORed string match conditions with one dash expanded",
+    ):
+        SigmaWindowsDashModifier(dummy_detection_item, []).modify(SigmaString("-a -b -c -d"))
+
+
+def test_re(dummy_detection_item):
+    assert SigmaRegularExpressionModifier(dummy_detection_item, []).modify(
+        SigmaString("foo?bar.*")
+    ) == SigmaRegularExpression("foo?bar.*")
+
+
+@pytest.fixture
+def sigma_regex():
+    return SigmaRegularExpression("foo.*bar")
+
+
+@pytest.fixture
+def re_detection_item(sigma_regex):
+    return SigmaDetectionItem("test", [], [sigma_regex])
+
+
+def test_re_modifier_ignorecase(re_detection_item, sigma_regex):
+    assert SigmaRegularExpressionIgnoreCaseFlagModifier(re_detection_item, []).modify(
+        sigma_regex
+    ) == SigmaRegularExpression("foo.*bar", {SigmaRegularExpressionFlag.IGNORECASE})
+
+
+def test_re_modifier_multiline(re_detection_item, sigma_regex):
+    assert SigmaRegularExpressionMultilineFlagModifier(re_detection_item, []).modify(
+        sigma_regex
+    ) == SigmaRegularExpression("foo.*bar", {SigmaRegularExpressionFlag.MULTILINE})
+
+
+def test_re_modifier_dotall(re_detection_item, sigma_regex):
+    assert SigmaRegularExpressionDotAllFlagModifier(re_detection_item, []).modify(
+        sigma_regex
+    ) == SigmaRegularExpression("foo.*bar", {SigmaRegularExpressionFlag.DOTALL})
+
+
+def test_do_not_escape_regular_expressions(dummy_detection_item):
+    assert SigmaRegularExpressionModifier(dummy_detection_item, []).modify(
+        SigmaString(r"foo\\bar")
+    ) == SigmaRegularExpression(r"foo\\bar")
+
+
+def test_re_contains(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar")
+    ) == SigmaRegularExpression(".*foo?bar.*")
+
+
+def test_re_contains_start(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("^foo?bar")
+    ) == SigmaRegularExpression("^foo?bar.*")
+
+
+def test_re_contains_end(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar$")
+    ) == SigmaRegularExpression(".*foo?bar$")
+
+
+def test_re_contains_startswith_wildcard(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression(".*foo?bar")
+    ) == SigmaRegularExpression(".*foo?bar.*")
+
+
+def test_re_contains_endswith_wildcard(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar.*")
+    ) == SigmaRegularExpression(".*foo?bar.*")
+
+
+def test_re_startswith(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar")
+    ) == SigmaRegularExpression("foo?bar.*")
+
+
+def test_re_endswith(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar")
+    ) == SigmaRegularExpression(".*foo?bar")
+
+
+def test_re_startswith_start(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("^foo?bar")
+    ) == SigmaRegularExpression("^foo?bar.*")
+
+
+def test_re_endswith_start(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("^foo?bar")
+    ) == SigmaRegularExpression("^foo?bar")
+
+
+def test_re_startswith_end(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar$")
+    ) == SigmaRegularExpression("foo?bar$")
+
+
+def test_re_endswith_end(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar$")
+    ) == SigmaRegularExpression(".*foo?bar$")
+
+
+def test_re_endswith_startswith_wildcard(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression(".*foo?bar")
+    ) == SigmaRegularExpression(".*foo?bar")
+
+
+def test_re_startswith_endswith_wildcard(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo?bar.*")
+    ) == SigmaRegularExpression("foo?bar.*")
+
+
+def test_re_contains_alternation(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo|bar")
+    ) == SigmaRegularExpression(".*(?:foo|bar).*")
+
+
+def test_re_startswith_alternation(dummy_detection_item):
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo|bar")
+    ) == SigmaRegularExpression("(?:foo|bar).*")
+
+
+def test_re_endswith_alternation(dummy_detection_item):
+    assert SigmaEndswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo|bar")
+    ) == SigmaRegularExpression(".*(?:foo|bar)")
+
+
+@pytest.mark.parametrize(
+    "modifier,expected",
+    [
+        (SigmaContainsModifier, ".*.*"),
+        (SigmaStartswithModifier, ".*"),
+        (SigmaEndswithModifier, ".*"),
+    ],
+)
+def test_re_empty_regex(dummy_detection_item, modifier, expected):
+    # An empty regular expression is valid and must not crash the prefix/suffix checks
+    assert modifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("")
+    ) == SigmaRegularExpression(expected)
+
+
+def test_re_contains_alternation_anchored_alternative(dummy_detection_item):
+    # Anchors belong to a single alternative: the other alternative must still match anywhere
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("^foo|bar")
+    ) == SigmaRegularExpression(".*(?:^foo|bar).*")
+
+
+@pytest.mark.parametrize(
+    "regexp",
+    ["(foo|bar)baz", "[|]foo", "[]|]foo", "[^]|]foo", "foo\\|bar"],
+)
+def test_re_contains_no_toplevel_alternation(dummy_detection_item, regexp):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression(regexp)
+    ) == SigmaRegularExpression(".*" + regexp + ".*")
+
+
+@pytest.mark.parametrize(
+    "value,matching,non_matching",
+    [
+        ("foo|bar", ["xfooy", "xbar", "bary"], ["xbaz"]),
+        ("cost\\$", ["cost$ 5", "the cost$"], ["cost"]),
+        ("foo\\.*", ["xfoo.y", "xfooy"], ["xfo"]),
+    ],
+)
+def test_re_contains_whole_value_semantics(value, matching, non_matching):
+    # Backends with whole-value regular expression matching (e.g. Lucene regexp) rely on the added
+    # wildcards: the resulting expression must fully match all values containing a match.
+    (detection_item_value,) = SigmaDetectionItem.from_mapping("field|re|contains", value).value
+    assert isinstance(detection_item_value, SigmaRegularExpression)
+    regexp = re.compile(str(detection_item_value.regexp))
+    for s in matching:
+        assert regexp.fullmatch(s) is not None
+    for s in non_matching:
+        assert regexp.fullmatch(s) is None
+
+
+def test_re_contains_escaped_end_anchor(dummy_detection_item):
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("cost\\$")
+    ) == SigmaRegularExpression(".*cost\\$.*")
+
+
+def test_re_contains_escaped_backslash_end_anchor(dummy_detection_item):
+    # an escaped backslash followed by a real end anchor
+    assert SigmaContainsModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("cost\\\\$")
+    ) == SigmaRegularExpression(".*cost\\\\$")
+
+
+def test_re_startswith_escaped_wildcard(dummy_detection_item):
+    # foo\.* is foo followed by any number of literal dots, not by an arbitrary suffix
+    assert SigmaStartswithModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("foo\\.*")
+    ) == SigmaRegularExpression("foo\\.*.*")
+
+
+def test_re_with_other(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="only applicable to unmodified values.*test.yml"):
+        SigmaRegularExpressionModifier(
+            dummy_detection_item, [SigmaBase64Modifier], SigmaRuleLocation("test.yml")
+        ).modify(SigmaString("foo?bar.*"))
+
+
+def test_cased(dummy_detection_item):
+    assert SigmaCaseSensitiveModifier(dummy_detection_item, []).modify(
+        SigmaString("FooBar")
+    ) == SigmaCasedString("FooBar")
+
+
+def test_all(dummy_detection_item):
+    values = [
+        SigmaString("*foobar*"),
+        SigmaNumber(123),
+        SigmaRegularExpression(".*foobar.*"),
+    ]
+    assert (
+        SigmaAllModifier(dummy_detection_item, []).modify(values) == values
+        and dummy_detection_item.value_linking == ConditionAND
+    )
+
+
+def test_neq(dummy_detection_item):
+    values = [SigmaString("foobar")]
+    assert (
+        SigmaNegateModifier(dummy_detection_item, []).modify(values) == values
+        and dummy_detection_item.negated is True
+    )
+
+
+def test_lt(dummy_detection_item):
+    assert SigmaLessThanModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaCompareExpression(SigmaNumber(123), CompareOperators.LT)
+
+
+def test_lte(dummy_detection_item):
+    assert SigmaLessThanEqualModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaCompareExpression(SigmaNumber(123), CompareOperators.LTE)
+
+
+def test_gt(dummy_detection_item):
+    assert SigmaGreaterThanModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaCompareExpression(SigmaNumber(123), CompareOperators.GT)
+
+
+def test_gte(dummy_detection_item):
+    assert SigmaGreaterThanEqualModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaCompareExpression(SigmaNumber(123), CompareOperators.GTE)
+
+
+def test_nqe(dummy_detection_item):
+    assert SigmaNotEqualModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaCompareExpression(SigmaNumber(123), CompareOperators.NEQ)
+
+
+def test_fieldref(dummy_detection_item):
+    assert SigmaFieldReferenceModifier(dummy_detection_item, []).modify(
+        SigmaString("field")
+    ) == SigmaFieldReference("field")
+
+
+def test_fieldref_contains(dummy_detection_item):
+    fieldref = SigmaFieldReferenceModifier(dummy_detection_item, []).modify(SigmaString("field"))
+    assert (
+        SigmaContainsModifier(dummy_detection_item, [SigmaFieldReferenceModifier]).modify(fieldref)
+    ) == SigmaFieldReference("field", True, True)
+
+
+def test_fieldref_startswith(dummy_detection_item):
+    fieldref = SigmaFieldReferenceModifier(dummy_detection_item, []).modify(SigmaString("field"))
+    assert (
+        SigmaStartswithModifier(dummy_detection_item, [SigmaFieldReferenceModifier]).modify(
+            fieldref
+        )
+    ) == SigmaFieldReference("field", True, False)
+
+
+def test_fieldref_endswith(dummy_detection_item):
+    fieldref = SigmaFieldReferenceModifier(dummy_detection_item, []).modify(SigmaString("field"))
+    assert (
+        SigmaEndswithModifier(dummy_detection_item, [SigmaFieldReferenceModifier]).modify(fieldref)
+    ) == SigmaFieldReference("field", False, True)
+
+
+def test_fieldref_wildcard(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="must not contain wildcards"):
+        SigmaFieldReferenceModifier(dummy_detection_item, []).modify(SigmaString("field*"))
+
+
+def test_exists(dummy_detection_item):
+    dummy_detection_item.field = "test"
+    assert SigmaExistsModifier(dummy_detection_item, []).modify(SigmaBool(True)) == SigmaExists(
+        True
+    )
+
+
+def test_exists_without_field(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="must be applied to field.*test.yml"):
+        SigmaExistsModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).modify(
+            SigmaBool(True)
+        ) == SigmaExists(True)
+
+
+def test_exists_with_other(dummy_detection_item):
+    dummy_detection_item.field = "test"
+    with pytest.raises(
+        SigmaValueError, match="only applicable to unmodified boolean values.*test.yml"
+    ):
+        SigmaExistsModifier(
+            dummy_detection_item, [SigmaBase64Modifier], SigmaRuleLocation("test.yml")
+        ).modify(SigmaBool(True))
+
+
+def test_compare_string(dummy_detection_item):
+    with pytest.raises(SigmaTypeError, match="expects number.*test.yml"):
+        SigmaGreaterThanEqualModifier(
+            dummy_detection_item, [], SigmaRuleLocation("test.yml")
+        ).modify(SigmaString("123"))
+
+
+def test_expand(dummy_detection_item):
+    assert SigmaExpandModifier(dummy_detection_item, []).modify(SigmaString("test%var%test")).s == [
+        "test",
+        Placeholder("var"),
+        "test",
+    ]
+
+
+def test_expand_re(dummy_detection_item):
+    assert SigmaExpandModifier(dummy_detection_item, []).modify(
+        SigmaRegularExpression("test%var%test")
+    ).regexp.s == [
+        "test",
+        Placeholder("var"),
+        "test",
+    ]
+
+
+def test_cidr(dummy_detection_item):
+    assert SigmaCIDRModifier(dummy_detection_item, []).modify(
+        SigmaString("192.168.1.0/24")
+    ) == SigmaCIDRExpression("192.168.1.0/24")
+
+
+def test_cidr_with_other(dummy_detection_item):
+    with pytest.raises(SigmaValueError, match="only applicable to unmodified values.*test.yml"):
+        SigmaCIDRModifier(
+            dummy_detection_item, [SigmaBase64Modifier], SigmaRuleLocation("test.yml")
+        ).modify(SigmaString("192.168.1.0/24"))
+
+
+def test_cidr_invalid(dummy_detection_item):
+    with pytest.raises(SigmaTypeError, match="Invalid CIDR expression.*test.yml"):
+        SigmaCIDRModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).modify(
+            SigmaString("192.168.1.1/24")
+        )
+
+
+def test_timestamp_minute_modifier(dummy_detection_item):
+    assert SigmaTimestampMinuteModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.MINUTE, 123)
+
+
+def test_timestamp_hour_modifier(dummy_detection_item):
+    assert SigmaTimestampHourModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.HOUR, 123)
+
+
+def test_timestamp_day_modifier(dummy_detection_item):
+    assert SigmaTimestampDayModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.DAY, 123)
+
+
+def test_timestamp_week_modifier(dummy_detection_item):
+    assert SigmaTimestampWeekModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.WEEK, 123)
+
+
+def test_timestamp_month_modifier(dummy_detection_item):
+    assert SigmaTimestampMonthModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.MONTH, 123)
+
+
+def test_timestamp_year_modifier(dummy_detection_item):
+    assert SigmaTimestampYearModifier(dummy_detection_item, []).modify(
+        SigmaNumber(123)
+    ) == SigmaTimestampPart(TimestampPart.YEAR, 123)

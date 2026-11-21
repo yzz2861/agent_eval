@@ -1,0 +1,1262 @@
+import pytest
+from sigma.backends.test import TextQueryTestBackend
+from sigma.collection import SigmaCollection
+from sigma.exceptions import SigmaBackendError, SigmaConversionError
+from sigma.processing.pipeline import ProcessingPipeline, QueryPostprocessingItem
+from sigma.processing.postprocessing import EmbedQueryTransformation
+from .test_conversion_base import test_backend
+
+
+@pytest.fixture
+def event_count_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons for a single user (possible brute force attack)
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+        - fieldB
+    timespan: 5m
+    condition:
+        gte: 10
+fields:
+    - SubjectUserName
+    - TargetUserName
+    - Computer
+            """)
+
+
+def test_event_count_correlation_single_rule_with_grouping(
+    test_backend, event_count_correlation_rule
+):
+    assert test_backend.convert(event_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName, mappedB
+| where event_count >= 10"""]
+
+
+def test_correlation_without_normalization_support(
+    monkeypatch, test_backend, event_count_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "correlation_search_field_normalization_expression", None)
+    assert test_backend.convert(event_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName, mappedB
+| where event_count >= 10"""]
+
+
+def test_generate_query_without_referenced_rules_expression(
+    monkeypatch, test_backend, event_count_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "referenced_rules_expression", None)
+    monkeypatch.setattr(test_backend, "referenced_rules_expression_joiner", None)
+    assert test_backend.convert(event_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName, mappedB
+| where event_count >= 10"""]
+
+
+def test_event_count_correlation_single_rule_with_fields(
+    monkeypatch, test_backend, event_count_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "correlation_fields_expression", {"test": " {fields}"})
+    monkeypatch.setattr(
+        test_backend, "correlation_fields_field_expression", {"test": "values({field}) as {field}"}
+    )
+    monkeypatch.setattr(test_backend, "correlation_fields_field_expression_joiner", {"test": " "})
+    monkeypatch.setattr(
+        test_backend,
+        "event_count_aggregation_expression",
+        {"test": "| aggregate window={timespan} count() as event_count{fields}{groupby}"},
+    )
+
+    assert test_backend.convert(event_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min count() as event_count values(SubjectUserName) as SubjectUserName values(Computer) as Computer by TargetUserName, TargetDomainName, mappedB
+| where event_count >= 10"""]
+
+
+@pytest.fixture
+def value_count_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons for diffrerent users (possible password spraying attack)
+status: test
+correlation:
+    type: value_count
+    rules:
+        - failed_logon
+    timespan: 5m
+    condition:
+        gte: 100
+        field: TargetUserName
+            """)
+
+
+def test_value_count_correlation_single_rule_without_grouping(
+    test_backend, value_count_correlation_rule
+):
+    assert test_backend.convert(value_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min value_count(TargetUserName) as value_count
+| where value_count >= 100"""]
+
+
+@pytest.fixture
+def temporal_correlation_rule():
+    temporal_correlation_rule = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+fields:
+    - SubjectUserName
+    - TargetUserName
+---
+title: Successful logon
+name: successful_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4624
+    condition: selection
+fields:
+    - SubjectUserName
+    - TargetUserName
+    - LogonType
+---
+title: Failed and successful logons for a single user
+status: test
+correlation:
+    type: temporal
+    rules:
+        - failed_logon
+        - successful_logon
+    timespan: 5m
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+            """)
+
+    return temporal_correlation_rule
+
+
+def test_temporal_correlation_multi_rule_without_condition(test_backend, temporal_correlation_rule):
+    assert test_backend.convert(temporal_correlation_rule) == [
+        """subsearch { EventID=4625 | set event_type="failed_logon" }
+subsearch { EventID=4624 | set event_type="successful_logon" }
+
+| temporal window=5min eventtypes=failed_logon,successful_logon by TargetUserName, TargetDomainName
+
+| where eventtype_count >= 2"""
+    ]
+
+
+def test_temporal_correlation_multi_rule_with_typing_expression(
+    monkeypatch, test_backend, temporal_correlation_rule
+):
+    monkeypatch.setattr(
+        test_backend,
+        "temporal_correlation_query",
+        {"test": "{search}\n{typing}\n\n{aggregate}\n\n{condition}"},
+    )
+    monkeypatch.setattr(
+        test_backend, "correlation_search_multi_rule_query_expression", "( {query} )"
+    )
+    monkeypatch.setattr(
+        test_backend, "correlation_search_multi_rule_query_expression_joiner", " or "
+    )
+    monkeypatch.setattr(test_backend, "typing_expression", "| eval event_type=case({queries})")
+    monkeypatch.setattr(test_backend, "typing_rule_query_expression_joiner", ", ")
+    monkeypatch.setattr(test_backend, "typing_rule_query_expression", '{query}, "{ruleid}"')
+    assert test_backend.convert(temporal_correlation_rule) == [
+        """( EventID=4625 ) or ( EventID=4624 )
+| eval event_type=case(EventID=4625, "failed_logon", EventID=4624, "successful_logon")
+
+| temporal window=5min eventtypes=failed_logon,successful_logon by TargetUserName, TargetDomainName
+
+| where eventtype_count >= 2"""
+    ]
+
+
+def test_temporal_correlation_multi_rule_with_referenced_rules_fields(
+    monkeypatch, test_backend, temporal_correlation_rule
+):
+
+    monkeypatch.setattr(test_backend, "correlation_fields_expression", {"test": " {fields}"})
+    monkeypatch.setattr(
+        test_backend, "correlation_fields_field_expression", {"test": "values({field}) as {field}"}
+    )
+    monkeypatch.setattr(test_backend, "correlation_fields_field_expression_joiner", {"test": " "})
+
+    monkeypatch.setattr(
+        test_backend,
+        "temporal_aggregation_expression",
+        {
+            "test": "| aggregate window={timespan} count() as event_count{fields}{groupby}\n| temporal window={timespan} eventtypes={referenced_rules}{groupby}"
+        },
+    )
+    assert test_backend.convert(temporal_correlation_rule) == [
+        """subsearch { EventID=4625 | set event_type="failed_logon" }
+subsearch { EventID=4624 | set event_type="successful_logon" }
+
+| aggregate window=5min count() as event_count values(SubjectUserName) as SubjectUserName values(LogonType) as LogonType by TargetUserName, TargetDomainName
+| temporal window=5min eventtypes=failed_logon,successful_logon by TargetUserName, TargetDomainName
+
+| where eventtype_count >= 2"""
+    ]
+
+
+def test_referenced_rule_expression_used_but_not_defined(
+    monkeypatch, test_backend, temporal_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "referenced_rules_expression", None)
+    monkeypatch.setattr(test_backend, "referenced_rules_expression_joiner", None)
+    with pytest.raises(SigmaBackendError, match="referenced rule expression"):
+        test_backend.convert(temporal_correlation_rule)
+
+
+@pytest.fixture
+def temporal_ordered_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Successful logon
+name: successful_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4624
+    condition: selection
+---
+title: Discovery activity
+name: discovery_activity
+status: test
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains:
+            - whoami
+            - dsquery
+            - net group
+    condition: selection
+---
+title: Failed and successful logons for a single user
+status: test
+correlation:
+    type: temporal_ordered
+    rules:
+        - failed_logon
+        - successful_logon
+        - discovery_activity
+    timespan: 1h
+    aliases:
+        user:
+            failed_logon: TargetUserName
+            successful_logon: TargetUserName
+            discovery_activity: User
+        domain:
+            failed_logon: TargetDomainName
+            successful_logon: TargetDomainName
+            discovery_activity: Domain
+        mapped:
+            failed_logon: fieldB
+            successful_logon: fieldC
+            discovery_activity: fieldD
+    group-by:
+        - user
+        - domain
+        - mapped
+    condition:
+        gte: 2
+            """)
+
+
+def test_temporal_ordered_correlation_multi_rule_with_condition_and_field_normalization(
+    test_backend, temporal_ordered_correlation_rule
+):
+    assert test_backend.convert(temporal_ordered_correlation_rule) == [
+        """subsearch { EventID=4625 | set event_type="failed_logon" | set user=TargetUserName | set domain=TargetDomainName | set mapped=mappedB }
+subsearch { EventID=4624 | set event_type="successful_logon" | set user=TargetUserName | set domain=TargetDomainName | set mapped=fieldC }
+subsearch { CommandLine in ("*whoami*", "*dsquery*", "*net group*") | set event_type="discovery_activity" | set user=User | set domain=Domain | set mapped=fieldD }
+| temporal ordered=true window=1h eventtypes=failed_logon,successful_logon,discovery_activity by user, domain, mapped
+| where eventtype_count >= 2 and eventtype_order=failed_logon,successful_logon,discovery_activity"""
+    ]
+
+
+def test_correlation_timespan_in_seconds(monkeypatch, test_backend, event_count_correlation_rule):
+    monkeypatch.setattr(test_backend, "timespan_seconds", True)
+    assert test_backend.convert(event_count_correlation_rule) == ["""EventID=4625
+| aggregate window=300 count() as event_count by TargetUserName, TargetDomainName, mappedB
+| where event_count >= 10"""]
+
+
+def test_correlation_no_aggregation_expression(
+    monkeypatch, test_backend, value_count_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "groupby_expression_nofield", {"test": " by nothing"})
+    assert test_backend.convert(value_count_correlation_rule) == ["""EventID=4625
+| aggregate window=5min value_count(TargetUserName) as value_count by nothing
+| where value_count >= 100"""]
+
+
+def test_correlation_generate_rule(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons for a single user (possible brute force attack)
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    generate: true
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 10
+            """)
+    assert test_backend.convert(rule_collection) == [
+        "EventID=4625",
+        """EventID=4625
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName
+| where event_count >= 10""",
+    ]
+
+
+def test_correlation_generate_chained_rule(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: Successful login
+name: successful_login
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID:
+            - 528
+            - 4624
+    condition: selection
+---
+title: Single failed login
+name: failed_login
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID:
+            - 529
+            - 4625
+    condition: selection
+---
+title: Multiple failed logons
+name: multiple_failed_login
+correlation:
+    type: event_count
+    rules:
+        - failed_login
+    generate: true
+    group-by:
+        - User
+    timespan: 10m
+    condition:
+        gte: 10
+---
+title: Multiple Failed Logins Followed by Successful Login
+status: test
+correlation:
+    type: temporal_ordered
+    rules:
+        - multiple_failed_login
+        - successful_login
+    generate: true
+    group-by:
+        - User
+    timespan: 10m
+            """)
+
+    assert test_backend.convert(rule_collection) == [
+        """EventID in (528, 4624)""",
+        """EventID in (529, 4625)""",
+        """EventID in (529, 4625)
+| aggregate window=10min count() as event_count by User
+| where event_count >= 10""",
+        """subsearch { EventID in (529, 4625)\n| aggregate window=10min count() as event_count by User\n| where event_count >= 10 | set event_type="multiple_failed_login" }
+subsearch { EventID in (528, 4624) | set event_type="successful_login" }
+| temporal ordered=true window=10min eventtypes=multiple_failed_login,successful_login by User
+| where eventtype_count >= 2 and eventtype_order=multiple_failed_login,successful_login""",
+    ]
+
+
+def test_correlation_chained_rule_without_generate(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: Successful login
+name: successful_login
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID:
+            - 528
+            - 4624
+    condition: selection
+---
+title: Single failed login
+name: failed_login
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID:
+            - 529
+            - 4625
+    condition: selection
+---
+title: Multiple failed logons
+name: multiple_failed_login
+correlation:
+    type: event_count
+    rules:
+        - failed_login
+    generate: false
+    group-by:
+        - User
+    timespan: 10m
+    condition:
+        gte: 10
+---
+title: Multiple Failed Logins Followed by Successful Login
+status: test
+correlation:
+    type: temporal_ordered
+    rules:
+        - multiple_failed_login
+        - successful_login
+    generate: false
+    group-by:
+        - User
+    timespan: 10m
+            """)
+
+    assert test_backend.convert(rule_collection) == [
+        """subsearch { EventID in (529, 4625)\n| aggregate window=10min count() as event_count by User\n| where event_count >= 10 | set event_type="multiple_failed_login" }
+subsearch { EventID in (528, 4624) | set event_type="successful_login" }
+| temporal ordered=true window=10min eventtypes=multiple_failed_login,successful_login by User
+| where eventtype_count >= 2 and eventtype_order=multiple_failed_login,successful_login""",
+    ]
+
+
+def test_correlation_not_supported(monkeypatch, test_backend, event_count_correlation_rule):
+    monkeypatch.setattr(test_backend, "correlation_methods", None)
+    with pytest.raises(NotImplementedError, match="Backend does not support correlation"):
+        test_backend.convert(event_count_correlation_rule)
+
+
+def test_correlation_method_not_supported(test_backend, event_count_correlation_rule):
+    with pytest.raises(SigmaConversionError, match="Correlation method 'invalid' is not supported"):
+        test_backend.convert(event_count_correlation_rule, correlation_method="invalid")
+
+
+def test_correlation_method_no_supported_for_correlation_type(
+    monkeypatch, test_backend, event_count_correlation_rule
+):
+    monkeypatch.setattr(
+        test_backend,
+        "correlation_methods",
+        {"test": "Test correlation method", "another": "Another correlation method"},
+    )
+    with pytest.raises(
+        SigmaConversionError,
+        match="Correlation method 'another' is not supported by backend for correlation type 'event_count'",
+    ):
+        test_backend.convert(event_count_correlation_rule, correlation_method="another")
+
+
+def test_correlation_type_not_supported(monkeypatch, test_backend, event_count_correlation_rule):
+    monkeypatch.setattr(test_backend, "default_correlation_query", None)
+    with pytest.raises(
+        NotImplementedError, match="Correlation rule type 'event_count' is not supported"
+    ):
+        test_backend.convert(event_count_correlation_rule)
+
+
+def test_correlation_normalization_not_supported(
+    monkeypatch, test_backend, temporal_ordered_correlation_rule
+):
+    monkeypatch.setattr(test_backend, "correlation_search_field_normalization_expression", None)
+    monkeypatch.setattr(
+        test_backend, "correlation_search_field_normalization_expression_joiner", None
+    )
+    with pytest.raises(
+        NotImplementedError, match="Correlation field normalization is not supported"
+    ):
+        test_backend.convert(temporal_ordered_correlation_rule)
+
+
+def test_correlation_query_postprocessing(event_count_correlation_rule):
+    test_backend = TextQueryTestBackend(
+        ProcessingPipeline(
+            postprocessing_items=[
+                QueryPostprocessingItem(EmbedQueryTransformation(prefix="[ ", suffix=" ]"))
+            ]
+        )
+    )
+    assert test_backend.convert(event_count_correlation_rule) == ["""[ EventID=4625
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName, fieldB
+| where event_count >= 10 ]"""]
+
+
+def test_correlation_subqueries_finalization(monkeypatch, event_count_correlation_rule):
+    test_backend = TextQueryTestBackend(
+        ProcessingPipeline(
+            postprocessing_items=[
+                QueryPostprocessingItem(EmbedQueryTransformation(prefix="[ ", suffix=" ]"))
+            ]
+        )
+    )
+    monkeypatch.setattr(test_backend, "finalize_correlation_subqueries", True)
+    assert test_backend.convert(event_count_correlation_rule) == ["""[ [ EventID=4625 ]
+| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName, fieldB
+| where event_count >= 10 ]"""]
+
+
+# Tests for new correlation types: value_sum, value_avg, value_percentile
+@pytest.fixture
+def value_sum_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: Transaction event
+name: transaction_event
+status: test
+logsource:
+    product: banking
+detection:
+    selection:
+        EventType: transaction
+    condition: selection
+---
+title: High value sum in short time (possible fraud)
+status: test
+correlation:
+    type: value_sum
+    rules:
+        - transaction_event
+    group-by:
+        - AccountID
+    timespan: 10m
+    condition:
+        gte: 10000
+        field: Amount
+            """)
+
+
+def test_value_sum_correlation_single_rule_with_grouping(test_backend, value_sum_correlation_rule):
+    assert test_backend.convert(value_sum_correlation_rule) == ["""EventType="transaction"
+| aggregate window=10min sum(Amount) as value_sum by AccountID
+| where value_sum >= 10000"""]
+
+
+@pytest.fixture
+def value_avg_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: API response event
+name: api_response
+status: test
+logsource:
+    product: api
+detection:
+    selection:
+        EventType: api_response
+    condition: selection
+---
+title: High average response time
+status: test
+correlation:
+    type: value_avg
+    rules:
+        - api_response
+    group-by:
+        - Endpoint
+    timespan: 5m
+    condition:
+        gte: 1000
+        field: ResponseTime
+            """)
+
+
+def test_value_avg_correlation_single_rule_with_grouping(test_backend, value_avg_correlation_rule):
+    assert test_backend.convert(value_avg_correlation_rule) == ["""EventType="api_response"
+| aggregate window=5min avg(ResponseTime) as value_avg by Endpoint
+| where value_avg >= 1000"""]
+
+
+@pytest.fixture
+def value_percentile_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: Network traffic event
+name: network_traffic
+status: test
+logsource:
+    product: network
+detection:
+    selection:
+        EventType: network_traffic
+    condition: selection
+---
+title: High percentile latency
+status: test
+correlation:
+    type: value_percentile
+    rules:
+        - network_traffic
+    group-by:
+        - SourceIP
+    timespan: 15m
+    condition:
+        gte: 500
+        field: Latency
+        percentile: 95
+            """)
+
+
+def test_value_percentile_correlation_single_rule_with_grouping(
+    test_backend, value_percentile_correlation_rule
+):
+    assert test_backend.convert(value_percentile_correlation_rule) == [
+        """EventType="network_traffic"
+| aggregate window=15min percentile(Latency, 95) as value_percentile by SourceIP
+| where value_percentile >= 500"""
+    ]
+
+
+@pytest.fixture
+def value_median_correlation_rule():
+    return SigmaCollection.from_yaml("""
+title: API response event
+name: api_response
+status: test
+logsource:
+    product: api
+detection:
+    selection:
+        EventType: api_response
+    condition: selection
+---
+title: High median response time
+status: test
+correlation:
+    type: value_median
+    rules:
+        - api_response
+    group-by:
+        - Endpoint
+    timespan: 5m
+    condition:
+        gte: 1000
+        field: ResponseTime
+            """)
+
+
+def test_value_median_correlation_single_rule_with_grouping(
+    test_backend, value_median_correlation_rule
+):
+    assert test_backend.convert(value_median_correlation_rule) == ["""EventType="api_response"
+| aggregate window=5min median(ResponseTime) as value_median by Endpoint
+| where value_median >= 1000"""]
+
+
+def test_value_percentile_correlation_missing_percentile(test_backend):
+    """Test that missing percentile attribute raises SigmaConversionError for value_percentile correlation"""
+    correlation_rule = SigmaCollection.from_yaml("""
+title: Network traffic event
+name: network_traffic
+status: test
+logsource:
+    product: network
+detection:
+    selection:
+        EventType: network_traffic
+    condition: selection
+---
+title: High percentile latency without percentile
+status: test
+correlation:
+    type: value_percentile
+    rules:
+        - network_traffic
+    group-by:
+        - SourceIP
+    timespan: 15m
+    condition:
+        gte: 500
+        field: Latency
+            """)
+    with pytest.raises(
+        SigmaConversionError,
+        match="Percentile must be specified in condition for value_percentile correlation type",
+    ):
+        test_backend.convert(correlation_rule)
+
+
+def test_correlation_rule_callback(test_backend):
+    """Test that callback is invoked for correlation rules"""
+    correlation_rule = SigmaCollection.from_yaml("""
+title: Test event
+name: test_event
+status: test
+logsource:
+    product: test
+detection:
+    selection:
+        EventID: 100
+    condition: selection
+---
+title: Event count correlation
+status: test
+correlation:
+    type: event_count
+    rules:
+        - test_event
+    group-by:
+        - User
+    timespan: 5m
+    condition:
+        gte: 5
+            """)
+
+    callback_invocations = []
+
+    def test_callback(rule, output_format, index, query, result):
+        callback_invocations.append(
+            {
+                "rule": rule,
+                "output_format": output_format,
+                "index": index,
+                "query": query,
+                "result": result,
+            }
+        )
+        return result + " /* modified by callback */"
+
+    result = test_backend.convert(correlation_rule, callback=test_callback)
+
+    # Verify callback was invoked - once for the rule conversion and once for the correlation
+    assert len(callback_invocations) == 2
+    # The second invocation should be for the correlation rule
+    assert "aggregate window" in str(callback_invocations[1]["result"])
+    assert "modified by callback" in result[-1]
+
+
+def test_correlation_rule_callback_skip_result(test_backend):
+    """Test that callback can skip results by returning None for correlation rules"""
+    callback_calls = []
+
+    def test_callback(rule, output_format, index, query, result):
+        callback_calls.append((rule, output_format, index, query, result))
+        # Skip the result
+        return None
+
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons for a single user (possible brute force attack)
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 10
+        """)
+
+    result = test_backend.convert(rule_collection, callback=test_callback)
+    assert result == []
+    assert len(callback_calls) == 2
+
+
+def test_finish_query_correlation_rule_only(test_backend):
+    """Test that finish_query can wrap correlation queries without affecting subqueries."""
+    from sigma.correlations import SigmaCorrelationRule
+
+    class SearchWrapperCorrelationBackend(TextQueryTestBackend):
+        def finish_query(self, rule, query, state):
+            # Only wrap correlation rules, not regular rules
+            if isinstance(rule, SigmaCorrelationRule):
+                return f"search({query})"
+            return query
+
+    backend = SearchWrapperCorrelationBackend()
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    generate: true
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 10
+        """)
+    result = backend.convert(rule_collection)
+    # First query is regular rule (not wrapped)
+    assert result[0] == "EventID=4625"
+    # Second query is correlation rule (wrapped)
+    assert (
+        result[1]
+        == "search(EventID=4625\n| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName\n| where event_count >= 10)"
+    )
+
+
+def test_finish_query_regular_rule_only():
+    """Test that finish_query can wrap regular rule queries without affecting correlation."""
+    from sigma.correlations import SigmaCorrelationRule
+
+    class SearchWrapperRegularBackend(TextQueryTestBackend):
+        def finish_query(self, rule, query, state):
+            # Only wrap regular rules, not correlation rules
+            if not isinstance(rule, SigmaCorrelationRule):
+                return f"search({query})"
+            return query
+
+    backend = SearchWrapperRegularBackend()
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    generate: true
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 10
+        """)
+    result = backend.convert(rule_collection)
+    # First query is regular rule (wrapped)
+    assert result[0] == "search(EventID=4625)"
+    # Second query is correlation rule (not wrapped, but contains wrapped subquery)
+    assert (
+        result[1]
+        == "search(EventID=4625)\n| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName\n| where event_count >= 10"
+    )
+
+
+def test_finish_query_both_correlation_and_subqueries():
+    """Test that finish_query can wrap both correlation queries and their subqueries."""
+    from sigma.correlations import SigmaCorrelationRule
+
+    class SearchWrapperAllBackend(TextQueryTestBackend):
+        def finish_query(self, rule, query, state):
+            return f"search({query})"
+
+    backend = SearchWrapperAllBackend()
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Multiple failed logons
+status: test
+correlation:
+    type: event_count
+    rules:
+        - failed_logon
+    generate: true
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 10
+        """)
+    result = backend.convert(rule_collection)
+    # First query is regular rule (wrapped)
+    assert result[0] == "search(EventID=4625)"
+    # Second query is correlation rule (wrapped, and contains wrapped subquery)
+    assert (
+        result[1]
+        == "search(search(EventID=4625)\n| aggregate window=5min count() as event_count by TargetUserName, TargetDomainName\n| where event_count >= 10)"
+    )
+
+
+def test_finish_query_temporal_correlation_with_subqueries():
+    """Test that finish_query wraps temporal correlation queries and their subqueries."""
+    from sigma.correlations import SigmaCorrelationRule
+
+    class SearchWrapperAllBackend(TextQueryTestBackend):
+        def finish_query(self, rule, query, state):
+            return f"search({query})"
+
+    backend = SearchWrapperAllBackend()
+    rule_collection = SigmaCollection.from_yaml("""
+title: Failed logon
+name: failed_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4625
+    condition: selection
+---
+title: Successful logon
+name: successful_logon
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4624
+    condition: selection
+---
+title: Failed then successful logon
+status: test
+correlation:
+    type: temporal
+    rules:
+        - failed_logon
+        - successful_logon
+    generate: true
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+        """)
+    result = backend.convert(rule_collection)
+    # First two queries are regular rules (wrapped)
+    assert result[0] == "search(EventID=4625)"
+    assert result[1] == "search(EventID=4624)"
+    # Third query is temporal correlation (wrapped, with wrapped subqueries)
+    # The correlation should contain the wrapped subqueries
+    assert "subsearch { search(EventID=4625)" in result[2]
+    assert "subsearch { search(EventID=4624)" in result[2]
+    # And the entire correlation should be wrapped too
+    assert result[2].startswith("search(")
+
+
+def test_correlation_ruleid_is_escaped_in_multi_rule_search_and_typing(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: Rule one
+name: 'bad"name'
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 1
+    condition: selection
+---
+title: Rule two
+name: 'bad"name2'
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 2
+    condition: selection
+---
+title: Temporal correlation with typing
+status: test
+correlation:
+    type: temporal
+    rules:
+        - 'bad"name'
+        - 'bad"name2'
+    group-by:
+        - User
+    timespan: 5m
+    """)
+
+    result = test_backend.convert(rule_collection)
+    assert 'set event_type="bad\\"name"' in result[0]
+    assert 'set event_type="bad\\"name2"' in result[0]
+
+    monkeypatch_backend = TextQueryTestBackend()
+    monkeypatch_backend.typing_expression = "| eval event_type=case({queries})"
+    monkeypatch_backend.typing_rule_query_expression = '{query}, "{ruleid}"'
+    monkeypatch_backend.typing_rule_query_expression_joiner = ", "
+
+    result_with_typing = monkeypatch_backend.convert(rule_collection)
+    assert '"bad\\"name"' in result_with_typing[0]
+    assert '"bad\\"name2"' in result_with_typing[0]
+
+
+def temporal_correlation_with_rule_names(
+    correlation_type: str, first_name: str, second_name: str
+) -> SigmaCollection:
+    return SigmaCollection.from_yaml(f"""
+title: Rule one
+name: '{first_name}'
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 1
+    condition: selection
+---
+title: Rule two
+name: '{second_name}'
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 2
+    condition: selection
+---
+title: Temporal correlation
+status: test
+correlation:
+    type: {correlation_type}
+    rules:
+        - '{first_name}'
+        - '{second_name}'
+    group-by:
+        - User
+    timespan: 5m
+""")
+
+
+@pytest.mark.parametrize(
+    "correlation_type,expected_prefix",
+    [
+        ("temporal", "| temporal window=5min"),
+        ("temporal_ordered", "| temporal ordered=true window=5min"),
+    ],
+)
+def test_correlation_referenced_rules_are_escaped(test_backend, correlation_type, expected_prefix):
+    result = test_backend.convert(
+        temporal_correlation_with_rule_names(correlation_type, 'bad"name', "rule two")
+    )
+    assert f'{expected_prefix} eventtypes="bad\\"name","rule two" by User' in result[0]
+
+
+def test_correlation_referenced_rules_plain_names_unchanged(test_backend):
+    result = test_backend.convert(
+        temporal_correlation_with_rule_names("temporal", "rule-one_1.a", "rule_two")
+    )
+    assert "| temporal window=5min eventtypes=rule-one_1.a,rule_two by User" in result[0]
+
+
+def test_correlation_condition_fieldref_is_escaped(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: API response event
+name: api_response
+status: test
+logsource:
+    product: api
+detection:
+    selection:
+        EventType: api_response
+    condition: selection
+---
+title: Value count with special fieldref
+status: test
+correlation:
+    type: value_count
+    rules:
+        - api_response
+    timespan: 5m
+    condition:
+        gte: 10
+        field: field with space
+    """)
+
+    assert test_backend.convert(rule_collection) == ["""EventType=\"api_response\"
+| aggregate window=5min value_count('field with space') as value_count
+| where value_count >= 10"""]
+
+
+def test_correlation_alias_mapping_field_is_escaped(test_backend):
+    rule_collection = SigmaCollection.from_yaml("""
+title: Rule one
+name: rule_one
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 1
+    condition: selection
+---
+title: Rule two
+name: rule_two
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 2
+    condition: selection
+---
+title: Temporal ordered with aliases
+status: test
+correlation:
+    type: temporal_ordered
+    rules:
+        - rule_one
+        - rule_two
+    aliases:
+        alias space:
+            rule_one: field with space
+            rule_two: other field
+    group-by:
+        - alias space
+    timespan: 5m
+    condition:
+        gte: 2
+    """)
+
+    result = test_backend.convert(rule_collection)
+    assert "set 'alias space'='field with space'" in result[0]
+    assert "set 'alias space'='other field'" in result[0]
+
+
+def test_correlation_rule_callback_skip_result_only(test_backend):
+    """Test that callback can skip results by returning None"""
+    correlation_rule = SigmaCollection.from_yaml("""
+title: Test event
+name: test_event
+status: test
+logsource:
+    product: test
+detection:
+    selection:
+        EventID: 100
+    condition: selection
+---
+title: Event count correlation
+status: test
+correlation:
+    type: event_count
+    rules:
+        - test_event
+    group-by:
+        - User
+    timespan: 5m
+    condition:
+        gte: 5
+            """)
+
+    def skip_callback(rule, output_format, index, query, result):
+        return None  # Skip all results
+
+    result = test_backend.convert(correlation_rule, callback=skip_callback)
+
+    # Verify no results were returned (both rule and correlation skipped)
+    assert len(result) == 0
