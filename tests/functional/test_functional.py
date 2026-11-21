@@ -686,6 +686,14 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("try_except_continue.py", expect)
 
+    def test_sensitive_exception_chain(self):
+        """Test sensitive data leaking via raise chains."""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 4, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 1, "HIGH": 3},
+        }
+        self.check_example("exception_chain_leak.py", expect)
+
     def test_try_except_pass(self):
         """Test try, except pass detection."""
         test = next(
