@@ -45,6 +45,7 @@ Contents:
 
    examples
    concepts
+   migration
    jks
    bks
    exceptions

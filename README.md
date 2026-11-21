@@ -16,6 +16,35 @@ This is better:
  -  no security concerns in passwords going into command line arguments, or unencrypted files being left around
  -  no dependency on a JVM
 
+## Offline migration forensics:
+
+Use `jks.inspect_migration` to compare ordered keystore snapshots without a
+JVM or network access. Certificate identity is the SHA-256 of the DER
+certificate, so aliases are never treated as identity:
+
+~~~python
+report = jks.inspect_migration(
+    [
+        {'name': 'old', 'path': 'old.jks', 'password': 'changeit'},
+        {'name': 'new', 'path': 'new.jks', 'password': 'changeit'},
+    ],
+    {'tls-server': {'aliases': ['legacy-web', 'web'], 'risk': 'high'}},
+)
+
+for change in report['renames']:
+    print(change['from_alias'], '->', change['to_alias'], 'identity preserved')
+
+for change in report['rotations']:
+    print(change['old_identity'], '->', change['new_identity'])
+    print('affected high-risk usages:', change['affected_high_risk_usages'])
+~~~
+
+Private and secret keys are loaded in encrypted form and are never decrypted
+or copied into the report. Damaged JKS/JCEKS files are salvaged on a
+best-effort basis: complete entries are kept and the report is marked
+`incomplete` instead of discarding confirmed hand-offs. See
+`docs/migration.rst` for the accepted source and usage-inventory shapes.
+
 ## Requirements:
 
  * Python 2.6+ or Python 3.3+

@@ -8,6 +8,15 @@ submitted by active PyJKS users.
 
 PyJKS uses the [CalVer](https://calver.org) versioning scheme (`YY.MINOR.MICRO`).
 
+Unreleased
+----------
+
+* Add the offline `jks.inspect_migration` forensics API.  Certificate
+  identity is derived from SHA-256 of the public DER certificate, so alias
+  renames and certificate rotations are reported as independent changes.
+  Private and secret keys are never decrypted or copied into the report, and
+  damaged JKS/JCEKS files are salvaged on a best-effort basis.
+
 v20.0.0
 -------
 *(April 18, 2020)*
