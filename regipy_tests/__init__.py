@@ -40,6 +40,7 @@ from .validation.validation_tests import disable_last_access_validation
 from .validation.validation_tests import disablesr_plugin_validation
 from .validation.validation_tests import image_file_execution_options_validation
 from .validation.validation_tests import installed_programs_ntuser_validation
+from .validation.validation_tests import uninstall_attribution_validation
 from .validation.validation_tests import previous_winver_plugin_validation
 from .validation.validation_tests import processor_architecture_validation
 from .validation.validation_tests import routes_validation

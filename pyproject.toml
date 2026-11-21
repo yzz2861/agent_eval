@@ -65,6 +65,7 @@ regipy-plugins-run = "regipy.cli:run_plugins"
 regipy-plugins-list = "regipy.cli:list_plugins"
 regipy-diff = "regipy.cli:reg_diff"
 regipy-process-transaction-logs = "regipy.cli:parse_transaction_log"
+regipy-uninstall-attribution = "regipy.cli:uninstall_attribution"
 
 [project.urls]
 Homepage = "https://github.com/mkorman90/regipy/"

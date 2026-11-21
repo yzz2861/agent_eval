@@ -50,6 +50,7 @@
     "typed_paths",
     "typed_urls",
     "uac_plugin",
+    "uninstall_attribution",
     "usb_devices",
     "usbstor_plugin",
     "user_assist",

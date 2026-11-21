@@ -131,6 +131,7 @@ Available Plugins
 **SOFTWARE Plugins:**
 
 * ``installed_programs_software`` - Retrieves installed programs
+* ``uninstall_attribution`` - Joins machine/user uninstall evidence and traces collection differences
 * ``profilelist_plugin`` - Parses user profile information
 * ``uac_plugin`` - Gets User Access Control settings
 * ``winver_plugin`` - Gets OS version information

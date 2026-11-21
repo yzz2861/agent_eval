@@ -17,6 +17,7 @@ from .security.domain_sid import DomainSidPlugin
 from .software.classes_installer import SoftwareClassesInstallerPlugin
 from .software.image_file_execution_options import ImageFileExecutionOptions
 from .software.installed_programs import InstalledProgramsSoftwarePlugin
+from .software.uninstall_attribution import UninstallAttributionPlugin
 from .software.last_logon import LastLogonPlugin
 from .software.persistence import SoftwarePersistencePlugin
 from .software.printdemon import PrintDemonPlugin

@@ -56,6 +56,7 @@
 | typed_paths                   | Retrieve the typed Paths from the history                                                | TypedPathsPlugin                | TypedPathsPluginValidationCase                | True      |
 | typed_urls                    | Retrieve the typed URLs from IE history                                                  | TypedUrlsPlugin                 | TypedUrlsPluginValidationCase                 | True      |
 | uac_plugin                    | Get the status of User Access Control                                                    | UACStatusPlugin                 | UACStatusPluginValidationCase                 | True      |
+| uninstall_attribution         | Attribute uninstall records across machine/user views and two collection snapshots       | UninstallAttributionPlugin      | UninstallAttributionPluginValidationCase      | True      |
 | usb_devices                   | Parses USB device connection history                                                     | USBDevicesPlugin                | USBDevicesPluginValidationCase                | True      |
 | usbstor_plugin                | Parse the connected USB devices history                                                  | USBSTORPlugin                   | USBSTORPluginValidationCase                   | True      |
 | user_assist                   | Parse User Assist artifact                                                               | UserAssistPlugin                | NTUserUserAssistValidationCase                | True      |

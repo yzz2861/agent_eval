@@ -289,6 +289,134 @@ def run_plugins(hive_path, output_path, plugins, hive_type, partial_hive_path, v
     )
 
 
+def _load_user_hive_specs(specs):
+    from regipy.hive_types import NTUSER_HIVE_TYPE
+    from regipy.uninstall_attribution import UserHive
+
+    user_hives = []
+    for spec in specs:
+        if "=" not in spec:
+            raise click.BadParameter("user hive must use SID=PATH syntax")
+        subject_id, hive_path = spec.split("=", 1)
+        if not subject_id or not hive_path:
+            raise click.BadParameter("user hive must use SID=PATH syntax")
+        user_hives.append(
+            UserHive(
+                subject_id=subject_id,
+                hive=RegistryHive(hive_path, hive_type=NTUSER_HIVE_TYPE),
+            )
+        )
+    return user_hives
+
+
+def _load_expected_user_ids(expected_user_ids):
+    return {str(subject_id) for subject_id in expected_user_ids}
+
+
+@click.command()
+@click.option(
+    "--software",
+    "software_path",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=True,
+    help="Current machine SOFTWARE hive",
+)
+@click.option(
+    "--baseline-software",
+    "baseline_software_path",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=False,
+    help="Baseline machine SOFTWARE hive",
+)
+@click.option(
+    "--user-hive",
+    "user_hive_specs",
+    multiple=True,
+    help="Current user hive as SID=PATH; repeat for multiple profiles",
+)
+@click.option(
+    "--baseline-user-hive",
+    "baseline_user_hive_specs",
+    multiple=True,
+    help="Baseline user hive as SID=PATH; repeat for multiple profiles",
+)
+@click.option(
+    "--expected-user",
+    "expected_user_ids",
+    multiple=True,
+    help="User SID expected in the current collection; repeat as needed",
+)
+@click.option(
+    "--baseline-expected-user",
+    "baseline_expected_user_ids",
+    multiple=True,
+    help="User SID expected in the baseline collection; repeat as needed",
+)
+@click.option("--machine-id", default="machine", show_default=True, help="Stable machine subject identifier")
+@click.option("--collection-id", default="current", show_default=True)
+@click.option("--baseline-collection-id", default="baseline", show_default=True)
+@click.option(
+    "-o",
+    "output_path",
+    type=click.Path(exists=False, dir_okay=False, resolve_path=True),
+    required=False,
+)
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Verbosity")
+def uninstall_attribution(
+    software_path,
+    baseline_software_path,
+    user_hive_specs,
+    baseline_user_hive_specs,
+    expected_user_ids,
+    baseline_expected_user_ids,
+    machine_id,
+    collection_id,
+    baseline_collection_id,
+    output_path,
+    verbose,
+):
+    """Attribute uninstall evidence across machine/user hives and two snapshots."""
+
+    from regipy.hive_types import SOFTWARE_HIVE_TYPE
+    from regipy.uninstall_attribution import (
+        CollectionSnapshot,
+        analyze_uninstall_attribution,
+    )
+
+    _setup_logging(verbose=verbose)
+    current = CollectionSnapshot(
+        collection_id=collection_id,
+        software_hive=RegistryHive(software_path, hive_type=SOFTWARE_HIVE_TYPE),
+        user_hives=_load_user_hive_specs(user_hive_specs),
+        expected_user_ids=_load_expected_user_ids(expected_user_ids),
+        machine_id=machine_id,
+    )
+
+    baseline = None
+    if baseline_software_path or baseline_user_hive_specs or baseline_expected_user_ids:
+        baseline = CollectionSnapshot(
+            collection_id=baseline_collection_id,
+            software_hive=(
+                RegistryHive(baseline_software_path, hive_type=SOFTWARE_HIVE_TYPE) if baseline_software_path else None
+            ),
+            user_hives=_load_user_hive_specs(baseline_user_hive_specs),
+            expected_user_ids=_load_expected_user_ids(baseline_expected_user_ids),
+            machine_id=machine_id,
+        )
+
+    report = analyze_uninstall_attribution(
+        current=current,
+        baseline=baseline,
+        machine_id=machine_id,
+    )
+    rendered = json.dumps(report, indent=4)
+    if output_path:
+        with open(output_path, "w") as output_file:
+            output_file.write(rendered)
+    else:
+        click.secho(rendered)
+
+
 @click.command()
 def list_plugins():
     click.secho(
