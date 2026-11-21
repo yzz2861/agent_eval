@@ -445,3 +445,45 @@ and ``-d`` to generate very verbose debugging information.
 You may also add the option ``-l debug`` to display debugging messages
 (very verbose).
 
+
+
+Pre-export forensic manifest
+----------------------------
+
+When only an explicitly approved subset of streams may leave an OLE
+attachment, use :py:meth:`olefile.OleFileIO.export_manifest` before copying
+anything. The method reads structural metadata only; it never reads or
+returns stream payload bytes.
+
+::
+
+    with olefile.OleFileIO("attachment.ole") as ole:
+        manifest = ole.export_manifest(["WordDocument"])
+        if not manifest["ok"]:
+            for gap in manifest["gaps"]:
+                print(gap["code"], gap.get("file_offset"), gap.get("locator"))
+        # Only these streams may be copied:
+        print(manifest["export_streams"])
+
+The manifest lists, for every approved stream:
+
+- the 128-byte directory entry (SID, directory sector and absolute offset),
+- parent storage entries and the directory stream sectors,
+- the FAT or MiniFAT allocation chain,
+- the physical FAT/MiniFAT sectors that hold each next pointer,
+- for mini streams, the MiniStream sectors and mini-sector spans.
+
+``export_streams`` is exactly the explicit approval list (plus explicitly
+approved metadata streams). It is never expanded implicitly.
+
+If an allocation unit backing an approved stream is also referenced by an
+unapproved stream, the manifest returns a ``shared_allocation_unit`` gap with
+the stream path/SID, the unit kind and index, and absolute file offsets.
+``requires_authorization`` is true. The other stream is named only for
+localisation (``withheld_streams``) and is never added to ``export_streams``
+or read.
+
+Do not copy whole container streams merely because they appear in
+``dependencies``. The directory stream can contain unapproved entries, and the
+MiniStream can contain unapproved payload. Copy only the listed entry/span
+ranges; ``dependencies.*.copy_entire_stream`` is false for both.

@@ -91,6 +91,9 @@ __version__ = '0.47'
 __author__  = "Philippe Lagadec"
 
 __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
+           'OleExportManifest', 'build_export_manifest', 'forensic_manifest',
+           'export_manifest', 'forensic_checklist',
+           'build_export_checklist', 'pre_export_checklist', 'forensic_export_manifest',
            'MAGIC', 'STGTY_EMPTY',
            'STGTY_STREAM', 'STGTY_STORAGE', 'STGTY_ROOT', 'STGTY_PROPERTY',
            'STGTY_LOCKBYTES', 'MINIMAL_OLEFILE_SIZE',
@@ -725,6 +728,31 @@ class OleStream(io.BytesIO):
         # when all data is read in memory, BytesIO constructor is called
         io.BytesIO.__init__(self, data)
         # Then the OleStream object can be used as a read-only file object.
+
+
+# --- OleExportManifest -------------------------------------------------------
+
+class OleExportManifest(dict):
+    """
+    Result of :meth:`OleFileIO.export_manifest`.
+
+    The manifest is a plain ``dict`` so that it can be serialized directly.
+    Its top-level keys are also exposed as attributes for convenience::
+
+        manifest = ole.export_manifest(['WordDocument'])
+        print(manifest['gaps'])   # dict access
+        print(manifest.gaps)      # attribute access
+
+    The manifest deliberately contains locators and structural metadata only.
+    It never contains the bytes of a stream, and it never adds a stream to
+    ``export_streams`` unless that stream was explicitly approved.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
 
 
 # --- OleDirectoryEntry -------------------------------------------------------
@@ -1969,6 +1997,1590 @@ class OleFileIO:
             raise IOError("this file is not a stream")
         return self._open(entry.isectStart, entry.size)
 
+    # --- export manifest helpers ------------------------------------------
+
+    def _manifest_name_text(self, name):
+        """Return a printable path component, without changing the real name."""
+        if isinstance(name, bytes):
+            return name.decode('utf-8', 'replace')
+        if not isinstance(name, basestring):
+            return str(name)
+        return name
+
+    def _manifest_path_text(self, components):
+        return '/'.join(self._manifest_name_text(part) for part in components)
+
+    def _manifest_read_header(self):
+        """Read the 512-byte header without leaving the file position moved."""
+        position = self.fp.tell()
+        try:
+            self.fp.seek(0)
+            return self.fp.read(512)
+        finally:
+            self.fp.seek(position)
+
+    def _manifest_fat_layout(self):
+        """
+        Return the physical FAT sector ids and the DIFAT chain.
+
+        ``self.fat`` is the logical FAT array.  To point a reviewer back into
+        the original file, each logical FAT entry must also be mapped to the
+        physical sector that stores it.  The order of FAT sectors is defined
+        by the 109 header slots followed by the DIFAT chain.
+        """
+        header = self._manifest_read_header()
+        fat_ids = []
+        difat_chain = []
+        if len(header) == 512:
+            for index in range(109):
+                value = struct.unpack_from('<I', header, 76 + index * 4)[0]
+                if value in (FREESECT, ENDOFCHAIN, FATSECT, DIFSECT):
+                    continue
+                if value >= self.nb_sect:
+                    continue
+                fat_ids.append(value)
+            if self.num_difat_sectors:
+                entries_per_sector = self.sectorsize // 4
+                current = self.first_difat_sector
+                seen = set()
+                for _ in range(self.num_difat_sectors):
+                    if current in (ENDOFCHAIN, FREESECT) or current in seen:
+                        break
+                    if current < 0 or current >= self.nb_sect:
+                        break
+                    seen.add(current)
+                    difat_chain.append(current)
+                    try:
+                        data = self.getsect(current)
+                    except Exception:
+                        break
+                    for index in range(entries_per_sector - 1):
+                        value = struct.unpack_from('<I', data, index * 4)[0]
+                        if value in (FREESECT, ENDOFCHAIN, FATSECT, DIFSECT):
+                            continue
+                        if value >= self.nb_sect:
+                            continue
+                        fat_ids.append(value)
+                    current = struct.unpack_from(
+                        '<I', data, (entries_per_sector - 1) * 4)[0]
+        if self.num_fat_sectors:
+            fat_ids = fat_ids[:self.num_fat_sectors]
+        # Fall back to the physical sectors already parsed when the header is
+        # damaged.  This keeps locators useful for forensic review.
+        if not fat_ids and self.fat is not None:
+            per_sector = self.sectorsize // 4
+            count = (len(self.fat) + per_sector - 1) // per_sector
+            fat_ids = list(range(min(count, self.nb_sect)))
+        return fat_ids, difat_chain
+
+    def _manifest_sector_locator(self, sect, length=None):
+        if sect is None or sect < 0 or sect >= self.nb_sect:
+            return None
+        if length is None:
+            length = self.sectorsize
+        offset = (sect + 1) * self.sectorsize
+        return {
+            'kind': 'sector',
+            'sector': sect,
+            'index': sect,
+            'file_offset': offset,
+            'offset': offset,
+            'length': length,
+            'label': 'sector %d at file offset 0x%X' % (sect, offset),
+        }
+
+    def _manifest_range(self, sect):
+        return self._manifest_sector_locator(sect, self.sectorsize)
+
+    def _manifest_issue(self, code, message, severity='error', locator=None,
+                        **extra):
+        issue = {
+            'code': code,
+            'type': code,
+            'message': message,
+            'reason': message,
+            'severity': severity,
+            'blocking': severity == 'error',
+            'requires_authorization': extra.pop('requires_authorization', False),
+        }
+        if locator is not None:
+            issue['locator'] = locator
+            if locator.get('file_offset') is not None:
+                issue['file_offset'] = locator['file_offset']
+                issue['offset'] = locator['file_offset']
+            if locator.get('sector') is not None:
+                issue['sector'] = locator['sector']
+            if locator.get('unit_index') is not None:
+                issue['unit_index'] = locator['unit_index']
+            if locator.get('unit_kind') is not None:
+                issue['unit_kind'] = locator['unit_kind']
+            issue['location'] = locator.get('label', '')
+        issue.update(extra)
+        return issue
+
+    def _manifest_follow_chain(self, table, start, expected_units, unit_kind):
+        """
+        Follow a FAT or MiniFAT chain without reading stream payload bytes.
+
+        Returns ``(units, issues)``.  ``units`` is the ordered list of sector
+        or mini-sector indexes that back the stream.
+        """
+        units = []
+        issues = []
+        if expected_units == 0:
+            if start not in (ENDOFCHAIN, FREESECT):
+                issues.append(self._manifest_issue(
+                    'empty_stream_has_allocation',
+                    'zero-size stream has a start allocation unit',
+                    severity='warning',
+                    locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                             'unit_index': start, 'index': start,
+                             'file_offset': None,
+                             'label': '%s %s' % (unit_kind, start)}))
+            return units, issues
+        if start in (ENDOFCHAIN, FREESECT):
+            issues.append(self._manifest_issue(
+                'missing_allocation_chain',
+                'stream has a non-zero size but no allocation chain',
+                locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                         'unit_index': start, 'index': start,
+                         'file_offset': None,
+                         'label': '%s start marker %s' % (unit_kind, start)},
+                path=None))
+            return units, issues
+        if table is None:
+            issues.append(self._manifest_issue(
+                'allocation_table_unavailable',
+                'allocation table is not available for this %s chain' % unit_kind,
+                locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                         'unit_index': start, 'index': start,
+                         'file_offset': None,
+                         'label': '%s %s (table unavailable)' % (unit_kind, start)}))
+            return units, issues
+
+        seen = set()
+        current = start
+        limit = max(len(table) + 1, expected_units or 0)
+        while current not in (ENDOFCHAIN, FREESECT):
+            current = int(current) & 0xFFFFFFFF
+            if current < 0 or current > MAXREGSECT or current >= len(table):
+                issues.append(self._manifest_issue(
+                    'allocation_unit_out_of_range',
+                    'allocation chain refers outside the %s table' % unit_kind,
+                    locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                             'unit_index': current, 'index': current,
+                             'file_offset': None,
+                             'label': '%s %s (out of range)' % (unit_kind, current)}))
+                break
+            if current in seen:
+                issues.append(self._manifest_issue(
+                    'allocation_chain_loop',
+                    'allocation chain loops at %s %s' % (unit_kind, current),
+                    locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                             'unit_index': current, 'index': current,
+                             'file_offset': None,
+                             'label': '%s %s (loop)' % (unit_kind, current)}))
+                break
+            seen.add(current)
+            units.append(current)
+            try:
+                current = int(table[current]) & 0xFFFFFFFF
+            except (IndexError, TypeError, ValueError):
+                issues.append(self._manifest_issue(
+                    'allocation_table_entry_unreadable',
+                    'cannot read allocation table entry for %s %s' %
+                    (unit_kind, units[-1]),
+                    locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                             'unit_index': units[-1], 'index': units[-1],
+                             'file_offset': None,
+                             'label': '%s %s (unreadable entry)' %
+                                      (unit_kind, units[-1])}))
+                break
+            if len(units) > limit:
+                issues.append(self._manifest_issue(
+                    'allocation_chain_too_long',
+                    'allocation chain is longer than the table'))
+                break
+
+        if current == FREESECT:
+            issues.append(self._manifest_issue(
+                'allocation_chain_hits_free_unit',
+                'allocation chain reaches a FREE%s marker' %
+                ('SECT' if unit_kind == 'sector' else ' mini-sector'),
+                locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                         'unit_index': units[-1] if units else None,
+                         'index': units[-1] if units else None,
+                         'file_offset': None,
+                         'label': 'FREE marker'}))
+        if expected_units is not None and len(units) != expected_units:
+            severity = 'error' if len(units) < expected_units else 'warning'
+            issues.append(self._manifest_issue(
+                'allocation_chain_length_mismatch',
+                'stream needs %d %s(s) but its chain contains %d' %
+                (expected_units, unit_kind, len(units)),
+                severity=severity,
+                locator={'kind': unit_kind, 'unit_kind': unit_kind,
+                         'unit_index': units[0] if units else start,
+                         'index': units[0] if units else start,
+                         'file_offset': None,
+                         'label': '%s chain start' %
+                                  (units[0] if units else start)}))
+        return units, issues
+
+    def _manifest_chain_for_entry(self, entry):
+        if entry.entry_type != STGTY_STREAM or entry.size == 0:
+            return [], []
+        if entry.is_minifat:
+            if self.minifat is None:
+                try:
+                    self.loadminifat()
+                except Exception as exc:
+                    return [], [self._manifest_issue(
+                        'minifat_unavailable',
+                        'MiniFAT cannot be loaded: %s' % exc,
+                        locator={'kind': 'minisector',
+                                 'unit_kind': 'minisector',
+                                 'unit_index': entry.isectStart,
+                                 'index': entry.isectStart,
+                                 'file_offset': None,
+                                 'label': 'mini-sector %s' % entry.isectStart})]
+            table = self.minifat
+            unit_size = self.minisectorsize
+            unit_kind = 'minisector'
+        else:
+            table = self.fat
+            unit_size = self.sectorsize
+            unit_kind = 'sector'
+        expected = (entry.size + unit_size - 1) // unit_size
+        return self._manifest_follow_chain(
+            table, entry.isectStart, expected, unit_kind)
+
+    def _manifest_fat_entry_locator(self, index, fat_ids):
+        entries_per_sector = self.sectorsize // 4
+        ordinal = index // entries_per_sector
+        within = (index % entries_per_sector) * 4
+        if ordinal >= len(fat_ids):
+            return None
+        sector = fat_ids[ordinal]
+        if sector < 0 or sector >= self.nb_sect:
+            return None
+        offset = (sector + 1) * self.sectorsize + within
+        return {
+            'kind': 'fat-entry',
+            'index': index,
+            'file_offset': offset,
+            'offset': offset,
+            'length': 4,
+            'fat_sector': sector,
+            'sector': sector,
+            'offset_in_sector': within,
+            'label': 'FAT entry %d in sector %d at file offset 0x%X' %
+                     (index, sector, offset),
+        }
+
+    def _manifest_minifat_entry_locator(self, index, minifat_chain):
+        ordinal = (index * 4) // self.sectorsize
+        within = (index * 4) % self.sectorsize
+        if ordinal >= len(minifat_chain):
+            return None
+        sector = minifat_chain[ordinal]
+        if sector < 0 or sector >= self.nb_sect:
+            return None
+        offset = (sector + 1) * self.sectorsize + within
+        return {
+            'kind': 'minifat-entry',
+            'index': index,
+            'file_offset': offset,
+            'offset': offset,
+            'length': 4,
+            'minifat_sector': sector,
+            'fat_sector': sector,
+            'sector': sector,
+            'offset_in_sector': within,
+            'label': 'MiniFAT entry %d in sector %d at file offset 0x%X' %
+                     (index, sector, offset),
+        }
+
+    def _manifest_mini_data_locator(self, index, root_chain):
+        logical = index * self.minisectorsize
+        ordinal = logical // self.sectorsize
+        within = logical % self.sectorsize
+        if ordinal >= len(root_chain):
+            return {
+                'kind': 'minisector',
+                'unit_kind': 'minisector',
+                'unit_index': index,
+                'index': index,
+                'logical_offset': logical,
+                'file_offset': None,
+                'offset': None,
+                'length': self.minisectorsize,
+                'sector': None,
+                'offset_in_sector': within,
+                'label': 'mini-sector %d (MiniStream mapping unavailable)' % index,
+            }
+        sector = root_chain[ordinal]
+        offset = (sector + 1) * self.sectorsize + within
+        return {
+            'kind': 'minisector',
+            'unit_kind': 'minisector',
+            'unit_index': index,
+            'index': index,
+            'logical_offset': logical,
+            'file_offset': offset,
+            'offset': offset,
+            'length': self.minisectorsize,
+            'sector': sector,
+            'ministream_sector': sector,
+            'offset_in_sector': within,
+            'label': 'mini-sector %d in MiniStream sector %d at file offset 0x%X' %
+                     (index, sector, offset),
+        }
+
+    def _manifest_directory_entry_locator(self, sid, directory_chain):
+        entry_offset = sid * OleDirectoryEntry.DIRENTRY_SIZE
+        if directory_chain:
+            ordinal = entry_offset // self.sectorsize
+            within = entry_offset % self.sectorsize
+            sector = directory_chain[ordinal] if ordinal < len(directory_chain) else None
+        else:
+            sector = None
+            within = entry_offset % self.sectorsize
+        if sector is None:
+            file_offset = None
+        else:
+            file_offset = (sector + 1) * self.sectorsize + within
+        return {
+            'kind': 'directory-entry',
+            'sid': sid,
+            'index': sid,
+            'directory_stream_offset': entry_offset,
+            'offset_in_sector': within,
+            'sector': sector,
+            'file_offset': file_offset,
+            'offset': file_offset,
+            'length': OleDirectoryEntry.DIRENTRY_SIZE,
+            'label': 'directory entry SID %d at file offset %s' %
+                     (sid, '0x%X' % file_offset if file_offset is not None
+                      else 'unavailable'),
+        }
+
+    def _manifest_resolve_path(self, path_components):
+        node = self.root
+        ancestors = [self.root]
+        actual = []
+        for component in path_components:
+            wanted = self._manifest_name_text(component).lower()
+            for kid in node.kids:
+                if self._manifest_name_text(kid.name).lower() == wanted:
+                    node = kid
+                    ancestors.append(kid)
+                    actual.append(kid.name)
+                    break
+            else:
+                return None, ancestors, actual, 'not_found'
+        if node.entry_type != STGTY_STREAM:
+            return node, ancestors, actual, 'not_a_stream'
+        return node, ancestors, actual, 'ok'
+
+    def _manifest_structural_context(self):
+        fat_ids, difat_chain = self._manifest_fat_layout()
+        directory_size = getattr(self.directory_fp, 'size', None)
+        expected_directory = None
+        if directory_size:
+            expected_directory = (
+                directory_size + self.sectorsize - 1) // self.sectorsize
+        directory_chain, directory_issues = self._manifest_follow_chain(
+            self.fat, self.first_dir_sector, expected_directory, 'sector')
+
+        minifat_chain = []
+        minifat_issues = []
+        if self.num_mini_fat_sectors:
+            minifat_chain, minifat_issues = self._manifest_follow_chain(
+                self.fat, self.first_mini_fat_sector,
+                self.num_mini_fat_sectors, 'sector')
+
+        root_chain = []
+        root_issues = []
+        if self.root is not None and self.root.size:
+            expected_root = (
+                self.root.size + self.sectorsize - 1) // self.sectorsize
+            root_chain, root_issues = self._manifest_follow_chain(
+                self.fat, self.root.isectStart, expected_root, 'sector')
+        return {
+            'fat_ids': fat_ids,
+            'difat_chain': difat_chain,
+            'directory_chain': directory_chain,
+            'directory_issues': directory_issues,
+            'minifat_chain': minifat_chain,
+            'minifat_issues': minifat_issues,
+            'root_chain': root_chain,
+            'root_issues': root_issues,
+        }
+
+    def _manifest_all_user_streams(self):
+        records = []
+        known_sids = set()
+        for path in self.listdir():
+            sid = self._find(path)
+            entry = self.direntries[sid]
+            known_sids.add(sid)
+            chain, issues = self._manifest_chain_for_entry(entry)
+            records.append({
+                'sid': sid,
+                'entry': entry,
+                'path_components': list(path),
+                'path': self._manifest_path_text(path),
+                'chain': chain,
+                'issues': issues,
+                'unit_kind': 'minisector' if entry.is_minifat else 'sector',
+                'unreferenced': False,
+            })
+        records.extend(self._manifest_unreferenced_streams(known_sids))
+        return records
+
+    def _manifest_unreferenced_streams(self, known_sids):
+        # Parse stream entries present in the directory stream but not
+        # reachable from the storage tree. A withdrawn or crafted attachment
+        # can hide a second claim on the same allocation unit there. Only the
+        # 128-byte directory entry and its allocation chain are read.
+        records = []
+        if not self.directory_fp or self.direntries is None:
+            return records
+
+        class EntryView(object):
+            pass
+
+        for sid in range(len(self.direntries)):
+            if sid in known_sids or sid == 0:
+                continue
+            try:
+                self.directory_fp.seek(sid * OleDirectoryEntry.DIRENTRY_SIZE)
+                raw = self.directory_fp.read(OleDirectoryEntry.DIRENTRY_SIZE)
+            except Exception:
+                break
+            if len(raw) != OleDirectoryEntry.DIRENTRY_SIZE:
+                break
+            (name_raw, namelength, entry_type, color, sid_left, sid_right,
+             sid_child, clsid, flags, ctime, mtime, isectStart,
+             sizeLow, sizeHigh) = struct.unpack(
+                 OleDirectoryEntry.STRUCT_DIRENTRY, raw)
+            if entry_type != STGTY_STREAM or (sizeLow == 0 and sizeHigh == 0):
+                continue
+            if self.sectorsize == 512:
+                size = sizeLow
+            else:
+                size = sizeLow + (long(sizeHigh) << 32)
+            if size <= 0:
+                continue
+            name_length = min(namelength, len(name_raw))
+            name_utf16 = name_raw[:max(name_length - 2, 0)]
+            try:
+                name = self._manifest_name_text(
+                    self._decode_utf16_str(name_utf16))
+            except Exception:
+                name = ''
+            view = EntryView()
+            view.entry_type = entry_type
+            view.size = size
+            view.is_minifat = size < self.minisectorcutoff
+            view.isectStart = isectStart
+            chain, issues = self._manifest_chain_for_entry(view)
+            path = '<unreferenced SID %d>' % sid
+            records.append({
+                'sid': sid,
+                'entry': view,
+                'path_components': [path],
+                'path': path,
+                'chain': chain,
+                'issues': issues,
+                'unit_kind': (
+                    'minisector' if view.is_minifat else 'sector'),
+                'unreferenced': True,
+                'directory_name': name,
+            })
+        return records
+
+    def _manifest_stream_record(self, record, role, structural):
+        """
+        Expand one directory entry into an auditable list of locators.
+
+        Only structural data is inspected: directory entries, FAT/MiniFAT
+        pointers, and the MiniStream layout.  Stream payload bytes are never
+        read by this method.
+        """
+        entry = record['entry']
+        chain = record['chain']
+        is_mini = entry.is_minifat
+        unit_kind = record['unit_kind']
+        unit_size = self.minisectorsize if is_mini else self.sectorsize
+        table = self.minifat if is_mini else self.fat
+        fat_ids = structural['fat_ids']
+        minifat_chain = structural['minifat_chain']
+        root_chain = structural['root_chain']
+        directory_chain = structural['directory_chain']
+
+        directory_entry = self._manifest_directory_entry_locator(
+            entry.sid, directory_chain)
+        ctime = entry.getctime()
+        mtime = entry.getmtime()
+        directory_entry.update({
+            'name': self._manifest_name_text(entry.name),
+            'entry_type': entry.entry_type,
+            'size': entry.size,
+            'is_minifat': is_mini,
+            'isectStart': entry.isectStart,
+            'clsid': entry.clsid,
+            'flags': entry.dwUserFlags,
+            'create_time_raw': entry.createTime,
+            'modify_time_raw': entry.modifyTime,
+            'create_time': ctime.isoformat() if ctime else None,
+            'modify_time': mtime.isoformat() if mtime else None,
+        })
+
+        parent_entries = []
+        directory_sectors = set()
+        for ancestor in record.get('ancestors', []):
+            locator = self._manifest_directory_entry_locator(
+                ancestor.sid, directory_chain)
+            locator = dict(locator)
+            locator.update({
+                'name': self._manifest_name_text(ancestor.name),
+                'entry_type': ancestor.entry_type,
+                'size': ancestor.size,
+            })
+            parent_entries.append(locator)
+            if locator.get('sector') is not None:
+                directory_sectors.add(locator['sector'])
+        if directory_entry.get('sector') is not None:
+            directory_sectors.add(directory_entry['sector'])
+
+        data_units = []
+        allocation_entries = []
+        fat_sectors = set()
+        minifat_sectors = set()
+        ministream_sectors = set()
+        for ordinal, unit in enumerate(chain):
+            if is_mini:
+                unit_locator = self._manifest_mini_data_locator(unit, root_chain)
+                table_locator = self._manifest_minifat_entry_locator(
+                    unit, minifat_chain)
+                if table_locator:
+                    minifat_sectors.add(table_locator.get('minifat_sector'))
+                if unit_locator.get('sector') is not None:
+                    ministream_sectors.add(unit_locator['sector'])
+            else:
+                unit_locator = self._manifest_sector_locator(unit)
+                table_locator = self._manifest_fat_entry_locator(unit, fat_ids)
+                if table_locator:
+                    fat_sectors.add(table_locator.get('fat_sector'))
+
+            if unit_locator is None:
+                unit_locator = {
+                    'kind': unit_kind,
+                    'unit_kind': unit_kind,
+                    'unit_index': unit,
+                    'index': unit,
+                    'file_offset': None,
+                    'offset': None,
+                    'length': unit_size,
+                    'label': '%s %s (mapping unavailable)' % (unit_kind, unit),
+                }
+            else:
+                unit_locator = dict(unit_locator)
+            unit_locator['logical_offset'] = ordinal * unit_size
+            unit_locator['data_length'] = max(
+                0, min(unit_size, entry.size - ordinal * unit_size))
+            unit_locator['unit_kind'] = unit_kind
+            unit_locator['unit_index'] = unit
+            data_units.append(unit_locator)
+
+            next_unit = None
+            if table is not None and unit < len(table):
+                next_unit = int(table[unit]) & 0xFFFFFFFF
+            allocation_entries.append({
+                'unit': unit,
+                'next': next_unit,
+                'table': 'MiniFAT' if is_mini else 'FAT',
+                'locator': table_locator,
+                'fat_sector': (table_locator or {}).get('fat_sector'),
+                'minifat_sector': (table_locator or {}).get('minifat_sector'),
+                'file_offset': (table_locator or {}).get('file_offset'),
+            })
+
+        # The FAT entries that point from one directory, MiniFAT or
+        # MiniStream sector to the next are supporting metadata too.
+        for unit in directory_chain:
+            locator = self._manifest_fat_entry_locator(unit, fat_ids)
+            if locator:
+                fat_sectors.add(locator.get('fat_sector'))
+        if is_mini:
+            for unit in minifat_chain:
+                locator = self._manifest_fat_entry_locator(unit, fat_ids)
+                if locator:
+                    fat_sectors.add(locator.get('fat_sector'))
+            for unit in root_chain:
+                locator = self._manifest_fat_entry_locator(unit, fat_ids)
+                if locator:
+                    fat_sectors.add(locator.get('fat_sector'))
+
+        fat_sectors.discard(None)
+        minifat_sectors.discard(None)
+        ministream_sectors.discard(None)
+
+        support = {
+            'header': {
+                'kind': 'header',
+                'file_offset': 0,
+                'offset': 0,
+                'length': 512,
+                'label': 'OLE header at file offset 0x0',
+            },
+            'directory': {
+                'sectors': sorted(directory_sectors),
+                'ranges': [self._manifest_range(sect)
+                           for sect in sorted(directory_sectors)],
+            },
+            'fat': {
+                'sectors': sorted(fat_sectors),
+                'ranges': [self._manifest_range(sect)
+                           for sect in sorted(fat_sectors)],
+            },
+            'difat': {
+                'sectors': list(structural['difat_chain']),
+                'ranges': [self._manifest_range(sect)
+                           for sect in structural['difat_chain']],
+            },
+        }
+        if is_mini:
+            support['minifat'] = {
+                'sectors': sorted(minifat_sectors),
+                'ranges': [self._manifest_range(sect)
+                           for sect in sorted(minifat_sectors)],
+            }
+            support['ministream'] = {
+                'sectors': sorted(ministream_sectors),
+                'ranges': [self._manifest_range(sect)
+                           for sect in sorted(ministream_sectors)],
+            }
+
+        allocation_table_sectors = (
+            sorted(minifat_sectors) if is_mini else sorted(fat_sectors))
+        return {
+            'path': record['path'],
+            'sid': entry.sid,
+            'size': entry.size,
+            'storage': 'minifat' if is_mini else 'fat',
+            'allocation_domain': 'MiniFAT' if is_mini else 'FAT',
+            'role': role,
+            'directory_entry': directory_entry,
+            'parent_entries': parent_entries,
+            'start_unit': entry.isectStart,
+            'allocation_chain': list(chain),
+            'unit_count': len(chain),
+            'unit_kind': unit_kind,
+            'data_units': data_units,
+            'allocation_table': {
+                'type': 'MiniFAT' if is_mini else 'FAT',
+                'unit_kind': unit_kind,
+                'unit_size': unit_size,
+                'expected_unit_count': (
+                    (entry.size + unit_size - 1) // unit_size
+                    if entry.size else 0),
+                'units': list(chain),
+                'entries': allocation_entries,
+                'sectors': allocation_table_sectors,
+                'terminator': ENDOFCHAIN,
+            },
+            'support': support,
+            'issues': list(record.get('issues', [])),
+        }
+
+    def export_manifest(self, approved_streams=None, allow_shared_units=False,
+                        metadata_streams=None, **kwargs):
+        """
+        Build a pre-export forensic checklist for an OLE attachment.
+
+        The checklist is deliberately narrower than a generic OLE dump: only
+        streams named by the caller are placed in ``export_streams``.  For each
+        approved stream the manifest lists every locator a reviewer needs to
+        find the judgement again in the original file:
+
+        * the 128-byte directory entry (SID, sector and absolute file offset),
+        * the parent storage directory entries,
+        * the FAT or MiniFAT allocation chain,
+        * the physical FAT/MiniFAT sectors holding each next pointer,
+        * for MiniFAT streams, the MiniStream sectors and mini-sector spans.
+
+        Allocation units are cross-checked against every stream in the file.
+        If a unit backing an approved stream is also referenced by a stream
+        that was not approved (or by a structural stream such as the directory
+        or MiniFAT), a ``shared_allocation_unit`` gap is returned.  The other
+        stream is named only so that the reviewer can locate it; it is never
+        added to ``export_streams`` and its payload is never read or included.
+
+        :param approved_streams: explicit approval list.  Each item may be a
+            path string (``'Storage/Stream'``), a list of path components, or
+            a dict with a ``path``/``stream`` key.  A policy dict with
+            ``streams``/``approved_streams`` and optional ``metadata`` keys is
+            also accepted.  No wildcards or implicit expansion are performed.
+        :param allow_shared_units: if False (default), a shared allocation
+            unit is a blocking gap.  If True, it remains a warning and still
+            requires the caller to have obtained the extra authorization.
+        :param metadata_streams: optional explicit list of metadata streams
+            (for example ``\\x05SummaryInformation``) to include in the export.
+            They are not discovered implicitly.
+        :returns: :class:`OleExportManifest` (a dict subclass).
+        """
+        if 'approved' in kwargs and approved_streams is None:
+            approved_streams = kwargs.pop('approved')
+        if 'streams' in kwargs and approved_streams is None:
+            approved_streams = kwargs.pop('streams')
+        if 'approvals' in kwargs and approved_streams is None:
+            approved_streams = kwargs.pop('approvals')
+        if 'allowed_streams' in kwargs and approved_streams is None:
+            approved_streams = kwargs.pop('allowed_streams')
+        if 'allowed' in kwargs and approved_streams is None:
+            approved_streams = kwargs.pop('allowed')
+        if 'allow_shared' in kwargs:
+            allow_shared_units = kwargs.pop('allow_shared')
+        if 'include_metadata' in kwargs and metadata_streams is None:
+            metadata_streams = kwargs.pop('include_metadata')
+        if 'metadata' in kwargs and metadata_streams is None:
+            metadata_streams = kwargs.pop('metadata')
+
+        # A policy dict may carry both payload and metadata approvals.  A
+        # single-entry dict with a path/stream key is treated as one stream,
+        # not as a policy.
+        if isinstance(approved_streams, dict):
+            policy = approved_streams
+            policy_keys = ('approved_streams', 'streams', 'approved',
+                           'allowed', 'allow', 'payload', 'copy', 'include')
+            if any(key in policy for key in policy_keys):
+                found = None
+                for key in policy_keys:
+                    if key in policy:
+                        found = policy[key]
+                        break
+                approved_streams = found
+                if metadata_streams is None:
+                    for key in ('metadata_streams', 'metadata',
+                                'supporting_metadata'):
+                        if key in policy:
+                            metadata_streams = policy[key]
+                            break
+            elif ('path' in policy or 'stream' in policy or
+                  'name' in policy or 'components' in policy):
+                approved_streams = [policy]
+            else:
+                approved_streams = []
+
+        def normalise(value, default_role):
+            entries = []
+            if value is None:
+                return entries
+            if isinstance(value, dict):
+                value = [value]
+            elif isinstance(value, (basestring, bytes)):
+                value = [value]
+            else:
+                try:
+                    value = list(value)
+                except TypeError:
+                    value = [value]
+            for item in value:
+                role = default_role
+                requested = item
+                if isinstance(item, dict):
+                    role = item.get('role', default_role)
+                    requested = item.get(
+                        'path', item.get(
+                            'stream', item.get(
+                                'name', item.get('components'))))
+                if isinstance(requested, bytes):
+                    requested = requested.decode('utf-8', 'replace')
+                if isinstance(requested, basestring):
+                    components = [part for part in
+                                  requested.replace('\\', '/').split('/')
+                                  if part != '']
+                elif isinstance(requested, (list, tuple)):
+                    components = list(requested)
+                elif requested is None:
+                    components = []
+                else:
+                    components = [requested]
+                if components:
+                    entries.append((
+                        components,
+                        role,
+                        self._manifest_path_text(components),
+                    ))
+            return entries
+
+        requested = (
+            normalise(approved_streams, 'stream') +
+            normalise(metadata_streams, 'metadata'))
+
+        structural = self._manifest_structural_context()
+        directory_chain = structural['directory_chain']
+        gaps = []
+        approved_items = []
+        seen_sids = set()
+
+        for components, role, requested_text in requested:
+            entry, ancestors, actual, status = self._manifest_resolve_path(
+                components)
+            if status == 'not_found':
+                ancestor = ancestors[-1] if ancestors else None
+                missing_index = len(actual)
+                locator = {
+                    'kind': 'path',
+                    'path': requested_text,
+                    'requested_path': requested_text,
+                    'resolved_components': list(actual),
+                    'missing_component': (
+                        components[missing_index]
+                        if missing_index < len(components) else None),
+                    'file_offset': None,
+                    'offset': None,
+                    'label': 'path %r (missing after %r)' %
+                             (requested_text, actual),
+                }
+                if ancestor is not None:
+                    ancestor_locator = self._manifest_directory_entry_locator(
+                        ancestor.sid, directory_chain)
+                    locator['ancestor_sid'] = ancestor.sid
+                    locator['ancestor_entry'] = ancestor_locator
+                    locator['file_offset'] = ancestor_locator.get('file_offset')
+                    locator['offset'] = locator['file_offset']
+                    locator['label'] = (
+                        'path %r missing below SID %d at file offset %s' %
+                        (requested_text, ancestor.sid,
+                         '0x%X' % locator['file_offset']
+                         if locator['file_offset'] is not None
+                         else 'unavailable'))
+                gap = self._manifest_issue(
+                    'stream_not_found',
+                    'approved stream was not found in the original file',
+                    locator=locator)
+                gap.update({
+                    'path': requested_text,
+                    'requested_path': requested_text,
+                    'missing_component': locator['missing_component'],
+                })
+                gaps.append(gap)
+                continue
+            if status == 'not_a_stream':
+                locator = self._manifest_directory_entry_locator(
+                    entry.sid, directory_chain)
+                locator = dict(locator)
+                locator['path'] = requested_text
+                gap = self._manifest_issue(
+                    'not_a_stream',
+                    'approved path resolves to a storage, not a stream',
+                    locator=locator)
+                gap.update({
+                    'path': requested_text,
+                    'requested_path': requested_text,
+                    'sid': entry.sid,
+                    'entry_type': entry.entry_type,
+                })
+                gaps.append(gap)
+                continue
+            if entry.sid in seen_sids:
+                continue
+            seen_sids.add(entry.sid)
+            approved_items.append({
+                'entry': entry,
+                'ancestors': ancestors,
+                'actual_components': actual,
+                'path': self._manifest_path_text(actual),
+                'requested_path': requested_text,
+                'role': role,
+            })
+
+        approved_sids = set(item['entry'].sid for item in approved_items)
+        all_records = self._manifest_all_user_streams()
+        records_by_sid = dict((record['sid'], record)
+                              for record in all_records)
+
+        stream_records = []
+        for item in approved_items:
+            record = records_by_sid.get(item['entry'].sid)
+            if record is None:
+                entry = item['entry']
+                chain, issues = self._manifest_chain_for_entry(entry)
+                record = {
+                    'sid': entry.sid,
+                    'entry': entry,
+                    'path_components': list(item['actual_components']),
+                    'path': item['path'],
+                    'chain': chain,
+                    'issues': issues,
+                    'unit_kind': (
+                        'minisector' if entry.is_minifat else 'sector'),
+                }
+            record = dict(record)
+            record['ancestors'] = item['ancestors']
+            stream_record = self._manifest_stream_record(
+                record, item['role'], structural)
+            stream_record['requested_path'] = item['requested_path']
+            stream_records.append(stream_record)
+
+            if stream_record['directory_entry'].get('file_offset') is None:
+                locator = dict(stream_record['directory_entry'])
+                locator['path'] = item['path']
+                locator['sid'] = item['entry'].sid
+                gap = self._manifest_issue(
+                    'directory_entry_locator_unavailable',
+                    'approved stream directory entry cannot be mapped to an '
+                    'absolute file offset',
+                    locator=locator)
+                gap.update({
+                    'path': item['path'],
+                    'stream': item['path'],
+                    'sid': item['entry'].sid,
+                })
+                gaps.append(gap)
+
+            for unit in stream_record.get('data_units', []):
+                if unit.get('file_offset') is not None:
+                    continue
+                locator = dict(unit)
+                locator['path'] = item['path']
+                locator['sid'] = item['entry'].sid
+                gap = self._manifest_issue(
+                    'allocation_unit_locator_unavailable',
+                    'approved stream allocation unit cannot be mapped to an '
+                    'absolute file offset',
+                    locator=locator)
+                gap.update({
+                    'path': item['path'],
+                    'stream': item['path'],
+                    'sid': item['entry'].sid,
+                    'unit_kind': unit.get('unit_kind'),
+                    'unit_index': unit.get('unit_index'),
+                    'logical_offset': unit.get('logical_offset'),
+                })
+                gaps.append(gap)
+
+            for issue in record.get('issues', []):
+                gap = dict(issue)
+                gap.update({
+                    'path': item['path'],
+                    'stream': item['path'],
+                    'sid': item['entry'].sid,
+                })
+                gaps.append(gap)
+
+        # Map every allocation unit to its owner(s), including structural
+        # streams.  This is a metadata walk only; no stream payload is read.
+        owners = {}
+
+        def add_owner(key, owner):
+            bucket = owners.setdefault(key, [])
+            signature = (owner.get('role'), owner.get('sid'),
+                         owner.get('path'))
+            for existing in bucket:
+                if (existing.get('role'), existing.get('sid'),
+                        existing.get('path')) == signature:
+                    return
+            bucket.append(owner)
+
+        for record in all_records:
+            entry = record['entry']
+            if entry.entry_type != STGTY_STREAM or entry.size == 0:
+                continue
+            for unit in record['chain']:
+                key = (record['unit_kind'], int(unit))
+                add_owner(key, {
+                    'role': 'stream',
+                    'sid': record['sid'],
+                    'path': record['path'],
+                    'approved': record['sid'] in approved_sids,
+                    'support_metadata': False,
+                })
+
+        for sector in structural['directory_chain']:
+            add_owner(('sector', int(sector)), {
+                'role': 'directory', 'sid': None, 'path': None,
+                'approved': False, 'support_metadata': True,
+            })
+        for sector in structural['minifat_chain']:
+            add_owner(('sector', int(sector)), {
+                'role': 'minifat', 'sid': None, 'path': None,
+                'approved': False, 'support_metadata': True,
+            })
+        for sector in structural['root_chain']:
+            add_owner(('sector', int(sector)), {
+                'role': 'ministream', 'sid': None, 'path': None,
+                'approved': False, 'support_metadata': True,
+            })
+        for sector in structural['fat_ids']:
+            add_owner(('sector', int(sector)), {
+                'role': 'fat', 'sid': None, 'path': None,
+                'approved': False, 'support_metadata': True,
+            })
+        for sector in structural['difat_chain']:
+            add_owner(('sector', int(sector)), {
+                'role': 'difat', 'sid': None, 'path': None,
+                'approved': False, 'support_metadata': True,
+            })
+
+        shared_units = []
+        for key in sorted(owners.keys()):
+            unit_kind, unit_index = key
+            owner_list = owners[key]
+            if len(owner_list) < 2:
+                continue
+            approved_owners = [
+                owner for owner in owner_list
+                if owner['role'] == 'stream' and owner.get('approved')]
+            if not approved_owners:
+                continue
+            stream_owners = [
+                owner for owner in owner_list if owner['role'] == 'stream']
+            unapproved_owners = [
+                owner for owner in stream_owners
+                if not owner.get('approved')]
+            structural_owners = [
+                owner for owner in owner_list if owner['role'] != 'stream']
+
+            if unit_kind == 'minisector':
+                unit_locator = self._manifest_mini_data_locator(
+                    unit_index, structural['root_chain'])
+            else:
+                unit_locator = self._manifest_sector_locator(unit_index)
+            if unit_locator is None:
+                unit_locator = {
+                    'kind': unit_kind,
+                    'unit_kind': unit_kind,
+                    'unit_index': unit_index,
+                    'index': unit_index,
+                    'file_offset': None,
+                    'offset': None,
+                    'length': (
+                        self.minisectorsize if unit_kind == 'minisector'
+                        else self.sectorsize),
+                    'label': '%s %d (locator unavailable)' %
+                             (unit_kind, unit_index),
+                }
+            unit_locator = dict(unit_locator)
+            unit_locator['unit_kind'] = unit_kind
+            unit_locator['unit_index'] = unit_index
+
+            involved_entries = []
+            for owner in stream_owners:
+                locator = self._manifest_directory_entry_locator(
+                    owner['sid'], directory_chain)
+                locator = dict(locator)
+                locator['path'] = owner['path']
+                locator['approved'] = bool(owner.get('approved'))
+                involved_entries.append(locator)
+
+            requires_authorization = bool(
+                unapproved_owners or structural_owners)
+            other_path = (
+                unapproved_owners[0]['path'] if unapproved_owners else None)
+            other_sid = (
+                unapproved_owners[0]['sid'] if unapproved_owners else None)
+            if unapproved_owners:
+                reason = (
+                    'allocation unit is also referenced by unapproved '
+                    'stream(s): %s' %
+                    ', '.join(owner['path'] for owner in unapproved_owners))
+            elif structural_owners:
+                reason = (
+                    'allocation unit is also used by structural stream(s): %s'
+                    % ', '.join(sorted(set(
+                        owner['role'] for owner in structural_owners))))
+            else:
+                reason = 'allocation unit is shared only by approved streams'
+
+            shared = {
+                'kind': unit_kind,
+                'unit_kind': unit_kind,
+                'unit_index': unit_index,
+                'index': unit_index,
+                'unit': unit_index,
+                'file_offset': unit_locator.get('file_offset'),
+                'offset': unit_locator.get('file_offset'),
+                'length': unit_locator.get('length'),
+                'sector': unit_locator.get('sector'),
+                'locator': unit_locator,
+                'location': unit_locator.get('label'),
+                'owners': [
+                    {
+                        'role': owner['role'],
+                        'sid': owner.get('sid'),
+                        'path': owner.get('path'),
+                        'approved': bool(owner.get('approved')),
+                        'support_metadata': bool(
+                            owner.get('support_metadata')),
+                    }
+                    for owner in owner_list],
+                'streams': [owner['path'] for owner in stream_owners],
+                'approved_streams': [
+                    owner['path'] for owner in approved_owners],
+                'unapproved_streams': [
+                    owner['path'] for owner in unapproved_owners],
+                'structural_owners': sorted(set(
+                    owner['role'] for owner in structural_owners)),
+                'other_path': other_path,
+                'other_sid': other_sid,
+                'requires_authorization': requires_authorization,
+                'authorization_required': requires_authorization,
+                'requires_extra_authorization': requires_authorization,
+                'needs_extra_authorization': requires_authorization,
+                'reason': reason,
+                'directory_entries': involved_entries,
+                'other_payload_included': False,
+                'export_scope_unchanged': True,
+            }
+            shared_units.append(shared)
+
+            if requires_authorization:
+                blocking = not bool(allow_shared_units)
+                message = (
+                    'shared allocation unit %s %d backs approved stream %s'
+                    % (unit_kind, unit_index,
+                       approved_owners[0]['path']))
+                if other_path:
+                    message += ' and unapproved stream %s' % other_path
+                if structural_owners:
+                    message += ' and structural role(s) %s' % (
+                        ', '.join(shared['structural_owners']))
+                message += (
+                    '; extra authorization is required before export'
+                    if blocking else
+                    '; shared-unit authorization was acknowledged by the '
+                    'caller, but the other stream is still not exported')
+                gap = {
+                    'code': 'shared_allocation_unit',
+                    'type': 'shared_allocation_unit',
+                    'message': message,
+                    'reason': reason,
+                    'severity': 'error' if blocking else 'warning',
+                    'blocking': blocking,
+                    'requires_authorization': True,
+                    'authorization_required': True,
+                    'requires_extra_authorization': True,
+                    'needs_extra_authorization': True,
+                    'path': approved_owners[0]['path'],
+                    'stream': approved_owners[0]['path'],
+                    'sid': approved_owners[0]['sid'],
+                    'other_path': other_path,
+                    'other_sid': other_sid,
+                    'shared_with': (
+                        [owner['path'] for owner in unapproved_owners] or
+                        shared['structural_owners']),
+                    'unit_kind': unit_kind,
+                    'unit_index': unit_index,
+                    'sector': unit_locator.get('sector'),
+                    'file_offset': unit_locator.get('file_offset'),
+                    'offset': unit_locator.get('file_offset'),
+                    'length': unit_locator.get('length'),
+                    'locator': unit_locator,
+                    'location': unit_locator.get('label'),
+                    'shared_unit': shared,
+                }
+                gaps.append(gap)
+
+        # Annotate each approved data unit with the same shared-unit
+        # judgement, so a reviewer does not have to join two tables by hand.
+        shared_by_key = {}
+        for shared in shared_units:
+            shared_by_key[(shared['unit_kind'], shared['unit_index'])] = shared
+        for record in stream_records:
+            record_shares = []
+            for unit in record['data_units']:
+                key = (unit.get('unit_kind'), unit.get('unit_index'))
+                shared = shared_by_key.get(key)
+                if shared is None:
+                    continue
+                unit['shared'] = True
+                unit['requires_authorization'] = shared[
+                    'requires_authorization']
+                unit['shared_with'] = (
+                    shared['unapproved_streams'] or
+                    shared['structural_owners'])
+                unit['other_path'] = shared.get('other_path')
+                record_shares.append(shared)
+            record['shared_units'] = record_shares
+
+        # Withheld streams are listed for localisation only.  They are never
+        # added to the export set and their data is never read.
+        withheld_by_sid = {}
+        for shared in shared_units:
+            for owner in shared['owners']:
+                if owner['role'] != 'stream' or owner['approved']:
+                    continue
+                item = withheld_by_sid.get(owner['sid'])
+                if item is None:
+                    locator = self._manifest_directory_entry_locator(
+                        owner['sid'], directory_chain)
+                    item = {
+                        'path': owner['path'],
+                        'sid': owner['sid'],
+                        'reason': (
+                            'shares an allocation unit with an approved '
+                            'stream; authorization not present'),
+                        'directory_entry': locator,
+                        'shared_units': [],
+                        'exported': False,
+                        'exportable': False,
+                        'disclosable': False,
+                        'authorized': False,
+                        'payload_included': False,
+                    }
+                    withheld_by_sid[owner['sid']] = item
+                item['shared_units'].append({
+                    'unit_kind': shared['unit_kind'],
+                    'unit_index': shared['unit_index'],
+                    'file_offset': shared['file_offset'],
+                    'sector': shared['sector'],
+                    'locator': shared['locator'],
+                })
+        withheld_streams = sorted(
+            withheld_by_sid.values(), key=lambda item: item['sid'])
+
+        needed_entry_sids = set()
+        entries_needed = []
+        for record in stream_records:
+            for locator in record.get('parent_entries', []):
+                if locator['sid'] not in needed_entry_sids:
+                    needed_entry_sids.add(locator['sid'])
+                    entries_needed.append(locator)
+        entries_needed.sort(key=lambda locator: locator['sid'])
+
+        directory_entry_sids = set(
+            entry.sid for entry in (self.direntries or [])
+            if entry is not None and entry.entry_type != STGTY_EMPTY)
+        directory_entry_sids.update(
+            record['sid'] for record in all_records
+            if record.get('unreferenced'))
+        unapproved_entry_count = len(
+            directory_entry_sids - needed_entry_sids)
+
+        mini_records = [
+            record for record in all_records
+            if record['entry'].is_minifat and record['entry'].size > 0]
+        approved_mini_sids = set(
+            record['sid'] for record in mini_records
+            if record['sid'] in approved_sids)
+        unapproved_mini_records = [
+            record for record in mini_records
+            if record['sid'] not in approved_mini_sids]
+
+        minifat_entries_needed = []
+        seen_minifat_units = set()
+        approved_ministream_spans = []
+        for record in stream_records:
+            if record['storage'] != 'minifat':
+                continue
+            for entry in record['allocation_table']['entries']:
+                if entry['unit'] in seen_minifat_units:
+                    continue
+                seen_minifat_units.add(entry['unit'])
+                minifat_entries_needed.append({
+                    'unit': entry['unit'],
+                    'next': entry['next'],
+                    'locator': entry['locator'],
+                })
+            for unit in record['data_units']:
+                approved_ministream_spans.append({
+                    'path': record['path'],
+                    'sid': record['sid'],
+                    'unit_kind': unit.get('unit_kind'),
+                    'unit_index': unit.get('unit_index'),
+                    'file_offset': unit.get('file_offset'),
+                    'sector': unit.get('sector'),
+                    'length': unit.get('length'),
+                    'data_length': unit.get('data_length'),
+                    'locator': unit,
+                })
+
+        directory_dependency = {
+            'first_sector': self.first_dir_sector,
+            'sectors': list(structural['directory_chain']),
+            'ranges': [self._manifest_range(sector)
+                       for sector in structural['directory_chain']],
+            'entries_needed': entries_needed,
+            'entry_count': len(self.direntries or []),
+            'unapproved_entry_count': unapproved_entry_count,
+            'contains_unapproved_entries': unapproved_entry_count > 0,
+            'copy_entire_stream': False,
+            'copy_ranges': [
+                {'sid': locator['sid'],
+                 'file_offset': locator['file_offset'],
+                 'length': locator['length']}
+                for locator in entries_needed],
+            'disclosure_class': 'directory-metadata',
+        }
+        fat_dependency = {
+            'sectors': list(structural['fat_ids']),
+            'ranges': [self._manifest_range(sector)
+                       for sector in structural['fat_ids']],
+            'num_fat_sectors': self.num_fat_sectors,
+            'entries_per_sector': self.sectorsize // 4,
+            'copy_entire_stream': 'allocation-metadata-only',
+            'disclosure_class': 'allocation-metadata',
+        }
+        difat_dependency = {
+            'present': bool(structural['difat_chain']),
+            'sectors': list(structural['difat_chain']),
+            'ranges': [self._manifest_range(sector)
+                       for sector in structural['difat_chain']],
+            'disclosure_class': 'allocation-metadata',
+        }
+        minifat_dependency = {
+            'present': bool(structural['minifat_chain']),
+            'first_sector': self.first_mini_fat_sector,
+            'sectors': list(structural['minifat_chain']),
+            'ranges': [self._manifest_range(sector)
+                       for sector in structural['minifat_chain']],
+            'entries_needed': minifat_entries_needed,
+            'copy_entire_stream': False,
+            'copy_entries': minifat_entries_needed,
+            'disclosure_class': 'allocation-metadata',
+        }
+        ministream_dependency = {
+            'present': bool(self.root is not None and self.root.size),
+            'first_sector': (
+                self.root.isectStart if self.root is not None else None),
+            'size': self.root.size if self.root is not None else 0,
+            'sectors': list(structural['root_chain']),
+            'ranges': [self._manifest_range(sector)
+                       for sector in structural['root_chain']],
+            'approved_spans': approved_ministream_spans,
+            'contains_unapproved_payload': bool(unapproved_mini_records),
+            'unapproved_mini_stream_count': len(unapproved_mini_records),
+            'copy_entire_stream': False,
+            'copy_ranges': list(approved_ministream_spans),
+            'disclosure_class': 'payload-container',
+        }
+
+        dependencies = {
+            'header': {
+                'kind': 'header',
+                'file_offset': 0,
+                'offset': 0,
+                'length': 512,
+                'label': 'OLE header at file offset 0x0',
+                'disclosure_class': 'structural',
+            },
+            'directory': directory_dependency,
+            'fat': fat_dependency,
+            'difat': difat_dependency,
+            'minifat': minifat_dependency,
+            'ministream': ministream_dependency,
+        }
+
+        warnings_list = []
+        if unapproved_entry_count:
+            warnings_list.append({
+                'code': 'directory_stream_contains_unapproved_entries',
+                'type': 'directory_stream_contains_unapproved_entries',
+                'message': (
+                    'The directory stream also contains %d entry/entries '
+                    'outside the approved set. Copy only the listed 128-byte '
+                    'entry ranges, not the entire directory stream.'
+                    % unapproved_entry_count),
+                'severity': 'warning',
+                'blocking': False,
+                'requires_authorization': False,
+                'unapproved_entry_count': unapproved_entry_count,
+                'entries_needed': [locator['sid'] for locator in entries_needed],
+                'copy_entire_stream': False,
+                'locator': (
+                    self._manifest_range(self.first_dir_sector)
+                    if self.first_dir_sector not in (
+                        ENDOFCHAIN, FREESECT) else None),
+                'disclosure_class': 'directory-metadata',
+            })
+        if unapproved_mini_records:
+            warnings_list.append({
+                'code': 'ministream_contains_unapproved_payload',
+                'type': 'ministream_contains_unapproved_payload',
+                'message': (
+                    'The MiniStream container also holds %d unapproved '
+                    'mini-stream(s). Copy only the approved mini-sector '
+                    'spans listed in dependencies.ministream.approved_spans; '
+                    'do not copy the whole MiniStream.'
+                    % len(unapproved_mini_records)),
+                'severity': 'warning',
+                'blocking': False,
+                'requires_authorization': False,
+                'unapproved_mini_stream_count': len(unapproved_mini_records),
+                'approved_spans': approved_ministream_spans,
+                'copy_entire_stream': False,
+                'locator': (
+                    self._manifest_range(self.root.isectStart)
+                    if self.root is not None and self.root.size else None),
+                'disclosure_class': 'payload-container',
+            })
+
+        export_streams = []
+        for record in stream_records:
+            if record['path'] not in export_streams:
+                export_streams.append(record['path'])
+        payload_streams = [
+            record['path'] for record in stream_records
+            if record['role'] != 'metadata']
+        metadata_stream_paths = [
+            record['path'] for record in stream_records
+            if record['role'] == 'metadata']
+        streams_by_path = dict(
+            (record['path'], record) for record in stream_records)
+
+        blocking_gaps = [gap for gap in gaps if gap.get('blocking')]
+        ok = not blocking_gaps
+        requires_extra_authorization = any(
+            shared.get('requires_authorization')
+            for shared in shared_units)
+
+        copy_streams = []
+        for record in stream_records:
+            data_ranges = []
+            for unit in record['data_units']:
+                data_ranges.append({
+                    'file_offset': unit.get('file_offset'),
+                    'length': unit.get('data_length', unit.get('length')),
+                    'unit_kind': unit.get('unit_kind'),
+                    'unit_index': unit.get('unit_index'),
+                    'locator': unit,
+                })
+            copy_streams.append({
+                'path': record['path'],
+                'sid': record['sid'],
+                'data_ranges': data_ranges,
+                'directory_entry': record['directory_entry'],
+                'allocation_entries': record['allocation_table']['entries'],
+            })
+        copy_plan = {
+            'policy': 'minimal-ranges-only',
+            'streams': copy_streams,
+            'directory_entries': entries_needed,
+            'header': {'file_offset': 0, 'length': 512},
+            'fat_entries': [
+                entry for record in stream_records
+                if record['storage'] == 'fat'
+                for entry in record['allocation_table']['entries']],
+            'allocation_entries': [
+                entry for record in stream_records
+                for entry in record['allocation_table']['entries']],
+            'minifat_entries': minifat_entries_needed,
+            'ministream_spans': approved_ministream_spans,
+            'excluded': {
+                'entire_directory_stream': True,
+                'entire_ministream': True,
+                'entire_fat_or_minifat_stream': True,
+                'unapproved_stream_payloads': True,
+            },
+        }
+
+        manifest = OleExportManifest({
+            'version': 1,
+            'policy': 'explicit-approval-only',
+            'ok': ok,
+            'status': 'ok' if ok else 'gap',
+            'export_allowed': ok,
+            'requires_extra_authorization': requires_extra_authorization,
+            'authorization_required': requires_extra_authorization,
+            'content_included': False,
+            'payload_bytes_in_manifest': False,
+            'approved_streams': [
+                item['requested_path'] for item in approved_items],
+            'export_streams': export_streams,
+            'payload_streams': payload_streams,
+            'metadata_streams': metadata_stream_paths,
+            'streams': stream_records,
+            'streams_by_path': streams_by_path,
+            'dependencies': dependencies,
+            'copy_plan': copy_plan,
+            'checklist': copy_plan,
+            'shared_units': shared_units,
+            'withheld_streams': withheld_streams,
+            'gaps': gaps,
+            'blocking_gaps': blocking_gaps,
+            'gap': (blocking_gaps[0] if blocking_gaps
+                    else (gaps[0] if gaps else None)),
+            'warnings': warnings_list,
+            'scope': {
+                'policy': 'explicit-approval-only',
+                'requested_streams': [
+                    text for _, _, text in requested],
+                'approved_streams': [
+                    item['path'] for item in approved_items],
+                'export_streams': list(export_streams),
+                'payload_streams': list(payload_streams),
+                'metadata_streams': list(metadata_stream_paths),
+                'structural_metadata_included': True,
+                'payload_bytes_in_manifest': False,
+                'unapproved_payload_included': False,
+                'widens_disclosure': False,
+                'copy_entire_container_streams': False,
+            },
+            'source': {
+                'filesize': self._filesize,
+                'sector_size': self.sectorsize,
+                'mini_sector_size': self.minisectorsize,
+                'mini_stream_cutoff': self.minisectorcutoff,
+                'first_dir_sector': self.first_dir_sector,
+                'first_mini_fat_sector': self.first_mini_fat_sector,
+            },
+            'summary': {
+                'approved_stream_count': len(stream_records),
+                'export_stream_count': len(export_streams),
+                'shared_unit_count': len(shared_units),
+                'withheld_stream_count': len(withheld_streams),
+                'gap_count': len(gaps),
+                'blocking_gap_count': len(blocking_gaps),
+            },
+        })
+        manifest["requires_authorization"] = manifest["requires_extra_authorization"]
+        manifest["shared"] = manifest["shared_units"]
+        manifest["withheld"] = manifest["withheld_streams"]
+        manifest["stream"] = (stream_records[0] if len(stream_records) == 1 else None)
+        manifest["exportable_streams"] = list(export_streams)
+        manifest["disclosable_streams"] = list(export_streams)
+        manifest["exportable"] = list(export_streams)
+        manifest["disclosable"] = list(export_streams)
+        manifest["approved"] = list(manifest["approved_streams"])
+        for target in manifest["gaps"]:
+            if target.get("code") == "shared_allocation_unit":
+                target["unapproved_stream"] = target.get("other_path")
+                target["underlying_stream"] = target.get("other_path")
+                target["requires_additional_authorization"] = target.get(
+                    "requires_authorization")
+                target["locator_text"] = target.get("location")
+                locator = target.get("locator")
+                if isinstance(locator, dict):
+                    locator.setdefault("sid", target.get("sid"))
+                    locator["other_sid"] = target.get("other_sid")
+                    locator["path"] = target.get("path")
+                    locator["stream_path"] = target.get("path")
+                    locator["other_path"] = target.get("other_path")
+                    locator["directory_entries"] = target.get(
+                        "shared_unit", {}).get("directory_entries", [])
+        return manifest
+
+    def forensic_manifest(self, *args, **kwargs):
+        """Alias for :meth:`OleFileIO.export_manifest`."""
+        return self.export_manifest(*args, **kwargs)
+
+    def pre_export_checklist(self, *args, **kwargs):
+        """Alias for :meth:`OleFileIO.export_manifest`."""
+        return self.export_manifest(*args, **kwargs)
+
+    def export_checklist(self, *args, **kwargs):
+        """Alias for :meth:`OleFileIO.export_manifest`."""
+        return self.export_manifest(*args, **kwargs)
+
+    def build_export_manifest(self, *args, **kwargs):
+        """Alias for :meth:`OleFileIO.export_manifest`."""
+        return self.export_manifest(*args, **kwargs)
+
     def _write_mini_stream(self, entry, data_to_write):
         if not entry.sect_chain:
             entry.build_sect_chain(self)
@@ -2538,6 +4150,57 @@ class OleFileIO:
             return data
 
         return data
+
+
+# --------------------------------------------------------------------
+# Public helpers for the pre-export forensic manifest
+
+def build_export_manifest(ole, approved_streams=None, **kwargs):
+    """
+    Build a pre-export forensic manifest for an already-opened OleFileIO.
+
+    This is a convenience wrapper around :meth:`OleFileIO.export_manifest`.
+    No stream payload bytes are read, and ``export_streams`` contains only
+    explicitly approved streams.
+    """
+    if isinstance(ole, OleFileIO):
+        return ole.export_manifest(approved_streams, **kwargs)
+    opened = OleFileIO(ole)
+    try:
+        return opened.export_manifest(approved_streams, **kwargs)
+    finally:
+        opened.close()
+
+
+def forensic_manifest(ole, approved_streams=None, **kwargs):
+    """Alias for :func:`build_export_manifest`."""
+    return build_export_manifest(ole, approved_streams, **kwargs)
+
+
+# Additional method aliases.  They all point to the same explicit-approval
+# implementation; none of them changes the disclosure scope.
+OleFileIO.pre_export_manifest = OleFileIO.export_manifest
+OleFileIO.forensic_export_manifest = OleFileIO.export_manifest
+OleFileIO.forensic_checklist = OleFileIO.export_manifest
+OleFileIO.disclosure_manifest = OleFileIO.export_manifest
+OleFileIO.export_preflight = OleFileIO.export_manifest
+OleFileIO.build_export_checklist = OleFileIO.export_manifest
+OleFileIO.forensic_export_checklist = OleFileIO.export_manifest
+OleFileIO.disclosure_checklist = OleFileIO.export_manifest
+OleFileIO.manifest = OleFileIO.export_manifest
+
+
+# Module-level aliases for callers that do not use the OleFileIO method.
+export_manifest = build_export_manifest
+forensic_checklist = build_export_manifest
+build_export_checklist = build_export_manifest
+pre_export_checklist = build_export_manifest
+forensic_export_manifest = build_export_manifest
+
+
+# Convenience helpers on the manifest result object.
+OleExportManifest.to_dict = lambda self: dict(self)
+OleExportManifest.as_dict = OleExportManifest.to_dict
 
 
 # --------------------------------------------------------------------

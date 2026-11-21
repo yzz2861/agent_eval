@@ -4,6 +4,7 @@ Tests for olefile
 
 from __future__ import print_function
 import unittest
+import struct
 
 import os, sys
 import io
@@ -20,6 +21,72 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import olefile
+
+
+def make_tiny_shared_mini_ole():
+    """
+    Build a minimal valid OLE file in which two MiniFAT streams (StreamA and
+    StreamB) both start at mini-sector 0.
+
+    The file is 2560 bytes and has this layout:
+
+        sector 0: FAT
+        sector 1: directory (root, StreamA, StreamB)
+        sector 2: MiniFAT (one entry, ENDOFCHAIN)
+        sector 3: MiniStream (one 64-byte mini-sector)
+
+    The shared mini-sector is the bottom-level evidence that an approval for
+    one stream alone is not sufficient.
+    """
+    def direntry(name, entry_type, left=olefile.NOSTREAM,
+                 right=olefile.NOSTREAM, child=olefile.NOSTREAM,
+                 start=olefile.ENDOFCHAIN, size=0):
+        name_utf16 = (name + u'\x00').encode('utf-16-le')
+        name_raw = name_utf16 + b'\x00' * (64 - len(name_utf16))
+        return struct.pack(
+            '<64sHBBIII16sIQQIII',
+            name_raw, len(name_utf16), entry_type, 1,
+            left, right, child,
+            b'\x00' * 16, 0, 0, 0,
+            start, size & 0xFFFFFFFF, size >> 32)
+
+    fmt_header = '<8s16sHHHHHHLLLLLLLLLL'
+    header = struct.pack(
+        fmt_header,
+        olefile.MAGIC, b'\x00' * 16,
+        0x003E, 3, 0xFFFE, 9, 6, 0, 0,
+        0, 1, 1, 0, 0x1000, 2, 1, olefile.ENDOFCHAIN, 0)
+    header += struct.pack(
+        '<109I', 0, *([olefile.FREESECT] * 108))
+    assert len(header) == 512
+
+    fat_entries = [
+        olefile.FATSECT,
+        olefile.ENDOFCHAIN,   # directory sector
+        olefile.ENDOFCHAIN,   # MiniFAT sector
+        olefile.ENDOFCHAIN,   # MiniStream sector
+    ]
+    fat_entries += [olefile.FREESECT] * (128 - len(fat_entries))
+    fat = struct.pack('<128I', *fat_entries)
+
+    directory = b''.join([
+        direntry(u'Root Entry', olefile.STGTY_ROOT, child=1,
+                 start=3, size=64),
+        direntry(u'StreamA', olefile.STGTY_STREAM, right=2,
+                 start=0, size=64),
+        direntry(u'StreamB', olefile.STGTY_STREAM, start=0, size=64),
+        b'\x00' * 128,
+    ])
+    assert len(directory) == 512
+
+    minifat_entries = [olefile.ENDOFCHAIN]
+    minifat_entries += [olefile.FREESECT] * (128 - len(minifat_entries))
+    minifat = struct.pack('<128I', *minifat_entries)
+
+    ministream = b'SHARED-MINI-SECTOR' + b'X' * (64 - 18)
+    ministream += b'\x00' * (512 - len(ministream))
+
+    return header + fat + directory + minifat + ministream
 
 
 class Test_isOleFile(unittest.TestCase):
@@ -274,6 +341,136 @@ class FileHandleCloseTest(unittest.TestCase):
     #
     #     # now should be closed
     #     self.assertTrue(file_handle.closed)
+
+
+
+
+class TestExportManifest(unittest.TestCase):
+    "Tests for the pre-export forensic manifest"
+
+    def setUp(self):
+        self.data = make_tiny_shared_mini_ole()
+
+    def _shared_gaps(self, manifest):
+        return [gap for gap in manifest["gaps"]
+                if gap["code"] == "shared_allocation_unit"]
+
+    def test_shared_mini_sector_returns_locatable_gap(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(["StreamA"])
+            self.assertFalse(manifest["ok"])
+            self.assertFalse(manifest["export_allowed"])
+            self.assertEqual(manifest["export_streams"], ["StreamA"])
+            self.assertNotIn("StreamB", manifest["export_streams"])
+            gaps = self._shared_gaps(manifest)
+            self.assertEqual(len(gaps), 1)
+            gap = gaps[0]
+            self.assertTrue(gap["requires_authorization"])
+            self.assertTrue(gap["blocking"])
+            self.assertEqual(gap["other_path"], "StreamB")
+            self.assertEqual(gap["other_sid"], 2)
+            self.assertEqual(gap["unit_kind"], "minisector")
+            self.assertEqual(gap["unit_index"], 0)
+            self.assertEqual(gap["sector"], 3)
+            self.assertEqual(gap["file_offset"], 2048)
+            self.assertEqual(gap["locator"]["file_offset"], 2048)
+            entries = dict((entry["sid"], entry)
+                           for entry in gap["shared_unit"]["directory_entries"])
+            self.assertEqual(entries[1]["file_offset"], 1024 + 128)
+            self.assertEqual(entries[2]["file_offset"], 1024 + 256)
+            withheld = manifest["withheld_streams"]
+            self.assertEqual([item["path"] for item in withheld], ["StreamB"])
+            self.assertFalse(withheld[0]["exported"])
+            self.assertFalse(withheld[0]["payload_included"])
+
+    def test_dependencies_are_explicit(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(["StreamA"])
+            deps = manifest["dependencies"]
+            self.assertEqual(deps["directory"]["sectors"], [1])
+            self.assertEqual(deps["directory"]["entries_needed"][1]["sid"], 1)
+            self.assertEqual(deps["fat"]["sectors"], [0])
+            self.assertEqual(deps["minifat"]["sectors"], [2])
+            self.assertEqual(deps["minifat"]["entries_needed"][0]["unit"], 0)
+            self.assertEqual(deps["ministream"]["sectors"], [3])
+            self.assertEqual(
+                deps["ministream"]["approved_spans"][0]["file_offset"], 2048)
+            self.assertTrue(deps["ministream"]["contains_unapproved_payload"])
+            stream = manifest["streams_by_path"]["StreamA"]
+            self.assertEqual(stream["directory_entry"]["sid"], 1)
+            self.assertEqual(stream["directory_entry"]["file_offset"], 1024 + 128)
+            self.assertEqual(stream["allocation_chain"], [0])
+            self.assertEqual(stream["data_units"][0]["file_offset"], 2048)
+            self.assertEqual(
+                stream["allocation_table"]["entries"][0]["locator"]["file_offset"],
+                1536)
+
+    def test_approving_both_streams_resolves_shared_unit(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(["StreamA", "StreamB"])
+            self.assertTrue(manifest["ok"])
+            self.assertTrue(manifest["export_allowed"])
+            self.assertEqual(sorted(manifest["export_streams"]),
+                             ["StreamA", "StreamB"])
+            self.assertEqual(self._shared_gaps(manifest), [])
+            shared = manifest["shared_units"][0]
+            self.assertFalse(shared["requires_authorization"])
+            self.assertEqual(sorted(shared["approved_streams"]),
+                             ["StreamA", "StreamB"])
+            self.assertEqual(manifest["withheld_streams"], [])
+
+    def test_allow_shared_is_acknowledgement_not_expansion(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(["StreamA"], allow_shared_units=True)
+            self.assertTrue(manifest["ok"])
+            self.assertEqual(manifest["export_streams"], ["StreamA"])
+            gaps = self._shared_gaps(manifest)
+            self.assertEqual(len(gaps), 1)
+            self.assertTrue(gaps[0]["requires_authorization"])
+            self.assertFalse(gaps[0]["blocking"])
+            self.assertEqual(manifest["withheld_streams"][0]["path"], "StreamB")
+            self.assertFalse(manifest["scope"]["widens_disclosure"])
+
+    def test_missing_path_is_a_locatable_gap(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(["StreamA/Missing"])
+            gaps = [gap for gap in manifest["gaps"]
+                    if gap["code"] == "stream_not_found"]
+            self.assertEqual(len(gaps), 1)
+            self.assertEqual(gaps[0]["locator"]["ancestor_sid"], 1)
+            self.assertEqual(gaps[0]["file_offset"], 1024 + 128)
+
+    def test_unreferenced_stream_is_still_detected(self):
+        data = bytearray(make_tiny_shared_mini_ole())
+        # Remove StreamA's right-sibling link so StreamB is no longer in the
+        # storage tree, while its directory entry remains in the original.
+        struct.pack_into('<I', data, 1024 + 128 + 72, 0xFFFFFFFF)
+        with olefile.OleFileIO(bytes(data)) as ole:
+            self.assertEqual(ole.listdir(), [['StreamA']])
+            manifest = ole.export_manifest(['StreamA'])
+            self.assertFalse(manifest['ok'])
+            gaps = self._shared_gaps(manifest)
+            self.assertEqual(len(gaps), 1)
+            self.assertEqual(gaps[0]['other_sid'], 2)
+            self.assertEqual(gaps[0]['other_path'], '<unreferenced SID 2>')
+            self.assertEqual(gaps[0]['file_offset'], 2048)
+            withheld = manifest['withheld_streams'][0]
+            self.assertEqual(withheld['directory_entry']['file_offset'], 1280)
+            self.assertFalse(withheld['payload_included'])
+
+    def test_copy_plan_does_not_expand_scope(self):
+        with olefile.OleFileIO(self.data) as ole:
+            manifest = ole.export_manifest(['StreamA'])
+            plan = manifest['copy_plan']
+            self.assertEqual(plan['policy'], 'minimal-ranges-only')
+            self.assertEqual(
+                [item['path'] for item in plan['streams']], ['StreamA'])
+            self.assertTrue(plan['excluded']['entire_directory_stream'])
+            self.assertTrue(plan['excluded']['entire_ministream'])
+            self.assertTrue(plan['excluded']['unapproved_stream_payloads'])
+            self.assertEqual(plan['ministream_spans'][0]['file_offset'], 2048)
+            self.assertNotIn(
+                'StreamB', [item['path'] for item in plan['streams']])
 
 
 if __name__ == '__main__':
