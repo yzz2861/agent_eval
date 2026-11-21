@@ -67,6 +67,31 @@ for alias, sk in ks.secret_keys.items():
 ```
 
 
+Planning purpose-scoped truststores:
+-----------------------------------
+
+An intake keystore may contain certificates for several delivery purposes and
+may store the same certificate under more than one alias.  Use the purpose
+planner to derive minimal truststores without modifying the intake store:
+
+    import jks
+    from jks.truststore import plan_truststores
+
+    intake = jks.KeyStore.load('intake.jks', 'changeit')
+    plan = plan_truststores(intake, [
+        {'alias': 'issuance-test', 'purpose': 'issuance_review'},
+        {'alias': 'history-test', 'purpose': 'historical_verification'},
+    ])
+
+    plan.manifests['issuance_review'].source_aliases
+    plan.review.reasons_for('issuance_review')
+    plan.manifests['issuance_review'].verify(intake).ok
+
+Approval belongs to a purpose and an alias, never to a certificate fingerprint
+on its own.  If two purposes receive the same certificate, each manifest names
+its own approved source alias and the review result explains that acceptance
+separately.  See docs/truststore.rst for the full model and conflict codes.
+
 Transforming an encrypted JKS/JCEKS file into an OpenSSL context:
 ```python
 import OpenSSL

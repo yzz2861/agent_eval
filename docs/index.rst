@@ -46,6 +46,7 @@ Contents:
    examples
    concepts
    jks
+   truststore
    bks
    exceptions
 
