@@ -31,3 +31,7 @@ debian/files
 debian/*.debhelper
 debian/*.substvars
 debian/python*-tuf/
+# Generated deterministic scenario data (rebuild with the CLI --build-scenario)
+maintenance/scenario/generated/
+maintenance/scenario_data/
+
