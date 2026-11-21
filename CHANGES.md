@@ -1,6 +1,14 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Added `csp.rollout`, an audience-, path-, window-, and review-scoped
+  decision entry point for moving from report-only CSP to enforcement. Only
+  explicit approval records authorize enforcement; observations cannot be
+  replayed as approval credentials for a new audience.
+
 4.0
 ===
 

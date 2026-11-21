@@ -21,6 +21,7 @@ Contents:
    configuration
    migration-guide
    decorators
+   rollout
    nonce
    trusted_types
    reports
