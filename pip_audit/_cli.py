@@ -32,6 +32,13 @@ from pip_audit._format import (
     MarkdownFormat,
     VulnerabilityFormat,
 )
+from pip_audit._plan import (
+    FixSuggestion,
+    PlanError,
+    PlanGroup,
+    collect_constraints,
+    plan_fixes,
+)
 from pip_audit._service import EcosystemsService, OsvService, PyPIService
 from pip_audit._service.interface import ConnectionError as VulnServiceConnectionError
 from pip_audit._service.interface import (
@@ -332,6 +339,12 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         help="automatically upgrade dependencies with known vulnerabilities",
     )
     parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="with `--fix`: plan the fix upgrades against the current constraints "
+        "and print the plan without applying any fixes",
+    )
+    parser.add_argument(
         "--require-hashes",
         action="store_true",
         help="require a hash to check each requirement against, for repeatable audits; this option "
@@ -438,6 +451,51 @@ def _dep_source_from_project_path(
     _fatal(f"couldn't find a supported project file in {project_path}")
 
 
+def _plan_fixes(
+    requirements: list[Path],
+    service: VulnerabilityService,
+    result: dict[Dependency, list[VulnerabilityResult]],
+    state: AuditState,
+) -> None:  # pragma: no cover
+    """
+    Resolve fix versions and plan them against the current constraints,
+    printing the resulting plan without applying any fixes.
+    """
+    # Each requirements file forms its own group, so that a suggestion scoped
+    # to one file (e.g. test requirements) cannot affect another (e.g. runtime).
+    groups = [PlanGroup(name=str(req), requirement_files=(req,)) for req in requirements]
+    constraints = {group.name: collect_constraints(group) for group in groups}
+
+    suggestions = []
+    for fix in resolve_fix_versions(service, result, state):
+        if fix.is_skipped():
+            fix = cast(SkippedFixVersion, fix)
+            logger.info(f"Plan: skipped {fix.dep.name} upgrade because {fix.skip_reason}")
+            continue
+        fix = cast(ResolvedFixVersion, fix)
+        scoped = [group for group in groups if fix.dep.canonical_name in constraints[group.name]]
+        # A fixed subdependency may not be pinned in any requirements file; in
+        # that case the suggestion is checked against every group.
+        suggestions.extend(
+            FixSuggestion(
+                group=group.name,
+                package=fix.dep.name,
+                current=fix.dep.version,
+                target=fix.version,
+                origin="audit",
+            )
+            for group in scoped or groups
+        )
+
+    try:
+        fix_plan = plan_fixes(groups, suggestions)
+    except PlanError as e:
+        _fatal(str(e))
+    print(fix_plan.render())
+    if not fix_plan.ok():
+        _fatal("fix plan has merge conflicts or bound violations; no fixes applied")
+
+
 def audit() -> None:  # pragma: no cover
     """
     The primary entrypoint for `pip-audit`.
@@ -464,10 +522,17 @@ def audit() -> None:  # pragma: no cover
         if args.locked:
             parser.error("The --locked flag can only be used with a project path")
 
+    # Check for flags that are only valid with `--fix`
+    if not args.fix:
+        if args.plan:
+            parser.error("The --plan flag can only be used with --fix")
+
     # Check for flags that are only valid with requirements files
     if args.requirements is None:
         if args.require_hashes:
             parser.error("The --require-hashes flag can only be used with --requirement (-r)")
+        elif args.plan:
+            parser.error("The --plan flag can only be used with --requirement (-r)")
         elif args.index_url:
             parser.error("The --index-url flag can only be used with --requirement (-r)")
         elif args.extra_index_urls:
@@ -588,7 +653,15 @@ def audit() -> None:  # pragma: no cover
         fixed_pkg_count = 0
         fixed_vuln_count = 0
         if args.fix:
-            for fix in resolve_fix_versions(service, result, state):
+            if args.plan:
+                # Read-only planning mode: resolve fix versions, check them
+                # against the current constraints, and stop before any fix
+                # is applied.
+                _plan_fixes(args.requirements, service, result, state)
+                fix_iter = iter(())
+            else:
+                fix_iter = resolve_fix_versions(service, result, state)
+            for fix in fix_iter:
                 if args.dry_run:
                     if fix.is_skipped():
                         fix = cast(SkippedFixVersion, fix)

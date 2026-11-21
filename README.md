@@ -139,7 +139,7 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [-s SERVICE] [--osv-url OSV_URL] [-d] [-S]
                  [--desc [{on,off,auto}]] [--aliases [{on,off,auto}]]
                  [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
-                 [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
+                 [--timeout TIMEOUT] [--path PATH] [-v] [--fix] [--plan]
                  [--require-hashes] [--index-url INDEX_URL]
                  [--extra-index-url URL] [--skip-editable] [--no-deps]
                  [-o FILE] [--ignore-vuln ID] [--disable-pip]
@@ -200,6 +200,9 @@ options:
                         times to increase verbosity (default: 0)
   --fix                 automatically upgrade dependencies with known
                         vulnerabilities (default: False)
+  --plan                with `--fix`: plan the fix upgrades against the
+                        current constraints and print the plan without
+                        applying any fixes (default: False)
   --require-hashes      require a hash to check each requirement against, for
                         repeatable audits; this option is implied when any
                         package in a requirements file has a `--hash` option.
