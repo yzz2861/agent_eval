@@ -199,6 +199,294 @@ def kvitems_basecoro(target, prefix, map_type=None):
             target.send((key, builder.value))
 
 
+class JoinResult(dict):
+    '''
+    A single row produced by :func:`ijson.join`.
+
+    The object is a mapping (and compares equal to an equivalent ``dict``)
+    with the following keys:
+
+    - ``key``: the business key, or ``None`` if it is incomplete.
+    - ``left``: the projected left record, or ``None``.
+    - ``right``: the projected right record, or ``None``.
+    - ``status``: ``'matched'`` or ``'pending'``.
+    - ``reason``: ``None`` for a match, otherwise one of
+      ``'incomplete_key'``, ``'duplicate_key'`` or ``'unmatched'``.
+    - ``resolved``: ``True`` only for matched rows.
+    '''
+
+    __slots__ = ()
+
+    @property
+    def key(self):
+        return self['key']
+
+    @property
+    def left(self):
+        return self['left']
+
+    @property
+    def right(self):
+        return self['right']
+
+    @property
+    def status(self):
+        return self['status']
+
+    @property
+    def reason(self):
+        return self['reason']
+
+    @property
+    def resolved(self):
+        return self['resolved']
+
+    @property
+    def matched(self):
+        return self['resolved']
+
+    @property
+    def pending(self):
+        return not self['resolved']
+
+
+_NO_VALUE = object()
+
+
+def _as_paths(value, name):
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = (value,)
+    try:
+        paths = tuple(value)
+    except TypeError:
+        raise TypeError('%s must be a string or an iterable of strings' % name)
+    for path in paths:
+        if not isinstance(path, str) or not path or any(not part for part in path.split('.')):
+            raise ValueError('%s contains an invalid field path: %r' % (name, path))
+    return paths
+
+
+def _unique_paths(*groups):
+    seen = set()
+    result = []
+    for group in groups:
+        for path in group:
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+    return tuple(result)
+
+
+def _relative_path(path, prefix):
+    if not prefix:
+        return path
+    if not path.startswith(prefix + '.'):
+        return None
+    return path[len(prefix) + 1:]
+
+
+def _set_nested(target, path, value):
+    parts = path.split('.')
+    current = target
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = value
+
+
+def _project_records(parse_events, prefix, wanted_paths):
+    '''
+    Yields ``(values, projection)`` tuples for each record under ``prefix``.
+
+    ``values`` contains only the requested field paths, and ``projection``
+    is the nested subset of the record made of those paths. No other member
+    of the record is ever retained.
+    '''
+    in_record = False
+    depth = 0
+    values = {}
+    for path, event, value in parse_events:
+        if not in_record:
+            if event == 'start_map' and path == prefix:
+                in_record = True
+                depth = 1
+                values = {}
+            continue
+
+        if event in ('start_map', 'start_array'):
+            depth += 1
+            continue
+        if event in ('end_map', 'end_array'):
+            depth -= 1
+            if depth == 0:
+                projection = {}
+                for field_path in wanted_paths:
+                    if field_path in values:
+                        _set_nested(projection, field_path, values[field_path])
+                yield values, projection
+                in_record = False
+            continue
+        if event == 'map_key':
+            continue
+
+        field_path = _relative_path(path, prefix)
+        if field_path in wanted_paths:
+            values[field_path] = value
+
+
+def _key_of(values, key_paths):
+    key = []
+    for path in key_paths:
+        value = values.get(path, _NO_VALUE)
+        if value is _NO_VALUE or value is None:
+            return None
+        key.append(value)
+    key = tuple(key)
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
+def _public_key(key, key_paths):
+    if key is None:
+        return None
+    if len(key_paths) == 1:
+        return key[0]
+    return key
+
+
+def _join_result(key, key_paths, left, right, reason):
+    resolved = reason is None
+    return JoinResult(
+        key=_public_key(key, key_paths),
+        left=left,
+        right=right,
+        status='matched' if resolved else 'pending',
+        reason=reason,
+        resolved=resolved,
+    )
+
+
+def _iter_record_projections(source, parse, prefix, key_paths, wanted_paths):
+    if isinstance(source, (bytes, str)) or is_file(source):
+        if is_async_file(source):
+            raise TypeError('join does not support asynchronous sources')
+        events = parse(source)
+    elif is_iterable(source):
+        events = source
+    else:
+        raise ValueError('Unknown source type: %r' % type(source))
+    for values, projection in _project_records(events, prefix, wanted_paths):
+        yield _key_of(values, key_paths), projection
+
+
+def _group_by_key(records):
+    groups = {}
+    incomplete = []
+    for key, projection in records:
+        if key is None:
+            incomplete.append(projection)
+        else:
+            groups.setdefault(key, []).append(projection)
+    return groups, incomplete
+
+
+def _join_records(left_records, right_records, key_paths):
+    left_groups, left_incomplete = _group_by_key(left_records)
+    right_groups, right_incomplete = _group_by_key(right_records)
+
+    for projection in left_incomplete:
+        yield _join_result(None, key_paths, projection, None, 'incomplete_key')
+    for projection in right_incomplete:
+        yield _join_result(None, key_paths, None, projection, 'incomplete_key')
+
+    emitted = set()
+    for key in left_groups:
+        emitted.add(key)
+        left = left_groups[key]
+        right = right_groups.get(key, [])
+        if len(left) > 1 or len(right) > 1:
+            for projection in left:
+                yield _join_result(key, key_paths, projection, None, 'duplicate_key')
+            for projection in right:
+                yield _join_result(key, key_paths, None, projection, 'duplicate_key')
+        elif right:
+            yield _join_result(key, key_paths, left[0], right[0], None)
+        else:
+            yield _join_result(key, key_paths, left[0], None, 'unmatched')
+
+    for key, right in right_groups.items():
+        if key in emitted:
+            continue
+        if len(right) > 1:
+            for projection in right:
+                yield _join_result(key, key_paths, None, projection, 'duplicate_key')
+        else:
+            yield _join_result(key, key_paths, None, right[0], 'unmatched')
+
+
+def _make_join(backend):
+    def join(source_left, source_right, prefix='', keys=None, fields=None,
+             *, on=None, key=None, select=None, buf_size=64*1024, **config):
+        '''
+        Correlates the records found under ``prefix`` in two JSON sources
+        using a declared business key.
+
+        Only the fields listed in ``keys`` and ``fields`` are read from each
+        record; the rest of the record (including any sensitive members) is
+        never retained. Both sources may be file-like objects or iterables of
+        ``parse`` events, which makes it possible to reuse an event stream.
+
+        A record whose business key is missing, ``None``, or not hashable is
+        reported as pending. Records sharing a complete key on the same side
+        are ambiguous and are reported as pending as well, instead of being
+        paired arbitrarily. The same happens when a complete key exists on
+        only one side.
+
+        The returned rows carry ``key``, ``left``, ``right``, ``status``,
+        ``reason`` and ``resolved`` members; see :class:`JoinResult`.
+        ``on`` and ``key`` are accepted as aliases for ``keys``, and
+        ``select`` as an alias for ``fields``.
+        '''
+        if on is not None:
+            if keys is not None:
+                raise TypeError('join accepts either keys or on, not both')
+            keys = on
+        if key is not None:
+            if keys is not None:
+                raise TypeError('join accepts either keys or key, not both')
+            keys = key
+        if select is not None:
+            if fields is not None:
+                raise TypeError('join accepts either fields or select, not both')
+            fields = select
+        key_paths = _as_paths(keys, 'keys')
+        if not key_paths:
+            raise ValueError('join requires at least one key field')
+        field_paths = _as_paths(fields, 'fields')
+        wanted_paths = _unique_paths(key_paths, field_paths)
+
+        parse = backend['parse']
+        left = _iter_record_projections(
+            source_left, lambda source: parse(source, buf_size=buf_size, **config),
+            prefix, key_paths, wanted_paths
+        )
+        right = _iter_record_projections(
+            source_right, lambda source: parse(source, buf_size=buf_size, **config),
+            prefix, key_paths, wanted_paths
+        )
+        for result in _join_records(left, right, key_paths):
+            yield result
+    return join
+
+
 def integer_or_decimal(str_value):
     '''
     Converts string with a numeric value into an int or a Decimal.
@@ -521,3 +809,5 @@ def enrich_backend(backend, **capabilities_overrides):
             backend[async_name] = factory(backend)
         factory = globals()['_make_' + name]
         backend[name] = factory(backend)
+    if 'join' not in backend:
+        backend['join'] = _make_join(backend)

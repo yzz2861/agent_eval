@@ -2,6 +2,10 @@
 
 ## Development
 
+* Added `ijson.join`, a correlation interface for two JSON sources. It selects
+  only declared key and output fields, matches records by business key rather
+  than array position, and reports records with incomplete, duplicate or
+  one-sided keys as pending.
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).

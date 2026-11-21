@@ -9,12 +9,15 @@ Main API:
 - ``ijson.items``: iterator returning Python objects found under a specified prefix,
   see ``ijson.common.items`` for docs.
 
+- ``ijson.join``: iterator correlating records from two JSON sources by declared
+  business-key fields, retaining only the key and selected output fields.
+
 Top-level ``ijson`` module exposes method from the pure Python backend. There's
 also two other backends using the C library yajl in ``ijson.backends`` that have
 the same API and are faster under CPython.
 '''
 from ijson.adapters import from_iter
-from ijson.common import JSONError, IncompleteJSONError, ObjectBuilder
+from ijson.common import JSONError, IncompleteJSONError, ObjectBuilder, JoinResult
 
 from ijson.utils import coroutine, sendable_list
 from .version import __version__
@@ -52,6 +55,7 @@ items = backend.items
 items_coro = backend.items_coro
 kvitems = backend.kvitems
 kvitems_coro = backend.kvitems_coro
+join = backend.join
 basic_parse_async = backend.basic_parse_async
 parse_async = backend.parse_async
 items_async = backend.items_async

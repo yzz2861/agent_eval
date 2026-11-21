@@ -116,6 +116,46 @@ In that case one can use the ``kvitems`` function instead:
         do_something_with(name)
 
 
+Correlating two documents
+-------------------------
+
+``join`` relates records from two JSON sources by one or more declared
+business-key fields instead of by their position in an array.
+It is useful when records arrive in a different order,
+or when only a few fields are allowed to be inspected.
+Only the key fields and the fields passed in ``fields`` are read from each
+record; other members (for example secrets) are never retained for comparison.
+
+.. code-block:: python
+
+    import ijson
+
+    old = open('old.json', 'rb')
+    new = open('new.json', 'rb')
+    rows = ijson.join(old, new, 'records.item', keys='id',
+                      fields=('approval',))
+    for row in rows:
+        if row['status'] == 'matched':
+            print(row['key'], row['left']['approval'], row['right']['approval'])
+        else:
+            print(row['key'], row['reason'])
+
+Each row is a mapping with ``key``, ``left``, ``right``, ``status``,
+``reason`` and ``resolved`` members. ``status`` is 'matched' only when a
+complete key occurs exactly once on both sides. A record with a missing,
+``None`` or non-hashable key is 'pending' with reason
+'incomplete_key'; duplicate keys on either side are 'pending' with
+reason 'duplicate_key' instead of being paired arbitrarily; and a
+complete key present on only one side is 'pending' with reason
+'unmatched'.
+
+Field paths are relative to the record prefix and must match exactly, so a
+same-named field in a different layer is ignored. Both arguments can also be
+iterables of ``parse`` events, so an existing event stream can be reused
+without materializing either document. ``join`` is a pull interface and does
+not have ``*_coro`` or ``*_async`` variants.
+
+
 Lower-level interfaces
 ----------------------
 
@@ -295,7 +335,7 @@ before full item parsing:
 
 Note that this interception
 only makes sense for the ``basic_parse -> parse``,
-``parse -> items`` and ``parse -> kvitems`` interactions.
+``parse -> items``, ``parse -> kvitems`` and ``parse -> join`` interactions.
 
 Note also that event interception
 is currently not supported
