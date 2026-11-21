@@ -1,0 +1,64 @@
+Bandit B102 cutover validation - fixed local corpus
+==================================================================
+corpus: cutover/corpus
+
+rule   input file                                   entered  completed  hit
+---------------------------------------------------------------------------
+B102   cutover/corpus/app/alias_exec.py             True     True       False
+B102   cutover/corpus/app/builtins_exec.py          True     True       False
+B102   cutover/corpus/app/clean_module.py           False    True       False
+B102   cutover/corpus/app/eval_and_exec.py          True     True       True
+B102   cutover/corpus/app/main_direct_exec.py       True     True       True
+B102   cutover/corpus/app/nested_exec.py            True     True       True
+B102   cutover/corpus/legacy/legacy_alias_exec.py   True     True       False
+B102   cutover/corpus/legacy/legacy_broken_syntax.py False    True       False
+       note: file skipped: syntax error while parsing AST from file
+B102   cutover/corpus/legacy/legacy_direct_exec.py  True     True       True
+B102   cutover/corpus/legacy/legacy_nested_exec.py  True     True       True
+X901   cutover/corpus/app/alias_exec.py             True     True       False
+X901   cutover/corpus/app/builtins_exec.py          True     True       False
+X901   cutover/corpus/app/clean_module.py           False    True       False
+X901   cutover/corpus/app/eval_and_exec.py          True     True       True
+X901   cutover/corpus/app/main_direct_exec.py       True     True       True
+X901   cutover/corpus/app/nested_exec.py            True     True       False
+X901   cutover/corpus/legacy/legacy_alias_exec.py   True     True       False
+X901   cutover/corpus/legacy/legacy_broken_syntax.py False    True       False
+       note: file skipped: syntax error while parsing AST from file
+X901   cutover/corpus/legacy/legacy_direct_exec.py  True     True       False
+X901   cutover/corpus/legacy/legacy_nested_exec.py  True     True       False
+X902   cutover/corpus/app/alias_exec.py             True     True       False
+X902   cutover/corpus/app/builtins_exec.py          True     True       False
+X902   cutover/corpus/app/clean_module.py           False    True       False
+X902   cutover/corpus/app/eval_and_exec.py          True     True       True
+X902   cutover/corpus/app/main_direct_exec.py       True     True       False
+X902   cutover/corpus/app/nested_exec.py            True     True       False
+X902   cutover/corpus/legacy/legacy_alias_exec.py   True     True       False
+X902   cutover/corpus/legacy/legacy_broken_syntax.py False    True       False
+       note: file skipped: syntax error while parsing AST from file
+X902   cutover/corpus/legacy/legacy_direct_exec.py  True     True       False
+X902   cutover/corpus/legacy/legacy_nested_exec.py  True     True       False
+
+Exec-detection responsibility coverage (B102 vs X901)
+------------------------------------------------------------------
+cutover/corpus/app/alias_exec.py             covered
+cutover/corpus/app/builtins_exec.py          covered
+cutover/corpus/app/clean_module.py           covered
+cutover/corpus/app/eval_and_exec.py          covered
+cutover/corpus/app/main_direct_exec.py       covered
+cutover/corpus/app/nested_exec.py            syntax-coverage-gap
+cutover/corpus/legacy/legacy_alias_exec.py   covered
+cutover/corpus/legacy/legacy_broken_syntax.py covered
+cutover/corpus/legacy/legacy_direct_exec.py  directory-coverage-gap
+cutover/corpus/legacy/legacy_nested_exec.py  directory-coverage-gap
+
+Blocking coverage gaps (new X902 alerts cannot offset)
+------------------------------------------------------------------
+- [syntax-coverage-gap] cutover/corpus/app/nested_exec.py: replacement plugin enters the file but does not recognize the nested-scope bare exec syntax that B102 covers
+- [directory-coverage-gap] cutover/corpus/legacy/legacy_direct_exec.py: file lives in the unscanned legacy root; X901 refuses the directory while legacy B102 still detects exec
+- [directory-coverage-gap] cutover/corpus/legacy/legacy_nested_exec.py: file lives in the unscanned legacy root; X901 refuses the directory while legacy B102 still detects exec
+
+New-only X902 eval findings (do not close exec gaps)
+------------------------------------------------------------------
+- cutover/corpus/app/eval_and_exec.py:6 Use of eval detected (replacement plugin X902).
+
+Decision: NOT APPROVED (blocking gaps: 3)

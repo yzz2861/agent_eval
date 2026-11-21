@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sast-exec-guard"
+version = "1.0.0"
+description = "Replacement Bandit plugin for the retired built-in exec rule (B102)"
+requires-python = ">=3.10"
+dependencies = ["bandit"]
+
+[project.entry-points."bandit.plugins"]
+sast_exec_guard_exec = "sast_exec_guard.plugin:guard_exec_used"
+sast_exec_guard_eval = "sast_exec_guard.plugin:guard_eval_used"
+
+[tool.setuptools]
+packages = ["sast_exec_guard"]

@@ -1,0 +1,607 @@
+{
+  "corpus_root": "cutover/corpus",
+  "cutover_decision": {
+    "approved": false,
+    "blocking_gap_count": 3,
+    "rule": "new X902 eval findings do not offset exec-coverage gaps"
+  },
+  "exec_responsibility_coverage": [
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/app/alias_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": false,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/app/builtins_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": false,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/app/clean_module.py",
+      "legacy_completed": true,
+      "legacy_entered": false,
+      "legacy_hit": false,
+      "replacement_completed": true,
+      "replacement_entered": false,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": true,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/app/eval_and_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": true,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": true
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/app/main_direct_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": true,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": true
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "syntax-coverage-gap",
+      "input_file": "cutover/corpus/app/nested_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": true,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/legacy/legacy_alias_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": false,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "covered",
+      "input_file": "cutover/corpus/legacy/legacy_broken_syntax.py",
+      "legacy_completed": true,
+      "legacy_entered": false,
+      "legacy_hit": false,
+      "replacement_completed": true,
+      "replacement_entered": false,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "directory-coverage-gap",
+      "input_file": "cutover/corpus/legacy/legacy_direct_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": true,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    },
+    {
+      "eval_hit": false,
+      "gap_classification": "directory-coverage-gap",
+      "input_file": "cutover/corpus/legacy/legacy_nested_exec.py",
+      "legacy_completed": true,
+      "legacy_entered": true,
+      "legacy_hit": true,
+      "replacement_completed": true,
+      "replacement_entered": true,
+      "replacement_hit": false
+    }
+  ],
+  "input_files": [
+    "cutover/corpus/app/alias_exec.py",
+    "cutover/corpus/app/builtins_exec.py",
+    "cutover/corpus/app/clean_module.py",
+    "cutover/corpus/app/eval_and_exec.py",
+    "cutover/corpus/app/main_direct_exec.py",
+    "cutover/corpus/app/nested_exec.py",
+    "cutover/corpus/legacy/legacy_alias_exec.py",
+    "cutover/corpus/legacy/legacy_broken_syntax.py",
+    "cutover/corpus/legacy/legacy_direct_exec.py",
+    "cutover/corpus/legacy/legacy_nested_exec.py"
+  ],
+  "new_only_findings": [
+    {
+      "input_file": "cutover/corpus/app/eval_and_exec.py",
+      "line": 6,
+      "text": "Use of eval detected (replacement plugin X902)."
+    }
+  ],
+  "open_coverage_gaps": [
+    {
+      "blocks_cutover": true,
+      "classification": "syntax-coverage-gap",
+      "detail": "replacement plugin enters the file but does not recognize the nested-scope bare exec syntax that B102 covers",
+      "input_file": "cutover/corpus/app/nested_exec.py"
+    },
+    {
+      "blocks_cutover": true,
+      "classification": "directory-coverage-gap",
+      "detail": "file lives in the unscanned legacy root; X901 refuses the directory while legacy B102 still detects exec",
+      "input_file": "cutover/corpus/legacy/legacy_direct_exec.py"
+    },
+    {
+      "blocks_cutover": true,
+      "classification": "directory-coverage-gap",
+      "detail": "file lives in the unscanned legacy root; X901 refuses the directory while legacy B102 still detects exec",
+      "input_file": "cutover/corpus/legacy/legacy_nested_exec.py"
+    }
+  ],
+  "per_file_rule_matrix": [
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/builtins_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/clean_module.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 5,
+          "text": "Use of exec detected."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/eval_and_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 5,
+          "text": "Use of exec detected."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/main_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 10,
+          "text": "Use of exec detected."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_broken_syntax.py",
+      "note": "file skipped: syntax error while parsing AST from file",
+      "parse_status": "skipped",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 5,
+          "text": "Use of exec detected."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/legacy/legacy_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 6,
+          "text": "Use of exec detected."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/legacy/legacy_nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "B102",
+      "rule_name": "exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/builtins_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/clean_module.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 5,
+          "text": "Use of exec detected (replacement plugin X901)."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/eval_and_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 5,
+          "text": "Use of exec detected (replacement plugin X901)."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/main_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_broken_syntax.py",
+      "note": "file skipped: syntax error while parsing AST from file",
+      "parse_status": "skipped",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X901",
+      "rule_name": "guard_exec_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/builtins_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/clean_module.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [
+        {
+          "line": 6,
+          "text": "Use of eval detected (replacement plugin X902)."
+        }
+      ],
+      "hit": true,
+      "input_file": "cutover/corpus/app/eval_and_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/main_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/app/nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_alias_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": false,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_broken_syntax.py",
+      "note": "file skipped: syntax error while parsing AST from file",
+      "parse_status": "skipped",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_direct_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    },
+    {
+      "completed": true,
+      "entered": true,
+      "findings": [],
+      "hit": false,
+      "input_file": "cutover/corpus/legacy/legacy_nested_exec.py",
+      "note": "",
+      "parse_status": "parsed",
+      "rule_id": "X902",
+      "rule_name": "guard_eval_used"
+    }
+  ],
+  "rules": {
+    "replacement_exec_rule": "X901",
+    "replacement_new_rule": "X902",
+    "retired": "B102"
+  },
+  "runs": {
+    "legacy": {
+      "findings_by_rule": {
+        "B102": [
+          {
+            "input_file": "cutover/corpus/app/eval_and_exec.py",
+            "line": 5,
+            "text": "Use of exec detected."
+          },
+          {
+            "input_file": "cutover/corpus/app/main_direct_exec.py",
+            "line": 5,
+            "text": "Use of exec detected."
+          },
+          {
+            "input_file": "cutover/corpus/app/nested_exec.py",
+            "line": 10,
+            "text": "Use of exec detected."
+          },
+          {
+            "input_file": "cutover/corpus/legacy/legacy_direct_exec.py",
+            "line": 5,
+            "text": "Use of exec detected."
+          },
+          {
+            "input_file": "cutover/corpus/legacy/legacy_nested_exec.py",
+            "line": 6,
+            "text": "Use of exec detected."
+          }
+        ]
+      },
+      "label": "legacy-builtin-B102",
+      "profile_rules": [
+        "B102"
+      ],
+      "skipped": {
+        "cutover/corpus/legacy/legacy_broken_syntax.py": "syntax error while parsing AST from file"
+      }
+    },
+    "replacement": {
+      "findings_by_rule": {
+        "X901": [
+          {
+            "input_file": "cutover/corpus/app/eval_and_exec.py",
+            "line": 5,
+            "text": "Use of exec detected (replacement plugin X901)."
+          },
+          {
+            "input_file": "cutover/corpus/app/main_direct_exec.py",
+            "line": 5,
+            "text": "Use of exec detected (replacement plugin X901)."
+          }
+        ],
+        "X902": [
+          {
+            "input_file": "cutover/corpus/app/eval_and_exec.py",
+            "line": 6,
+            "text": "Use of eval detected (replacement plugin X902)."
+          }
+        ]
+      },
+      "label": "replacement-plugin-X901-X902",
+      "profile_rules": [
+        "X901",
+        "X902"
+      ],
+      "skipped": {
+        "cutover/corpus/legacy/legacy_broken_syntax.py": "syntax error while parsing AST from file"
+      }
+    }
+  }
+}
