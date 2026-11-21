@@ -41,3 +41,11 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+```{eval-rst}
+.. autofunction:: in_toto.reverification.build_reverification_plan
+```
+
+```{eval-rst}
+.. autofunction:: in_toto.reverification.verify_and_build_plan
+```
