@@ -72,3 +72,46 @@ part of the public API, but are documented here for completeness.
    :members:
    :undoc-members:
    :show-inheritance:
+
+Offline Temporal Correlation Contract
+-------------------------------------
+
+.. autoclass:: sigma.matching.OfflineCorrelationContract
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.TimeBasis
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.ConclusionStatus
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.CorrelationConclusion
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.CorrelationRevision
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.RevisionReport
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.OnCallSnapshot
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.IngestedEvent
+   :members:
+   :undoc-members:
+   :show-inheritance:

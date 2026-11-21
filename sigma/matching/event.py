@@ -20,13 +20,26 @@ class EventLogSource:
 
 @dataclass
 class Event:
-    """A parsed log event to be matched against Sigma rules."""
+    """A parsed log event to be matched against Sigma rules.
+
+    ``timestamp`` is the time at which the event happened according to the log source
+    (event time). ``arrival_time`` is when the operations platform received the record
+    (arrival time). Keeping both explicit allows real-time and next-day review consumers
+    to evaluate the same event with a well-defined time basis instead of silently
+    conflating the two clocks.
+    """
 
     timestamp: datetime
     logsource: EventLogSource
     data: dict[str, Any]
     raw: str | None = None
+    arrival_time: datetime | None = None
     _raw_cache: str | None = field(init=False, default=None, repr=False, compare=False)
+
+    @property
+    def event_time(self) -> datetime:
+        """Explicit alias for the event time carried in :attr:`timestamp`."""
+        return self.timestamp
 
     def get_raw(self) -> str:
         """Return raw log representation, falling back to JSON-serialized data."""

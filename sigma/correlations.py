@@ -807,6 +807,10 @@ class SigmaCorrelationRule(SigmaRuleBase, ProcessingItemTrackingMixin):
             if not self.generate:
                 rule.disable_output()
 
+        # Resolve alias mappings against the same collection so that group-by alias
+        # resolution sees the concrete rule objects, not unresolved references.
+        self.aliases.resolve_rule_references(rule_collection)
+
     def flatten_rules(
         self: Self, include_correlations: bool = True
     ) -> list[SigmaRule | SigmaCorrelationRule]:

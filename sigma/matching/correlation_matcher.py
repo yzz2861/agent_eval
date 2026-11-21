@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from statistics import median
 from typing import Any
 
@@ -17,6 +16,7 @@ from sigma.correlations import (
     SigmaRuleReference,
 )
 from sigma.matching.event import Event
+from sigma.matching.grouping import extract_group_key, make_group_values, resolve_group_field
 from sigma.matching.match import SigmaMatch
 from sigma.matching.state import SlidingWindowState
 
@@ -56,29 +56,14 @@ class SigmaCorrelationRuleMatcher:
 
     def _extract_group_key(self, match: SigmaMatch) -> tuple[Any, ...]:
         """Extract group-by field values from match events."""
-        if not self.rule.group_by:
-            return ()
-
-        values: list[Any] = []
         event = match.events[0] if match.events else None
         if event is None:
-            return tuple(None for _ in self.rule.group_by)
-
-        for field_name in self.rule.group_by:
-            # Check aliases
-            resolved_field = self._resolve_alias(field_name, match)
-            values.append(event.data.get(resolved_field))
-        return tuple(values)
+            return tuple(None for _ in (self.rule.group_by or ()))
+        return extract_group_key(self.rule, match.rule, event.data)
 
     def _resolve_alias(self, field_name: str, match: SigmaMatch) -> str:
         """Resolve field alias to actual field name based on source rule."""
-        if field_name in self.rule.aliases.aliases:
-            alias = self.rule.aliases.aliases[field_name]
-            # Try to find mapping for the source rule
-            for ref, mapped_field in alias.mapping.items():
-                if hasattr(ref, "rule") and ref.rule is match.rule:
-                    return mapped_field
-        return field_name
+        return resolve_group_field(self.rule, field_name, match.rule)
 
     def _evaluate(
         self,
@@ -142,9 +127,7 @@ class SigmaCorrelationRuleMatcher:
         return events
 
     def _make_group_values(self, group_key: tuple[Any, ...]) -> dict[str, Any] | None:
-        if not self.rule.group_by:
-            return None
-        return dict(zip(self.rule.group_by, group_key))
+        return make_group_values(self.rule, group_key)
 
     def _eval_event_count(
         self,

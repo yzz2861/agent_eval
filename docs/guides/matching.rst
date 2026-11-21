@@ -71,6 +71,8 @@ An :class:`~sigma.matching.Event` carries three required fields:
 * ``logsource`` — an :class:`~sigma.matching.EventLogSource` with optional ``category``,
   ``product``, and ``service`` fields that mirror the Sigma rule ``logsource`` block.
 * ``data`` — a flat ``dict[str, Any]`` containing the parsed event fields.
+* ``arrival_time`` — optional arrival time used by the offline correlation contract when it
+  evaluates on arrival time. It is kept separate from ``timestamp`` (event time).
 
 An optional ``raw`` string can be supplied when keyword (field-less) detection items need to
 search the raw log text:
@@ -243,3 +245,12 @@ Two constructor parameters control memory use for correlation state:
   correlation match to avoid unbounded memory growth on high-cardinality rules.
 * ``max_correlation_state`` (default ``None``, unlimited) — limits the total number of
   entries retained in the sliding window per group key.
+
+Offline Temporal Correlation
+----------------------------
+
+For the split between real-time provisional conclusions and next-day event-time review, use
+:class:`~sigma.matching.OfflineCorrelationContract`. It adds explicit event/arrival time
+bases, immutable on-call snapshots, and incremental backfill revisions on top of the same
+correlation semantics. See :doc:`/guides/offline_correlation` for the contract and a short
+confirm/retract replay.
