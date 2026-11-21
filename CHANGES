@@ -5,7 +5,10 @@ For a complete changelog, see:
 
 7.0.0.dev0 (TBD)
 
-* TBD
+* Add tri-state security policy round-trip helpers in ``yaml.policy``:
+  preserve explicit allow/deny/inherit decisions by path, record anchor and
+  merge-key consumers, verify a save/reload through a second loader, and
+  flag legacy fields that need manual review.
 
 6.0.2 (2024-08-06)
 

@@ -15,6 +15,15 @@ try:
 except ImportError:
     __with_libyaml__ = False
 
+from .policy import *
+from .policy import policy_roundtrip as _policy_roundtrip
+
+# Convenience names for the security configuration round-trip API.
+policy_roundtrip = _policy_roundtrip
+security_roundtrip = _policy_roundtrip
+config_roundtrip = _policy_roundtrip
+safe_roundtrip = _policy_roundtrip
+
 import io
 
 #------------------------------------------------------------------------------

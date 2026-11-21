@@ -1,0 +1,10 @@
+defaults: &defaults
+  admin: deny
+  audit: deny
+  guest: inherit
+
+team_alpha:
+  <<: *defaults
+  guest: inherit
+
+team_beta: *defaults

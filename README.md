@@ -45,6 +45,27 @@ To test with a specific Python version:
 
     make test PYTHON-VERSION=3.13.5
 
+## Tri-state policy round trips
+
+Security policy files often use three rule states: ``allow``, ``deny`` and
+``inherit`` (decided by a parent or supervisor rule).  A plain value-based
+round trip through another tool can accidentally turn an explicit ``deny``
+into an absent/default value.
+
+The ``yaml.policy`` helpers keep the three states per path while preserving
+anchors, aliases and merge-key consumers:
+
+    >>> from yaml import policy
+    >>> result = policy.roundtrip_policy(source, {
+    ...     "team_alpha.audit": policy.DENY,
+    ... }, changes={"team_alpha.audit": policy.INHERIT})
+
+``roundtrip_policy`` reads with one supported loader, writes the canonical
+tri-state document and re-reads it through a different supported loader.
+``result.report`` lists the effective decisions, shared consumer paths and
+any explicit deny that was lost.  ``policy.migrate_legacy_policy`` converts
+recoverable legacy values and reports fields that need manual review.
+
 ## Further Information
 
 * For more information, check the

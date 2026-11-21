@@ -1,0 +1,7 @@
+version: 1
+rules:
+  api:
+    read: true
+    write: false
+    delete:
+    audit: sometimes
