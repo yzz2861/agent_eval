@@ -8,6 +8,27 @@ from bleach.sanitizer import (
     ALLOWED_TAGS,
     Cleaner,
 )
+from bleach.comments import (
+    ApprovalCheck,
+    ApprovalRecord,
+    CommentApproval,
+    CommentApprovalSystem,
+    CommentBlock,
+    CommentLink,
+    CommentModerator,
+    CommentReviewer,
+    CommentRevision,
+    LinkApproval,
+    LinkApprovalRecord,
+    ModeratedComment,
+    ModerationSession,
+    check_comment,
+    clean_comment,
+    linkify_comment,
+    review_comment,
+    sanitize_and_review,
+    sanitize_comment,
+)
 
 
 # yyyymmdd
@@ -16,7 +37,29 @@ __releasedate__ = "20260605"
 __version__ = "6.4.0"
 
 
-__all__ = ["clean", "linkify"]
+__all__ = [
+    "clean",
+    "linkify",
+    "ApprovalCheck",
+    "ApprovalRecord",
+    "CommentApproval",
+    "CommentApprovalSystem",
+    "CommentBlock",
+    "CommentLink",
+    "CommentModerator",
+    "CommentReviewer",
+    "CommentRevision",
+    "LinkApproval",
+    "LinkApprovalRecord",
+    "ModeratedComment",
+    "ModerationSession",
+    "check_comment",
+    "clean_comment",
+    "linkify_comment",
+    "review_comment",
+    "sanitize_and_review",
+    "sanitize_comment",
+]
 
 
 def clean(

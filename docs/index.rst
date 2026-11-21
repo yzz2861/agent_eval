@@ -9,6 +9,7 @@ Contents
 
    clean
    linkify
+   comments
    goals
    dev
    changes
