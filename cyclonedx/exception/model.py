@@ -143,3 +143,59 @@ class InvalidConfidenceException(CycloneDxModelException):
     The confidence of the evidence from 0 - 1, where 1 is 100% confidence.
     """
     pass
+
+
+class ResponsibilityPlanException(CycloneDxModelException):
+    """
+    Base exception for invalid or incomplete responsibility-plan operations.
+    """
+    pass
+
+
+class UnknownResponsibilityTeamException(ResponsibilityPlanException):
+    """
+    Raised when a plan operation references a team that was not registered.
+    """
+    pass
+
+
+class UnknownAssignmentStepException(ResponsibilityPlanException):
+    """
+    Raised when a plan operation references a step that was not registered.
+    """
+    pass
+
+
+class UnknownAuthorizationGrantException(ResponsibilityPlanException):
+    """
+    Raised when a plan operation references an authorization grant that was not registered.
+    """
+    pass
+
+
+class UnassignedAssignmentStepException(ResponsibilityPlanException):
+    """
+    Raised when an unassigned step is signed off.
+    """
+    pass
+
+
+class AssignmentStepAlreadySignedOffException(ResponsibilityPlanException):
+    """
+    Raised when a step with a completed sign-off is signed off again.
+    """
+    pass
+
+
+class ResponsibilityTeamNotAssignedException(ResponsibilityPlanException):
+    """
+    Raised when a team attempts to sign off a step assigned to another team.
+    """
+    pass
+
+
+class InvalidAuthorizationWindowException(ResponsibilityPlanException):
+    """
+    Raised when an authorization window has no positive duration.
+    """
+    pass

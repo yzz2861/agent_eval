@@ -45,6 +45,7 @@ from cyclonedx.model.crypto import (
 from cyclonedx.model.issue import IssueType
 from cyclonedx.model.license import DisjunctiveLicense
 from cyclonedx.model.lifecycle import LifecyclePhase, PredefinedLifecycle
+from cyclonedx.model.responsibility import AssignmentStatus
 from cyclonedx.model.service import DataClassification, Service
 from cyclonedx.model.vulnerability import (
     BomTarget,
@@ -975,6 +976,15 @@ class TestEnumProtocolPropertiesType(_EnumTestCase):
                 ) for ppt in ProtocolPropertiesType
             ])
         super()._test_cases_render(bom, of, sv)
+
+
+class TestEnumAssignmentStatus(_EnumTestCase):
+
+    def test_values(self) -> None:
+        self.assertSetEqual(
+            {'assigned', 'unassigned', 'signed-off'},
+            {status.value for status in AssignmentStatus},
+        )
 
 
 # add new test cases above this line
