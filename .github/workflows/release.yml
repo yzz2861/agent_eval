@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_force:
+        # see https://python-semantic-release.readthedocs.io/en/latest/github-action.html#command-line-options
+        description: |
+          Force release be one of: [major | minor | patch | prerelease]
+          Leave empty for auto-detect based on commit messages.
+        type: choice
+        options:
+          - ""         # auto - no force
+          - major      # force major
+          - minor      # force minor
+          - patch      # force patch
+          - prerelease # force prerelease
+        default: ""
+        required: false
+      prerelease_token:
+        description: 'The "prerelease identifier" to use as a prefix for the "prerelease" part of a semver. Like the rc in `1.2.0-rc.8`.'
+        type: choice
+        options:
+          - rc
+          - beta
+          - alpha
+        default: rc
+        required: false
+      prerelease:
+        description: "Is a pre-release"
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false  # prevent hickups with semantic-release
+
+permissions: {}
+
+env:
+  PYTHON_VERSION_DEFAULT: "3.14"
+  POETRY_VERSION: "1.8.1"
+
+jobs:
+  quicktest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        # see https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Python Environment
+        # see https://github.com/actions/setup-python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      - name: Install poetry
+        # see https://github.com/Gr1N/setup-poetry
+        uses: Gr1N/setup-poetry@a05ec55cc26a7270e246efc79ee3ce1bcd6814a0  # v10
+        with:
+          poetry-version: ${{ env.POETRY_VERSION }}
+      - name: Install dependencies
+        run: poetry install --no-root
+      - name: Run tox
+        run: poetry run tox run -e py -s false
+
+  deptry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        # see https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Python Environment
+        # see https://github.com/actions/setup-python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      - name: Install poetry
+        # see https://github.com/Gr1N/setup-poetry
+        uses: Gr1N/setup-poetry@a05ec55cc26a7270e246efc79ee3ce1bcd6814a0  # v10
+        with:
+          poetry-version: ${{ env.POETRY_VERSION }}
+      - name: Install dependencies
+        run: poetry install --no-root
+      - name: Run tox
+        run: poetry run tox run -e deptry -s false
+
+  release:
+    needs:
+      - quicktest
+      - deptry
+    # https://github.community/t/how-do-i-specify-job-dependency-running-in-another-workflow/16482
+    # limit this to being run on regular commits, not the commits that semantic-release will create
+    # but also allow manual workflow dispatch
+    if: "!contains(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    permissions:
+      # NOTE: this enables trusted publishing.
+      # See https://github.com/pypa/gh-action-pypi-publish/tree/release/v1#trusted-publishing
+      # and https://blog.pypi.org/posts/2023-04-20-introducing-trusted-publishers/
+      id-token: write
+      contents: write
+    steps:
+      - name: Generate GitHub App Token
+        id: release-bot-token
+        # see https://github.com/actions/create-github-app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          # see https://github.com/organizations/CycloneDX/settings/apps/cyclonedx-releases
+          client-id: 3335294
+          private-key: ${{ secrets.CDX_RELEASE_BOT_PRIVATE_KEY }}
+          # for `permission-*` see `permissions` above
+          permission-contents: write
+      - name: Get GitHub App User ID
+        id: release-bot-user-id
+        env:
+          APP_SLUG: ${{ steps.release-bot-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.release-bot-token.outputs.token }}
+        run: echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        # see https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.release-bot-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Setup python
+        # see https://github.com/actions/setup-python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      - name: Install and configure Poetry
+        # Seehttps://github.com/snok/install-poetry
+        uses: snok/install-poetry@a783c322200f0519c7926aa6faa857c4e23e9263  # v1.4.2
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      - name: Install dependencies
+        run: poetry install --no-root
+      - name: View poetry version
+        run: poetry --version
+
+      - name: Python Semantic Release
+        id: release
+        # see https://python-semantic-release.readthedocs.io/en/latest/automatic-releases/github-actions.html
+        # see https://github.com/python-semantic-release/python-semantic-release
+        uses: python-semantic-release/python-semantic-release@b700dbeb1f431a0fcc30a79f3f0869407fe07278  # v10.7.0
+        with:
+          git_committer_name: ${{ steps.release-bot-token.outputs.app-slug }}[bot]
+          git_committer_email: ${{ steps.release-bot-user-id.outputs.user-id }}+${{ steps.release-bot-token.outputs.app-slug }}[bot]@users.noreply.github.com
+          github_token: ${{ steps.release-bot-token.outputs.token }}
+          force: ${{ github.event.inputs.release_force }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          prerelease_token: ${{ github.event.inputs.prerelease_token }}
+
+      - name: Publish package distributions to PyPI
+        if: steps.release.outputs.released == 'true'
+        # see https://github.com/pypa/gh-action-pypi-publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+        with:
+          attestations: true
+
+      - name: Publish package distributions to GitHub Releases
+        if: steps.release.outputs.released == 'true'
+        # see https://python-semantic-release.readthedocs.io/en/latest/automatic-releases/github-actions.html#python-semantic-release-publish-action
+        uses: python-semantic-release/publish-action@99d4062dd393b5a7a62c5fe9ed78fb364b5674f2  # v10.7.0
+        with:
+          github_token: ${{ steps.release-bot-token.outputs.token }}
+          tag: ${{ steps.release.outputs.tag }}
