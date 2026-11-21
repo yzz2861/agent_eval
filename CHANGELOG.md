@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Evidence-bound policy explanations across user and machine hives** (`regipy.policy`, `regipy-policy-explain`)
+  - Policy records are extracted from `NTUSER.DAT`/`UsrClass.dat` and `SOFTWARE`/`SYSTEM` policy roots with a stable evidence id, key path, value, type and last-write timestamp
+  - Delegated role contexts bind evidence ids to machine or user roles, with an optional login context; the engine never infers a role from a filename
+  - Each explanation lists its selected/corroborating/overridden evidence, its `per_scope`/`machine_precedence`/`all_scopes_required` combination, and every evaluated condition with a `satisfied` boolean
+  - Roles, evidence references and combinations that cannot be bound safely are emitted under `unbound_contexts` (missing/unknown evidence, role/scope mismatch, missing login context, incomplete combinations, conflicts and unmatched rules)
+  - The same raw value in two roles is qualified by role and scope, so a machine-scope observation is not silently reused as a user-scope conclusion; `AlwaysInstallElevated` demonstrates a value of `1` that is effective only when both scopes are bound
+  - JSON and Markdown report renderers plus a Click CLI (`regipy-policy-explain`); custom rules can be supplied from JSON
+
 ## [6.5.2] - 2026-10-17
 
 ### Fixed

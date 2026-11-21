@@ -17,10 +17,12 @@ Regipy is a python library for parsing offline registry hives (Hive files with R
   - Recurse over the registry hive, from root or a given path and get all subkeys and values
   - Read specific subkeys and values
   - Apply transaction logs on a registry hive
+  - Explain policy values across user and machine hives with evidence and role binding
 - Command Line Tools
   - Dump an entire registry hive to json
   - Apply transaction logs on a registry hive
   - Compare registry hives
+  - Explain policy values across user and machine hives
   - Execute plugins from a robust plugin system (i.e: amcache, shimcache, extract computer name...)
 
 **Requires Python 3.9 or higher.**
@@ -268,6 +270,110 @@ run_relevant_plugins(reg, as_json=True)
     ],
 }
 ```
+
+## Evidence-bound policy explanations
+
+The same policy value can mean different things in a user hive (`NTUSER.DAT`)
+and a machine hive (`SOFTWARE`/`SYSTEM`). `regipy.policy` keeps the raw
+observation, the evidence reference, the delegated role and the evaluated
+conditions together:
+
+```python
+from regipy.policy import (
+    Evidence,
+    PolicyContext,
+    PolicyRecord,
+    RoleContext,
+    build_policy_report,
+)
+
+machine = Evidence("machine-hive", hive_path="SOFTWARE", hive_type="software", scope="machine")
+user = Evidence("alice-ntuser", hive_path="NTUSER.DAT", hive_type="ntuser", scope="user")
+
+context = PolicyContext(
+    evidence=[machine, user],
+    roles=[
+        RoleContext("host", "machine", evidence_ids=["machine-hive"]),
+        RoleContext("alice", "user", evidence_ids=["alice-ntuser", "machine-hive"], login_context="interactive"),
+    ],
+    records=[
+        PolicyRecord(
+            "machine-hive",
+            r"\Microsoft\Windows\CurrentVersion\Policies\System",
+            "AlwaysInstallElevated",
+            1,
+            policy_id="always-install",
+            scope="machine",
+        ),
+        PolicyRecord(
+            "alice-ntuser",
+            r"\Software\Microsoft\Windows\CurrentVersion\Policies\System",
+            "AlwaysInstallElevated",
+            1,
+            policy_id="always-install",
+            scope="user",
+        ),
+    ],
+)
+
+report = build_policy_report(context)
+print(report.to_markdown())
+```
+
+Both records contain `1`. The machine role still cannot conclude that
+`AlwaysInstallElevated` is in effect, because the rule requires both machine and
+user scope. The user role can conclude it, because both evidence items are bound
+to that role. The machine role is listed in `report.unbound_contexts` with
+`reason="incomplete_combination"`; the user role gets an explanation; every
+evidence reference names the hive, key, value, type, timestamp and record id.
+
+Each explanation contains:
+
+- `evidence`: selected, corroborating or overridden evidence items
+- `conditions`: the exact role, evidence-binding, scope, value and combination
+  conditions, each with a `satisfied` boolean
+- `combination` and `combination_expression`: `per_scope`, `machine_precedence` or
+  `all_scopes_required`, plus the exact boolean-style combination expression
+- `conclusion`, `role_id`, `login_context` and `rule_id`
+
+Custom rules can require delegated role attributes (`attributes` on
+`RoleContext`); a mismatch is emitted as `role_attribute_mismatch` instead of
+being applied.
+
+`report.unbound_contexts` is the separate list for anything that cannot be
+bound or evaluated safely: missing or unknown evidence, a user-scope record
+applied to a machine role, a missing login context, an incomplete combination,
+conflicting evidence or an unmatched rule.
+
+### Policy explanation CLI
+
+```bash
+regipy-policy-explain \
+  --machine-hive SOFTWARE \
+  --user-hive NTUSER.DAT \
+  --roles roles.json \
+  --output policy-report.md \
+  --format markdown
+```
+
+`roles.json` contains only the delegated role context:
+
+```json
+{
+  "roles": [
+    {"role_id": "host", "kind": "machine", "evidence_ids": ["machine:SOFTWARE"]},
+    {"role_id": "alice", "kind": "user", "evidence_ids": ["user:NTUSER.DAT"], "login_context": "interactive"}
+  ]
+}
+```
+
+Machine evidence is shared with every role by default
+(`--no-share-machine-evidence` disables this). Use `--context` for a complete
+JSON input with synthetic records, or `--records` and `--rules` to add
+pre-extracted records and custom rules. Custom rules replace the built-in rule
+set; omitting `--rules` uses conservative built-ins for common policy values.
+Add `--strict-rules` to send unmatched records to `unbound_contexts` instead of
+keeping them as clearly marked `observed` entries.
 
 ## Validation cases
 

@@ -44,3 +44,11 @@ class RegistryParsingException(RegipyException):
     """
 
     pass
+
+
+class PolicyContextException(RegipyException):
+    """
+    Raised when a policy context payload is malformed or internally inconsistent
+    """
+
+    pass

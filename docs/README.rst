@@ -10,6 +10,7 @@ Features:
 * Recurse over the registry hive, from root or a given path and get all subkeys and values
 * Read specific subkeys and values
 * Apply transaction logs on a registry hive
+* Explain policy values across user and machine hives with evidence and role binding
 * Command Line Tools:
     * Dump an entire registry hive to json
     * Apply transaction logs on a registry hive
@@ -45,6 +46,68 @@ Using as a library:
 
     # Include unvalidated plugins (may return incomplete/inaccurate data):
     run_relevant_plugins(reg, as_json=True, include_unvalidated=True)
+
+Evidence-bound policy explanations
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The same policy value can have a different meaning in a user hive and a
+machine hive. ``regipy.policy`` binds each observation to an explicit evidence
+item and a delegated role, and emits a reviewable explanation with the
+evaluated conditions. Contexts that cannot be bound or combined safely are
+listed separately under ``unbound_contexts``.
+
+.. code:: python
+
+    from regipy.policy import (
+        Evidence,
+        PolicyContext,
+        PolicyRecord,
+        RoleContext,
+        build_policy_report,
+    )
+
+    machine = Evidence("machine-hive", hive_path="SOFTWARE", scope="machine")
+    user = Evidence("alice-ntuser", hive_path="NTUSER.DAT", scope="user")
+
+    context = PolicyContext(
+        evidence=[machine, user],
+        roles=[
+            RoleContext("host", "machine", evidence_ids=["machine-hive"]),
+            RoleContext(
+                "alice",
+                "user",
+                evidence_ids=["alice-ntuser", "machine-hive"],
+                login_context="interactive",
+            ),
+        ],
+        records=[
+            PolicyRecord(
+                "machine-hive",
+                r"\Microsoft\Windows\CurrentVersion\Policies\System",
+                "AlwaysInstallElevated",
+                1,
+                policy_id="always-install",
+                scope="machine",
+            ),
+            PolicyRecord(
+                "alice-ntuser",
+                r"\Software\Microsoft\Windows\CurrentVersion\Policies\System",
+                "AlwaysInstallElevated",
+                1,
+                policy_id="always-install",
+                scope="user",
+            ),
+        ],
+    )
+
+    report = build_policy_report(context)
+    print(report.to_markdown())
+
+The CLI accepts the two hives and a delegated role file:
+
+.. code:: bash
+
+    regipy-policy-explain --machine-hive SOFTWARE --user-hive NTUSER.DAT \
+        --roles roles.json --output policy-report.md --format markdown
 
 Install
 ^^^^^^^

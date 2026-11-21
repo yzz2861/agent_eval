@@ -13,6 +13,7 @@ from regipy.cli_utils import _normalize_subkey_fields, get_filtered_subkeys
 from regipy.exceptions import RegistryKeyNotFoundException
 from regipy.plugins.plugin import PLUGINS
 from regipy.plugins.utils import run_relevant_plugins
+from regipy.policy.cli import policy_explain  # noqa: F401
 from regipy.recovery import apply_transaction_logs
 from regipy.regdiff import compare_hives
 from regipy.registry import RegistryHive
