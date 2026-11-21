@@ -56,6 +56,60 @@ Simple file type checking
     if __name__ == '__main__':
         main()
 
+Quarantine disposition
+----------------------
+
+filetype answers an initial question: what does the file header look like?
+It does not prove that a consumer inspected every part of a container.  The
+disposition helpers keep that distinction explicit and decide when a
+quarantined upload may be released.
+
+.. code-block:: python
+
+    from filetype.disposition import (
+        Consumer, DispositionPolicy, PublicationQueue, QuarantineArbiter)
+
+    policy = DispositionPolicy()
+    policy.require(
+        'application/zip', 'archive.shell', 'archive.contents')
+
+    queue = PublicationQueue()
+    arbiter = QuarantineArbiter(policy, queue)
+    arbiter.admit_file(
+        'upload-1', 'upload.zip', content_id='sha256:...')
+
+    vendor = Consumer(
+        'external-indexer', ['archive.shell'], external=True)
+    arbiter.acknowledge(
+        'upload-1', vendor, ['archive.shell'],
+        confirmation_id='receipt-1', content_id='sha256:...')
+
+    # Shell-only coverage leaves the asset pending and the queue empty.
+    decision = arbiter.decision('upload-1')
+    assert decision.status == 'pending'
+    assert decision.missing == frozenset(['archive.contents'])
+    assert len(queue) == 0
+
+    handler = Consumer(
+        'internal-unpacker', ['archive.shell', 'archive.contents'])
+    result = arbiter.acknowledge(
+        'upload-1', handler, ['archive.contents'],
+        confirmation_id='receipt-2', content_id='sha256:...')
+
+    assert result.released
+    assert len(queue) == 1
+
+A policy rule can address a MIME type, an extension, a full type instance,
+or one receiver.  A confirmation is counted only when its consumer declares
+every capability it claims, its asset and content identifiers match, and
+its confirmation identifier has not already been bound to another asset.
+Use require_content_id=True when every receipt must carry the content
+identity.  decision().evidence maps each required capability to the
+confirmations covering it, while missing lists what still blocks a
+release.  Missing or partial coverage never touches the publication queue;
+the queue and subscribers receive exactly one publication after the last
+required capability is confirmed.
+
 Supported types
 ---------------
 

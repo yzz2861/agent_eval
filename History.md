@@ -1,4 +1,9 @@
 
+Unreleased
+==========
+
+  * feat(disposition): add quarantine adjudication for file hints, consumer capabilities, and correlated release receipts
+
 v1.2.0 / 2022-11-02
 ===================
 
