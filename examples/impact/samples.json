@@ -1,0 +1,16 @@
+{
+  "samples": [
+    {
+      "name": "sample.jpg",
+      "path": "../../tests/fixtures/sample.jpg"
+    },
+    {
+      "name": "sample.png",
+      "path": "../../tests/fixtures/sample.png"
+    },
+    {
+      "name": "new.foo",
+      "hex": "464f4f00010203"
+    }
+  ]
+}

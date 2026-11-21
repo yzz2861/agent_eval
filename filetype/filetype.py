@@ -82,12 +82,15 @@ def get_type(mime=None, ext=None):
     return None
 
 
-def add_type(instance):
+def add_type(instance, index=0):
     """
     Adds a new type matcher instance to the supported types.
 
     Args:
         instance: Type inherited instance.
+        index: registration position. Defaults to 0, which keeps the
+            historical prepend behavior. Higher values let callers compare
+            a different registration order without rebuilding the registry.
 
     Returns:
         None
@@ -95,4 +98,4 @@ def add_type(instance):
     if not isinstance(instance, Type):
         raise TypeError('instance must inherit from filetype.types.Type')
 
-    types.insert(0, instance)
+    types.insert(index, instance)

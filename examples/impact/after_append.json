@@ -1,0 +1,7 @@
+{
+  "order": [
+    "builtin",
+    "examples.impact.thirdparty:LegacyJpeg",
+    "examples.impact.thirdparty:FooType"
+  ]
+}

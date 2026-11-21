@@ -56,6 +56,58 @@ Simple file type checking
     if __name__ == '__main__':
         main()
 
+Matcher impact assessment
+-------------------------
+
+A new matcher is registered at the front of the registry, so it can silently
+shadow a matcher that used to win. ``filetype.impact`` compares the same
+offline file prefixes against two ordered registries and keeps two operational
+findings separate:
+
+- **new legitimate format**: the prefix had no match before and now resolves
+  to a matcher (with no routing table this is still reported, with
+  routed: false);
+- **downgrade**: the prefix already matched an old type, but its route now has
+  a lower processing ``capability`` (a weaker queue).
+
+The report also records every matching candidate with its one based ``rank``,
+so registration-order changes are visible even when the winning type stays the
+same. If a third-party matcher raises, the failure is attached to the affected
+sample and the registry side that raised it. Both full routing configurations
+are embedded in every report.
+
+.. code-block:: python
+
+    import filetype
+    from filetype.impact import assess, render_text
+
+    report = assess(
+        samples={"photo.jpg": open("tests/fixtures/sample.jpg", "rb").read(8192)},
+        before=filetype.types,
+        after=[MyNewMatcher()] + list(filetype.types),
+        before_routes={"image/jpeg": {"queue": "image-strong", "capability": 10}},
+        after_routes={
+            "image/jpeg": {"queue": "image-strong", "capability": 10},
+            "application/x-new": {"queue": "new-medium", "capability": 6},
+        },
+    )
+    print(render_text(report))
+
+The same comparison is available offline from the command line:
+
+.. code-block:: console
+
+    $ python -m filetype.impact \
+        --samples examples/impact/samples.json \
+        --before-routes examples/impact/before_routes.json \
+        --after-matchers examples/impact/after_shadow.json \
+        --after-routes examples/impact/after_routes.json \
+        --format text
+
+Swap ``after_shadow.json`` for ``after_append.json`` to change one registration
+order. The changed isolation decisions section then shows the affected sample,
+the old and new matcher ranks, and the old and new queue with capabilities.
+
 Supported types
 ---------------
 

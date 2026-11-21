@@ -1,0 +1,17 @@
+{
+  "name": "before-routes",
+  "routes": {
+    "image/jpeg": {
+      "queue": "image-strong",
+      "capability": 10
+    },
+    "image/png": {
+      "queue": "image-strong",
+      "capability": 10
+    },
+    "application/x-foo": {
+      "queue": "new-strong",
+      "capability": 8
+    }
+  }
+}

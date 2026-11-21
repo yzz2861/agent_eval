@@ -44,5 +44,8 @@ setup(
     package_data={'filetype': ['LICENSE', '*.md']},
     zip_safe=True,
     entry_points={
-        'console_scripts': ['filetype=filetype.__main__:main'],
+        'console_scripts': [
+            'filetype=filetype.__main__:main',
+            'filetype-impact=filetype.impact:main',
+        ],
     })

@@ -1,0 +1,21 @@
+{
+  "name": "after-routes",
+  "routes": {
+    "image/jpeg": {
+      "queue": "image-strong",
+      "capability": 10
+    },
+    "image/png": {
+      "queue": "image-strong",
+      "capability": 10
+    },
+    "image/x-legacy-jpeg": {
+      "queue": "legacy-weak",
+      "capability": 2
+    },
+    "application/x-foo": {
+      "queue": "new-medium",
+      "capability": 6
+    }
+  }
+}
