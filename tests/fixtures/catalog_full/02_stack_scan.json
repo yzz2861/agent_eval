@@ -1,0 +1,28 @@
+{
+  "analysis_id": "stack-scan",
+  "description": "Additional stack memory scan beyond the exception conclusion",
+  "readings": [
+    {
+      "name": "stack-range-reading",
+      "required_streams": [
+        [
+          "MemoryListStream",
+          "Memory64ListStream"
+        ]
+      ],
+      "required_ranges": [
+        {
+          "start": "0x20000",
+          "size": 8192,
+          "label": "stack page"
+        },
+        {
+          "start": "0x30000",
+          "size": 8192,
+          "label": "heap prefix"
+        }
+      ],
+      "from_cache": false
+    }
+  ]
+}

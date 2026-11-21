@@ -1,0 +1,42 @@
+{
+  "analysis_id": "exception-conclusion",
+  "description": "Crash exception code and faulting address conclusion",
+  "readings": [
+    {
+      "name": "exception-stream-reading",
+      "required_streams": [
+        "ExceptionStream",
+        [
+          "MemoryListStream",
+          "Memory64ListStream"
+        ]
+      ],
+      "required_ranges": [
+        {
+          "start": "0x10000",
+          "size": 4096,
+          "label": "faulting page"
+        }
+      ],
+      "from_cache": false
+    },
+    {
+      "name": "cached-exception-reading",
+      "required_streams": [
+        "ExceptionStream",
+        [
+          "MemoryListStream",
+          "Memory64ListStream"
+        ]
+      ],
+      "required_ranges": [
+        {
+          "start": "0x10000",
+          "size": 4096,
+          "label": "faulting page"
+        }
+      ],
+      "from_cache": true
+    }
+  ]
+}

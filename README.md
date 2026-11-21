@@ -34,3 +34,36 @@ Of course it only works if you are running it as administrator or a use that has
 
 # Installing
 ```python3 setup.py install```
+
+# Offline retention planner
+
+When crash dump analyses reach their retention deadline, the security team needs
+to know in advance which dump fragments may be cleaned and which evidence must be
+kept so every recorded conclusion can still be recomputed. The
+`minidump.retention` package is a purely offline planner: it only reads a local
+minidump file and a local *stream catalog* (a directory of JSON files describing
+each analysis item and every candidate reading, including the streams and virtual
+memory ranges the reading needs for recomputation). It never opens a socket and
+never executes the analyses themselves.
+
+```python
+from minidump.retention import build_plan, format_diff
+
+baseline = build_plan("crash.dmp", "catalog/", ["exception-conclusion"])
+extended = build_plan("crash.dmp", "catalog/", ["exception-conclusion", "stack-scan"])
+
+print(format_plan(extended))
+# Lists RETAINED vs CLEANABLE fragments with the analysis/reading reason for each.
+print(format_diff(baseline, extended))
+# Shows the additional original segments the extra analysis keeps.
+```
+
+A reading served from cache still depends on the original bytes, so caching never
+releases a required stream or memory segment. The structural header and stream
+directory fragments are always retained. The same logic is available on the
+command line:
+
+```
+python -m minidump.retention crash.dmp catalog/ --analysis exception-conclusion --json
+python -m minidump.retention crash.dmp catalog/ --analysis exception-conclusion --analysis stack-scan --baseline exception-conclusion
+```
