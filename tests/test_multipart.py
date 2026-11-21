@@ -27,11 +27,14 @@ from python_multipart.multipart import (
     Field,
     File,
     FormParser,
+    IsolatedUploadReceiver,
     MultipartParser,
     MultipartState,
     OctetStreamParser,
+    PartOutcome,
     QuerystringParser,
     QuerystringState,
+    UploadReceipt,
     create_form_parser,
     parse_form,
     parse_options_header,
@@ -1794,6 +1797,159 @@ class TestHelperFunctions(unittest.TestCase):
             )
 
 
+class TestIsolatedUploadReceiver(unittest.TestCase):
+    boundary = b"boundary"
+
+    def make_body(self, parts: list[tuple[bytes, bytes]]) -> bytes:
+        body = b""
+        for name, value in parts:
+            body += (
+                b"--"
+                + self.boundary
+                + b"\r\n"
+                + b'Content-Disposition: form-data; name="'
+                + name
+                + b'"\r\n\r\n'
+                + value
+                + b"\r\n"
+            )
+        return body + b"--" + self.boundary + b"--\r\n"
+
+    def test_receipt_issued_once_all_parts_ready(self) -> None:
+        receipts: list[UploadReceipt] = []
+        receiver = IsolatedUploadReceiver(
+            self.boundary, verify_part=lambda part: part.value.upper(), on_receipt=receipts.append
+        )
+
+        body = self.make_body([(b"first", b"alpha"), (b"second", b"beta")])
+        # Write in two chunks to simulate a streaming upload.
+        cut = len(body) // 2
+        receiver.write(body[:cut])
+        # No receipt may be issued before the whole form is ready.
+        self.assertEqual(receipts, [])
+        self.assertIsNone(receiver.receipt)
+        receiver.write(body[cut:])
+        receiver.finalize()
+
+        self.assertEqual(len(receipts), 1)
+        self.assertIs(receiver.receipt, receipts[0])
+        outcomes = receipts[0].outcomes
+        self.assertEqual([o.index for o in outcomes], [0, 1])
+        self.assertEqual([o.name for o in outcomes], [b"first", b"second"])
+        self.assertEqual([o.result for o in outcomes], [b"ALPHA", b"BETA"])
+        self.assertFalse(receiver.failed)
+
+    def test_duplicate_part_names_keep_original_order(self) -> None:
+        receipts: list[UploadReceipt] = []
+        receiver = IsolatedUploadReceiver(
+            self.boundary, verify_part=lambda part: part.value, on_receipt=receipts.append
+        )
+        receiver.write(self.make_body([(b"item", b"1"), (b"item", b"2"), (b"item", b"3")]))
+        receiver.finalize()
+
+        self.assertEqual(len(receipts), 1)
+        outcomes = receipts[0].outcomes
+        self.assertEqual([o.name for o in outcomes], [b"item", b"item", b"item"])
+        self.assertEqual([o.result for o in outcomes], [b"1", b"2", b"3"])
+
+    def test_aborted_verification_issues_no_receipt(self) -> None:
+        on_receipt = Mock()
+        seen: list[bytes] = []
+
+        def verify_part(part: Field) -> bytes:
+            if len(seen) == 1:
+                raise RuntimeError("verification cancelled")
+            seen.append(part.value)
+            return part.value
+
+        receiver = IsolatedUploadReceiver(self.boundary, verify_part, on_receipt)
+        with self.assertRaisesRegex(RuntimeError, "verification cancelled"):
+            receiver.write(self.make_body([(b"first", b"alpha"), (b"second", b"beta")]))
+
+        self.assertTrue(receiver.failed)
+        self.assertIsNone(receiver.receipt)
+        on_receipt.assert_not_called()
+        # The first part's result stays bound to this failed attempt only.
+        self.assertEqual([o.name for o in receiver.outcomes], [b"first"])
+
+        # A failed attempt cannot be written to again.
+        with self.assertRaises(FormParserError):
+            receiver.write(b"")
+
+    def test_retry_cannot_resume_unfinished_attempt(self) -> None:
+        body = self.make_body([(b"first", b"alpha"), (b"second", b"beta")])
+
+        # First attempt: the second part's verification aborts mid-upload.
+        calls = 0
+
+        def flaky_verify(part: Field) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("verification cancelled")
+            return part.value
+
+        old_receiver = IsolatedUploadReceiver(self.boundary, flaky_verify)
+        with self.assertRaises(RuntimeError):
+            old_receiver.write(body)
+        self.assertIsNone(old_receiver.receipt)
+
+        # Retry: a fresh receiver verifies the whole form on its own and does
+        # not attach to the old attempt's unfinished parts.
+        retry_receipts: list[UploadReceipt] = []
+        retry = IsolatedUploadReceiver(
+            self.boundary, verify_part=lambda part: part.value, on_receipt=retry_receipts.append
+        )
+        retry.write(body)
+        retry.finalize()
+
+        self.assertEqual(len(retry_receipts), 1)
+        self.assertEqual([o.name for o in retry_receipts[0].outcomes], [b"first", b"second"])
+        self.assertEqual([o.result for o in retry_receipts[0].outcomes], [b"alpha", b"beta"])
+        # The old attempt never issues a receipt, even after the retry succeeded.
+        self.assertIsNone(old_receiver.receipt)
+        self.assertEqual(len(old_receiver.outcomes), 1)
+
+    def test_expected_parts_mismatch_issues_no_receipt(self) -> None:
+        on_receipt = Mock()
+        receiver = IsolatedUploadReceiver(
+            self.boundary, verify_part=lambda part: part.value, on_receipt=on_receipt, expected_parts=3
+        )
+        receiver.write(self.make_body([(b"first", b"alpha"), (b"second", b"beta")]))
+        receiver.finalize()
+
+        self.assertIsNone(receiver.receipt)
+        on_receipt.assert_not_called()
+
+    def test_negative_expected_parts_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            IsolatedUploadReceiver(self.boundary, lambda part: None, expected_parts=-1)
+
+    def test_write_after_finalize_raises(self) -> None:
+        receiver = IsolatedUploadReceiver(self.boundary, lambda part: None)
+        receiver.write(self.make_body([(b"first", b"alpha")]))
+        receiver.finalize()
+        with self.assertRaises(FormParserError):
+            receiver.write(b"")
+
+    def test_part_outcome_repr(self) -> None:
+        outcome = PartOutcome(0, b"name", Field(b"name"), "result")
+        self.assertEqual(repr(outcome), "PartOutcome(index=0, name=b'name', result='result')")
+
+    def test_receipt_container_protocol(self) -> None:
+        receiver = IsolatedUploadReceiver(self.boundary, verify_part=lambda part: part.value)
+        receiver.write(self.make_body([(b"first", b"alpha")]))
+        receiver.finalize()
+
+        receipt = receiver.receipt
+        assert receipt is not None
+        self.assertEqual(len(receipt), 1)
+        self.assertEqual([o.name for o in receipt], [b"first"])
+        self.assertIn("UploadReceipt", repr(receipt))
+        self.assertIn("IsolatedUploadReceiver", repr(receiver))
+        receiver.close()
+
+
 def suite() -> unittest.TestSuite:
     suite = unittest.TestSuite()
     suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(TestFile))
@@ -1805,6 +1961,7 @@ def suite() -> unittest.TestSuite:
     suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(TestQuotedPrintableDecoder))
     suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(TestFormParser))
     suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(TestHelperFunctions))
+    suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(TestIsolatedUploadReceiver))
 
     return suite
 

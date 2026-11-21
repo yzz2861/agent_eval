@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* Add `IsolatedUploadReceiver`, an opt-in isolated receive interface for `multipart/form-data` uploads: each part's verification result is bound to a single upload attempt, and exactly one `UploadReceipt` is issued only after every part in the expected scope has been verified. A failed verification aborts the attempt without a receipt, and retries must use a fresh receiver instead of resuming unfinished parts.
+
 ## 0.0.33 (2026-10-31)
 
 * Drop Python 3.10 support [#329](https://github.com/Kludex/python-multipart/pull/329).

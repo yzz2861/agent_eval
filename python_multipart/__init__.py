@@ -17,9 +17,12 @@ __version__ = "0.0.33"
 from .multipart import (
     BaseParser,
     FormParser,
+    IsolatedUploadReceiver,
     MultipartParser,
     OctetStreamParser,
+    PartOutcome,
     QuerystringParser,
+    UploadReceipt,
     create_form_parser,
     parse_form,
 )
@@ -27,9 +30,12 @@ from .multipart import (
 __all__ = (
     "BaseParser",
     "FormParser",
+    "IsolatedUploadReceiver",
     "MultipartParser",
     "OctetStreamParser",
+    "PartOutcome",
     "QuerystringParser",
+    "UploadReceipt",
     "create_form_parser",
     "parse_form",
 )

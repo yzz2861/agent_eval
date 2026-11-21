@@ -14,7 +14,7 @@ from .decoders import Base64Decoder, QuotedPrintableDecoder
 from .exceptions import FileError, FormParserError, MultipartParseError, QuerystringParseError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 
     class SupportsRead(Protocol):
@@ -2030,3 +2030,197 @@ def parse_form(
 
     # Tell our parser that we're done writing data.
     parser.finalize()
+
+
+class PartOutcome:
+    """The verified short-term processing result of a single part of one upload.
+
+    Instances are created by :class:`IsolatedUploadReceiver` and are bound to
+    the receiver (i.e. to the single upload attempt) that produced them.  They
+    are never shared across attempts.
+
+    Attributes:
+        index: The zero-based position of the part on the wire, in original order.
+        name: The part's field name, or None if it had none.  Duplicate names
+            are kept as separate outcomes, in their original order.
+        part: The parsed :class:`Field` or :class:`File` itself.
+        result: Whatever the receiver's ``verify_part`` callback returned for
+            this part.
+    """
+
+    __slots__ = ("index", "name", "part", "result")
+
+    def __init__(self, index: int, name: bytes | None, part: Field | File, result: Any) -> None:
+        self.index = index
+        self.name = name
+        self.part = part
+        self.result = result
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(index={self.index!r}, name={self.name!r}, result={self.result!r})"
+
+
+class UploadReceipt:
+    """The business receipt for one fully verified upload.
+
+    A receipt is issued at most once per :class:`IsolatedUploadReceiver`, and
+    only after every part in the expected scope of the upload has been
+    verified.  Its outcomes are an immutable snapshot, in wire order.
+
+    Attributes:
+        outcomes: The :class:`PartOutcome` of every part of the upload, in
+            the order the parts appeared on the wire.
+    """
+
+    __slots__ = ("outcomes",)
+
+    def __init__(self, outcomes: tuple[PartOutcome, ...]) -> None:
+        self.outcomes = outcomes
+
+    def __len__(self) -> int:
+        return len(self.outcomes)
+
+    def __iter__(self) -> Iterator[PartOutcome]:
+        return iter(self.outcomes)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(outcomes={self.outcomes!r})"
+
+
+class IsolatedUploadReceiver:
+    """Optional isolated receive interface for ``multipart/form-data`` uploads.
+
+    Each fully parsed part is handed to ``verify_part`` (the offline content
+    check) as soon as it arrives.  The returned short-term result is recorded
+    on this receiver, bound to this single upload attempt.  Only when the
+    whole form has been parsed and every part in the expected scope has been
+    verified does the receiver issue exactly one :class:`UploadReceipt`,
+    delivered through ``on_receipt`` and exposed via :attr:`receipt`.
+
+    If ``verify_part`` raises for any part, the upload is aborted: the
+    exception propagates to the caller of :meth:`write`, the receiver is
+    marked as failed, and no receipt is ever issued for this attempt.
+
+    A receiver is single-use: once it has failed or been finalized,
+    :meth:`write` raises :class:`FormParserError`.  A retry must therefore
+    create a fresh receiver and cannot attach to the unfinished parts of a
+    previous attempt.
+
+    Args:
+        boundary: The multipart boundary, as given in the Content-Type header.
+        verify_part: Callback invoked with each parsed :class:`Field` or
+            :class:`File`.  Its return value is recorded as the part's
+            short-term processing result.  Raising aborts the upload.
+        on_receipt: Optional callback invoked exactly once with the
+            :class:`UploadReceipt` when every part is verified.  Can be None.
+        expected_parts: Optional number of parts the upload must contain.
+            If given and the parsed part count differs, no receipt is issued.
+        config: Configuration to pass to the underlying :class:`FormParser`.
+    """
+
+    def __init__(
+        self,
+        boundary: bytes | str,
+        verify_part: Callable[[Field | File], Any],
+        on_receipt: Callable[[UploadReceipt], None] | None = None,
+        *,
+        expected_parts: int | None = None,
+        config: dict[Any, Any] = {},
+    ) -> None:
+        self.logger = logging.getLogger(__name__)
+
+        if expected_parts is not None and expected_parts < 0:
+            raise ValueError(f"expected_parts must be non-negative, not {expected_parts!r}")
+
+        self._verify_part = verify_part
+        self._on_receipt = on_receipt
+        self._expected_parts = expected_parts
+        self._outcomes: list[PartOutcome] = []
+        self._receipt: UploadReceipt | None = None
+        self._failed = False
+        self._finalized = False
+        self.bytes_received = 0
+
+        self._parser = FormParser(
+            "multipart/form-data",
+            on_field=self._accept_part,
+            on_file=self._accept_part,
+            on_end=self._issue_receipt,
+            boundary=boundary,
+            config=config,
+        )
+
+    @property
+    def receipt(self) -> UploadReceipt | None:
+        """The issued receipt, or None if the upload is not fully verified (yet)."""
+        return self._receipt
+
+    @property
+    def failed(self) -> bool:
+        """Whether this upload attempt has been aborted by a failed verification."""
+        return self._failed
+
+    @property
+    def outcomes(self) -> tuple[PartOutcome, ...]:
+        """The per-part results recorded so far for this attempt, in wire order."""
+        return tuple(self._outcomes)
+
+    def _accept_part(self, part: Field | File) -> None:
+        if self._failed:  # pragma: no cover
+            raise FormParserError("This upload attempt has failed; refusing further parts.")
+        try:
+            result = self._verify_part(part)
+        except BaseException:
+            # Bind the failure to this attempt: no receipt can be issued for
+            # it, and a retry must start from a fresh receiver.
+            self._failed = True
+            raise
+        self._outcomes.append(PartOutcome(len(self._outcomes), part.field_name, part, result))
+
+    def _issue_receipt(self) -> None:
+        # The receipt is only issued once, and only when every part in the
+        # expected scope of this upload has been verified.
+        if self._failed or self._receipt is not None:  # pragma: no cover
+            return
+        if self._expected_parts is not None and len(self._outcomes) != self._expected_parts:
+            self.logger.warning(
+                "Not issuing receipt: expected %d parts, got %d.", self._expected_parts, len(self._outcomes)
+            )
+            return
+        self._receipt = UploadReceipt(tuple(self._outcomes))
+        if self._on_receipt is not None:
+            self._on_receipt(self._receipt)
+
+    def write(self, data: bytes) -> int:
+        """Write some data of this upload attempt.
+
+        Args:
+            data: The data to write.
+
+        Returns:
+            The number of bytes processed.
+        """
+        if self._failed:
+            raise FormParserError("This upload attempt has failed; create a new IsolatedUploadReceiver to retry.")
+        if self._finalized:
+            raise FormParserError(
+                "This upload attempt is already finalized; create a new IsolatedUploadReceiver to retry."
+            )
+        self.bytes_received += len(data)
+        return self._parser.write(data)
+
+    def finalize(self) -> None:
+        """Finalize the receiver, signalling that no more data will be written."""
+        if not self._finalized:
+            self._finalized = True
+            self._parser.finalize()
+
+    def close(self) -> None:
+        """Close the receiver and the underlying parser."""
+        self._parser.close()
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(parts={len(self._outcomes)}, "
+            f"failed={self._failed!r}, receipt={self._receipt!r})"
+        )
