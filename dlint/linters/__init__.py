@@ -39,6 +39,13 @@ from .bad_urllib3_kwarg_use import BadUrllib3KwargUseLinter
 from .bad_pickle_use import BadPickleUseLinter
 from .bad_pycrypto_use import BadPycryptoUseLinter
 from .bad_xml_use import BadXMLUseLinter
+from .bad_xml_parser_use import (
+    BadDefusedxmlFallbackUseLinter as BadDefusedxmlFallbackUseLinter,
+    BadXMLFallbackUseLinter as BadXMLFallbackUseLinter,
+    BadXMLFactoryUseLinter as BadXMLFactoryUseLinter,
+    BadXMLParserFactoryUseLinter as BadXMLParserFactoryUseLinter,
+    BadXMLParserUseLinter,
+)
 from .bad_xmlrpc_use import BadXmlrpcUseLinter
 from .bad_xmlsec_module_attribute_use import BadXmlsecModuleAttributeUseLinter
 from .bad_yaml_use import BadYAMLUseLinter
@@ -80,6 +87,7 @@ ALL = (
     BadPickleUseLinter,
     BadPycryptoUseLinter,
     BadXMLUseLinter,
+    BadXMLParserUseLinter,
     BadXmlrpcUseLinter,
     BadXmlsecModuleAttributeUseLinter,
     BadYAMLUseLinter,

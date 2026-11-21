@@ -12,6 +12,7 @@ from . import redos  # noqa F401
 from . import test  # noqa F401
 from . import tree  # noqa F401
 from . import util  # noqa F401
+from . import xml_parser  # noqa F401
 
 __name__ = 'dlint'
 __version__ = '0.10.2'
