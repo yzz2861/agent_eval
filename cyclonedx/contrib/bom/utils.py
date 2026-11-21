@@ -18,8 +18,29 @@
 """Bom related utilities"""
 
 __all__ = [
-    'BomRefDiscriminator',
     'BomDependencyGraphFlatMerger',
+    'BomEvidenceMerger',
+    'BomMergeResult',
+    'BomMerger',
+    'BomRefDiscriminator',
+    'Claim',
+    'ComponentEvidenceMerger',
+    'ComponentIdentity',
+    'EvidenceClaim',
+    'EvidenceClaimMergeResult',
+    'EvidenceClaimMerger',
+    'EvidenceMerger',
+    'MergeResult',
+    'Source',
+    'TrustSource',
+    'Unattributed',
+    'UnattributedClaim',
+    'UnattributedReason',
+    'merge',
+    'merge_boms',
+    'merge_components',
+    'merge_evidence_claims',
+    'merge_trust_sources',
 ]
 
 from collections.abc import Iterable
@@ -28,6 +49,29 @@ from random import random
 from typing import TYPE_CHECKING, Any
 
 from ...model.dependency import Dependency
+from .merge import (
+    BomEvidenceMerger,
+    BomMerger,
+    BomMergeResult,
+    Claim,
+    ComponentEvidenceMerger,
+    ComponentIdentity,
+    EvidenceClaim,
+    EvidenceClaimMerger,
+    EvidenceClaimMergeResult,
+    EvidenceMerger,
+    MergeResult,
+    Source,
+    TrustSource,
+    Unattributed,
+    UnattributedClaim,
+    UnattributedReason,
+    merge,
+    merge_boms,
+    merge_components,
+    merge_evidence_claims,
+    merge_trust_sources,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...model.bom import Bom

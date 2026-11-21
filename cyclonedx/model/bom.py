@@ -20,7 +20,7 @@ from collections.abc import Generator, Iterable
 from datetime import datetime
 from enum import Enum
 from itertools import chain
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 from uuid import UUID, uuid4
 from warnings import warn
 
@@ -56,6 +56,8 @@ from .vulnerability import Vulnerability
 
 if TYPE_CHECKING:  # pragma: no cover
     from packageurl import PackageURL
+
+    from ..contrib.bom.merge import BomMergeResult
 
 
 @serializable.serializable_enum
@@ -865,6 +867,15 @@ class Bom:
                     f'Found LicenseExpression along with others licenses in: {elem!r}')
 
         return True
+
+    def merge(self, *others: 'Bom', **kwargs: Any) -> 'BomMergeResult':
+        """
+        Merge this BOM with other BOMs using the component-evidence merger.
+
+        Returns the trusted merged BOM with an unattributed side channel.
+        """
+        from ..contrib.bom.merge import merge_boms
+        return merge_boms(self, *others, **kwargs)
 
     def __comparable_tuple(self) -> _ComparableTuple:
         return _ComparableTuple((

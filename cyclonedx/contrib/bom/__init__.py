@@ -16,3 +16,43 @@
 # Copyright (c) OWASP Foundation. All Rights Reserved.
 
 """Bom related functionality"""
+
+from .merge import (
+    BomEvidenceMerger,
+    BomMerger,
+    BomMergeResult,
+    ComponentEvidenceMerger,
+    ComponentIdentity,
+    EvidenceClaim,
+    EvidenceClaimMerger,
+    EvidenceClaimMergeResult,
+    EvidenceMerger,
+    TrustSource,
+    UnattributedClaim,
+    UnattributedReason,
+    merge,
+    merge_boms,
+    merge_components,
+    merge_evidence_claims,
+    merge_trust_sources,
+)
+
+__all__ = [
+    'BomEvidenceMerger',
+    'BomMergeResult',
+    'BomMerger',
+    'ComponentEvidenceMerger',
+    'ComponentIdentity',
+    'EvidenceClaim',
+    'EvidenceClaimMergeResult',
+    'EvidenceClaimMerger',
+    'EvidenceMerger',
+    'TrustSource',
+    'UnattributedClaim',
+    'UnattributedReason',
+    'merge',
+    'merge_boms',
+    'merge_components',
+    'merge_evidence_claims',
+    'merge_trust_sources',
+]
