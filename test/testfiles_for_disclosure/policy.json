@@ -1,0 +1,4 @@
+{
+  "symbols": ["public_api"],
+  "compile_units": ["public_unit.c", "leaky_unit.c"]
+}

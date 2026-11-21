@@ -193,3 +193,51 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+### Symbol and source disclosure auditing
+
+`scripts/elf_disclosure.py` performs a read-only disclosure review. It
+joins the names and ranges that a recipient can recover from an ELF with
+the source paths reachable through DWARF line programs, DIE declarations,
+`STT_FILE` symbols, raw debug strings, and a separate debug/symbol file.
+
+``` text
+> python scripts/elf_disclosure.py app.elf \
+    --policy approval.json --json
+```
+
+A policy is a JSON object with any of these lists:
+
+``` json
+{
+  "symbols": ["public_api"],
+  "compile_units": ["public_unit.c"],
+  "sources": ["include/public.h"]
+}
+```
+
+Symbol matching is exact unless a pattern contains a shell wildcard.
+Compilation-unit and source patterns may be full paths, suffixes, or
+basenames. The object is approved only when every recoverable symbol name
+and source path is covered. The CLI exits with `0` for approval, `1` for a
+disclosure failure, and `2` for an input/parse error.
+
+The same checks are available as a library:
+
+``` python
+from elftools.elf.disclosure import DisclosurePolicy, audit_path
+
+report = audit_path(
+    "app.elf",
+    DisclosurePolicy(symbols={"public_api"},
+                     compile_units={"public_unit.c"}),
+    debug_file="app.debug",
+)
+print(report.approved, report.findings)
+```
+
+When one separate debug/symbol file covers several objects, pass the
+current object plus `debug_file`; CUs and symbols are associated by the
+object section ranges and `STT_FILE` source hints, and unrelated CUs are
+reported through `excluded_compile_unit_count` instead of being mixed into
+the current disclosure view. The auditor never writes to the input files.
