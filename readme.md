@@ -39,6 +39,7 @@ revocation checks.
      - Inhibit anyPolicy
    - Failure on unknown/unsupported critical extensions
  - TLS/SSL server validation
+ - Joint offline admission across multiple usages of one service identity
  - Whitelisting certificates
  - Blacklisting hash algorithms
  - Revocation checks

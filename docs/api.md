@@ -102,6 +102,52 @@
 > > Validates the certificate path and that the certificate is valid for
 > > the key usage and extended key usage purposes specified.
 
+> ##### `.validate_joint_usage()` method
+>
+> > ```python
+> > def validate_joint_usage(self, usages, end_entity_certs=None, require_offline=True,
+> >                          include_trust_anchor=False, identity=None):
+> >     """
+> >     :param usages:
+> >         A list/tuple of usage requirements. Each item may be a
+> >         certvalidator.joint.UsageRequirement object, a dict, or a
+> >         (key_usage, extended_key_usage, extended_optional) sequence.
+> >
+> >     :param end_entity_certs:
+> >         None, or a certificate/byte string/list of certificates that may
+> >         serve as the end-entity certificate for every usage without an
+> >         explicit end_entity_certs value
+> >
+> >     :param require_offline:
+> >         A bool - if the validation context must have fetching disabled
+> >
+> >     :param include_trust_anchor:
+> >         A bool - if trust anchors also count as intermediate authorization
+> >         subjects
+> >
+> >     :param identity:
+> >         None or a callable that returns a hashable authorization-subject
+> >         identifier for an asn1crypto.x509.Certificate object
+> >
+> >     :raises:
+> >         certvalidator.errors.PathValidationError - when one of the usages
+> >         can not be validated at all, using the normal validator error
+> >         certvalidator.errors.IndependentResponsibilityError - when every
+> >         individual usage validates, but no path combination satisfies the
+> >         independence constraint
+> >
+> >     :return:
+> >         A certvalidator.joint.JointValidationResult object with one
+> >         ValidationPath per usage
+> >     """
+> > ```
+>
+> Validates each usage with the normal path and usage validation logic, then
+> selects one path per usage such that no intermediate authorization subject
+> is shared across usages. Every valid path for a usage is retained, so a
+> compliant combination is found whenever one exists. The operation is
+> offline-only.
+
 ### `ValidationContext()` class
 
 > ##### constructor

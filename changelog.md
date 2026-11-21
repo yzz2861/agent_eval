@@ -1,5 +1,14 @@
 # changelog
 
+## Unreleased
+
+ - Added `CertificateValidator.validate_joint_usage()` and the module-level
+   `certvalidator.validate_joint_usage()` for offline joint admission of
+   multiple usages. Each usage is validated normally and all valid paths are
+   retained, then one path per usage is selected so intermediate authorization
+   subjects are disjoint. `IndependentResponsibilityError` is raised only when
+   every combination conflicts.
+
 ## 0.11.1
 
  - Updated [asn1crypto](https://github.com/wbond/asn1crypto) dependency to

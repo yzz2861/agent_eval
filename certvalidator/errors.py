@@ -74,3 +74,21 @@ class RevokedError(PathValidationError):
 class InvalidCertificateError(PathValidationError):
 
     pass
+
+
+class JointValidationError(PathValidationError):
+    """
+    Raised when every individual usage validates, but no combination of their
+    paths satisfies the independent-responsibility constraint.
+    """
+
+    pass
+
+
+class IndependentResponsibilityError(JointValidationError):
+    """
+    Raised when no path combination keeps intermediate authorization subjects
+    disjoint across the requested usages.
+    """
+
+    pass

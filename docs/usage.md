@@ -8,6 +8,7 @@
    - [Revocation Checking](#revocation-checking)
    - [Custom Trust Roots/CA Certs](#custom-trust-rootsca-certs)
    - [Moment-In-Time Validation](#moment-in-time-validation)
+   - [Joint Usage Admission](#joint-usage-admission)
 
 ## Basic Path Validation
 
@@ -406,3 +407,63 @@ validator = CertificateValidator(end_entity_cert, validation_context=context)
 If moment-in-time validation is being performed, the `allow_fetching` option
 can not be used. Instead, any revocation CRLs or OCSP responses should be
 provided via the `crls` or `ocsps` parameters.
+
+### Joint Usage Admission
+
+`CertificateValidator.validate_joint_usage()` performs an additional offline
+check when one certificate is being admitted for more than one purpose. Each
+purpose is still validated by the normal path and usage validation logic, but
+the selected paths must not share an intermediate authorization subject.
+Trust anchors are not considered intermediate subjects.
+
+Every valid path is retained for every usage. A backtracking search then picks
+one path per usage, and the decision only fails when every possible combination
+contains a shared intermediate. This means an earlier path that conflicts with
+another usage does not cause a false rejection when a later path is
+independent.
+
+```python
+from certvalidator import CertificateValidator, UsageRequirement
+
+
+validator = CertificateValidator(service_cert, validation_context=context)
+result = validator.validate_joint_usage(
+    [
+        UsageRequirement(
+            key_usage=set(['digital_signature']),
+            extended_key_usage=set(['client_auth']),
+            name='client-permission'
+        ),
+        UsageRequirement(
+            key_usage=set(['digital_signature']),
+            extended_key_usage=set(['email_protection']),
+            name='email-permission'
+        ),
+    ],
+    end_entity_certs=[service_cert_a, service_cert_b]
+)
+
+# One ValidationPath per usage, in the same order as the requirements
+client_path, email_path = result
+```
+
+The `usages` parameter also accepts dictionaries or
+`(key_usage, extended_key_usage, extended_optional)` sequences. A dictionary
+may include `name`, `key_usage`, `extended_key_usage`, `extended_optional` and
+`end_entity_cert`/`end_entity_certs`. A mapping of names to requirement values
+is accepted as well. The `end_entity_certs` parameter supplies alternative
+end-entity certificates for usages that do not provide their own candidates.
+This is useful when the same service identity has cross-signed or
+reissued certificates that lead to different intermediates.
+
+The joint entry is offline-only and requires
+`ValidationContext(allow_fetching=False)`, which is the default. If a usage
+cannot be validated at all, the normal validator exception is raised. If every
+usage validates individually but no independent combination exists,
+`certvalidator.errors.IndependentResponsibilityError` is raised. Its
+`paths_by_usage` attribute contains the candidate paths that were considered.
+
+The `tests/fixtures/joint` directory contains a small local PKI demonstrating
+both cases: two purposes that are individually valid but share one intermediate,
+and the same purposes succeeding when an alternative service certificate uses a
+different intermediate.

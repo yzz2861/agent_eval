@@ -6,6 +6,12 @@ from asn1crypto.x509 import Certificate
 
 from .context import ValidationContext
 from .errors import ValidationError, PathBuildingError, InvalidCertificateError
+from .joint import (
+    JointValidationResult,
+    UsageRequirement,
+    validate_joint_usage,
+    validate_joint_usages,
+)
 from .validate import validate_path, validate_tls_hostname, validate_usage
 from .version import __version__, __version_info__
 from ._errors import pretty_message
@@ -16,7 +22,11 @@ __all__ = [
     '__version__',
     '__version_info__',
     'CertificateValidator',
+    'JointValidationResult',
+    'UsageRequirement',
     'ValidationContext',
+    'validate_joint_usage',
+    'validate_joint_usages',
 ]
 
 
@@ -222,3 +232,79 @@ class CertificateValidator():
         self._validate_path()
         validate_tls_hostname(self._context, self._certificate, hostname)
         return self._path
+
+    def validate_joint_usage(self, usages, end_entity_certs=None, require_offline=True,
+                             include_trust_anchor=False, identity=None):
+        """
+        Validates a group of usages and selects one complete path per usage so
+        that no intermediate authorization subject is shared between usages.
+
+        Each usage is still validated with the normal path and usage
+        validation logic. When a usage has more than one valid path, every
+        path is retained and the combination search only fails if all path
+        combinations conflict.
+
+        :param usages:
+            A list/tuple of usage requirements. Each item may be a
+            certvalidator.joint.UsageRequirement object, a dict, or a
+            (key_usage, extended_key_usage, extended_optional) sequence. A
+            dict may include "name", "key_usage", "extended_key_usage",
+            "extended_optional" and "end_entity_cert"/"end_entity_certs"
+            keys. A dict mapping usage names to requirement values is also
+            accepted.
+
+        :param end_entity_certs:
+            None, or a certificate/byte string/list of certificates that may
+            serve as the end-entity certificate for every usage without an
+            explicit end_entity_certs value. When None, the certificate passed
+            to the constructor is used.
+
+        :param require_offline:
+            A bool - if the validation context must have fetching disabled
+
+        :param include_trust_anchor:
+            A bool - if trust anchors also count as intermediate authorization
+            subjects. Defaults to False.
+
+        :param identity:
+            None or a callable that accepts an
+            asn1crypto.x509.Certificate object and returns a hashable
+            authorization-subject identifier. By default a certificate is
+            identified by its subject and public key, so cross-signed copies
+            of the same intermediate count as one subject.
+
+        :raises:
+            certvalidator.errors.PathValidationError - when one of the usages
+            can not be validated at all, using the normal validator error
+
+            certvalidator.errors.IndependentResponsibilityError - when every
+            individual usage validates, but no path combination satisfies the
+            independence constraint
+
+        :return:
+            A certvalidator.joint.JointValidationResult object
+        """
+
+        return validate_joint_usage(
+            self._context,
+            self._certificate,
+            usages,
+            end_entity_certs=end_entity_certs,
+            require_offline=require_offline,
+            include_trust_anchor=include_trust_anchor,
+            identity=identity
+        )
+
+    def validate_joint_usages(self, usages, end_entity_certs=None, require_offline=True,
+                              include_trust_anchor=False, identity=None):
+        """
+        Alias for validate_joint_usage()
+        """
+
+        return self.validate_joint_usage(
+            usages,
+            end_entity_certs=end_entity_certs,
+            require_offline=require_offline,
+            include_trust_anchor=include_trust_anchor,
+            identity=identity
+        )
