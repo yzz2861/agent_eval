@@ -1,0 +1,10 @@
+{
+  "database_zones": {
+    "zone_a": "controlled-a",
+    "zone_b": "controlled-b",
+    "zone_c": "controlled-c"
+  },
+  "placeholder_zones": {
+    "<DB>": "controlled-a"
+  }
+}

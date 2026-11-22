@@ -1,0 +1,18 @@
+{
+  "mask_ranges": [
+    {
+      "start": 29,
+      "end": 35,
+      "category": "database",
+      "placeholder": "<DB>",
+      "zone": "controlled-a"
+    },
+    {
+      "start": 87,
+      "end": 93,
+      "category": "database",
+      "placeholder": "<DB>",
+      "zone": "controlled-b"
+    }
+  ]
+}
