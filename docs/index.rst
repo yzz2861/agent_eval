@@ -9,6 +9,7 @@ Contents
 
    clean
    linkify
+   export
    goals
    dev
    changes

@@ -2,6 +2,15 @@ from bleach.linkifier import (
     DEFAULT_CALLBACKS,
     Linker,
 )
+from bleach.export import (
+    CONFIRMED,
+    UNCONFIRMED,
+    PolicyRecord,
+    ReexportResult,
+    admit,
+    build_record,
+    reexport,
+)
 from bleach.sanitizer import (
     ALLOWED_ATTRIBUTES,
     ALLOWED_PROTOCOLS,
@@ -16,7 +25,17 @@ __releasedate__ = "20260605"
 __version__ = "6.4.0"
 
 
-__all__ = ["clean", "linkify"]
+__all__ = [
+    "clean",
+    "linkify",
+    "admit",
+    "reexport",
+    "build_record",
+    "PolicyRecord",
+    "ReexportResult",
+    "CONFIRMED",
+    "UNCONFIRMED",
+]
 
 
 def clean(
