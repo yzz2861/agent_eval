@@ -147,3 +147,59 @@ These are objects that are returned during certain operations, but are probably 
 .. autoclass:: Fingerprint
     :members:
 
+
+Purpose Review
+==============
+
+.. py:currentmodule:: pgpy.purpose
+
+This is an optional review layer that runs after :py:meth:`~pgpy.PGPKey.verify`.
+It splits the notation claims attached to verified signatures into review
+queues, distinguishing claims guaranteed by the signature itself from outer
+annotations, and applying caller-supplied business conditions.
+
+
+:py:class:`PurposePolicy`
+-------------------------
+
+.. autoclass:: PurposePolicy
+    :members:
+
+
+:py:class:`ClaimRule`
+---------------------
+
+.. autoclass:: ClaimRule
+    :members:
+
+
+:py:class:`PurposeReview`
+-------------------------
+
+.. autoclass:: PurposeReview
+    :members:
+
+
+:py:class:`SignatureReview`
+---------------------------
+
+.. autoclass:: SignatureReview
+    :members:
+
+
+:py:func:`extract_claims`
+-------------------------
+
+.. autofunction:: extract_claims
+
+
+:py:func:`review_signature`
+---------------------------
+
+.. autofunction:: review_signature
+
+
+:py:func:`review_verification`
+------------------------------
+
+.. autofunction:: review_verification
