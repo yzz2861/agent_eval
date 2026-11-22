@@ -1380,6 +1380,39 @@ class PdfWriter(PdfDocCommon):
             )
             self._write_trailer(stream, xref_location)
 
+    @classmethod
+    def preview_page(
+        cls,
+        reader: PdfReader,
+        page_number: int,
+    ) -> tuple["PdfWriter", Any]:
+        """
+        Export a single, delivery-checked page as a self-contained PDF.
+
+        This is a thin wrapper around
+        :func:`pypdf._preview.build_page_preview` placed next to the regular
+        export entry point.  The delivery check runs first; if the page needs
+        anything that cannot be confirmed as an internal dependency (for
+        example external streams, file specifications or remote actions), a
+        :class:`pypdf.PreviewDeliveryError` is raised and *no* PDF is produced.
+        The caller must route such pages to manual review.
+
+        Args:
+            reader: Source document.
+            page_number: Zero-based index of the approved page.
+
+        Returns:
+            A (writer, report) tuple.  The writer contains only the
+            approved page and the objects it genuinely needs.
+
+        Raises:
+            PreviewDeliveryError: If manual-review items were found.
+            IndexError: If *page_number* is out of range.
+        """
+        from ._preview import build_page_preview  # noqa: PLC0415
+
+        return build_page_preview(reader, page_number)
+
     def write(self, stream: Path | StrByteType) -> tuple[bool, IO[Any]]:
         """
         Write the collection of pages added to this object out as a PDF file.

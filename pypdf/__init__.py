@@ -12,6 +12,14 @@ from ._crypt_providers import crypt_provider
 from ._doc_common import DocumentInformation
 from ._encryption import PasswordType
 from ._page import PageObject, Transformation
+from ._preview import (
+    PreviewDeliveryError,
+    PreviewDeliveryReport,
+    PreviewIssue,
+    PreviewIssueCode,
+    build_page_preview,
+    check_page_delivery,
+)
 from ._reader import PdfReader
 from ._text_extraction import mult
 from ._version import __version__
@@ -36,6 +44,12 @@ __all__ = [
     "DocumentInformation",
     "ImageType",
     "ObjectDeletionFlag",
+    "PreviewDeliveryError",
+    "PreviewDeliveryReport",
+    "PreviewIssue",
+    "PreviewIssueCode",
+    "build_page_preview",
+    "check_page_delivery",
     "PageObject",
     "PageRange",
     "PaperSize",
