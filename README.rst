@@ -103,6 +103,9 @@ The keys' meaning is as follows:
 - ``autolink``: Enable lxml_'s autolinker_. May be either a boolean or a
   dictionary; a dictionary is passed as keyword arguments to
   ``autolink``.
+- ``audit``: Enable audit mode for :meth:`Sanitizer.sanitize_with_report`;
+  generated nodes which cannot be attributed to any declared stage are
+  suspended (held back from the output). Defaults to ``False``.
 - ``embedded_hosts``: Hosts from which embedded content such as
   ``iframe`` elements is accepted (only ``http:`` and ``https:`` URLs).
   Embedded content is dropped by default. To allow YouTube embeds you also
@@ -119,7 +122,9 @@ The keys' meaning is as follows:
   processed in reverse depth-first order. Under certain circumstances
   elements are processed more than once (search the code for
   ``backlog.append``). Preprocessors are run before whitespace
-  normalization, postprocessors afterwards.
+  normalization, postprocessors afterwards. Hooks may also be declared as
+  ``(name, callable)`` pairs; the name is then used as the stage name in
+  the provenance report (see below).
 - ``is_mergeable``: Adjacent elements which aren't kept ``separate`` are
   merged by default. This callable can be used to prevent merging of
   adjacent elements e.g. when their classes do not match
@@ -145,6 +150,36 @@ An example for an even more restricted configuration might be::
 The rationale for such a restricted set of allowed tags (e.g. no
 images) is documented in the `design decisions`_ section of
 django-content-editor_'s documentation.
+
+Provenance and auditing
+=======================
+
+When custom tree hooks are configured it may be unclear whether a node
+(e.g. an external link) was written by the user or introduced by a hook.
+``Sanitizer.sanitize_with_report()`` cleans exactly like
+``Sanitizer.sanitize()`` but additionally tracks the provenance of every
+node and returns a ``SanitizeResult`` with ``html``, ``report`` and the
+still-live ``tree``:
+
+    >>> from html_sanitizer import Sanitizer
+    >>> sanitizer = Sanitizer({
+    ...     "element_preprocessors": [("add-link", my_hook)],
+    ... })
+    >>> result = sanitizer.sanitize_with_report("<p>hello</p>")
+    >>> result.report.find("https://example.com/")
+    [ProvenanceEvent(stage='add-link', action='create', ...)]
+
+The stage contract distinguishes the ``"initial"`` stage (the
+user-written fragment) from the capabilities hooks may legitimately
+introduce: nodes and attributes created while a hook runs are attributed
+to that hook's stage, moved content keeps its original attribution.
+Stages after the main cleaning pass (``autolink``, the final ``clean``
+step) get their own attribution as well, and the final tree is checked
+against the recorded attribution before serialization. If a fragment is
+re-mounted (and possibly modified) after cleaning,
+``report.recheck(tree)`` checks it against the final attribution again.
+With ``"audit": True``, generated nodes which cannot be attributed to
+any declared stage are suspended and listed in ``report.suspended``.
 
 Django
 ======

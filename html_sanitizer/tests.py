@@ -6,6 +6,18 @@ from .sanitizer import Sanitizer
 default_sanitizer = Sanitizer()
 
 
+def move_content_and_add_link(element):
+    """Test plugin which moves a <strong> out of its <p> and adds a link."""
+    if element.tag == "p":
+        strong = element.find("strong")
+        if strong is not None:
+            element.addnext(strong)
+            link = strong.makeelement("a", {"href": "https://example.com/"})
+            link.text = "hook link"
+            strong.append(link)
+    return element
+
+
 class SanitizerTestCase(TestCase):
     def run_tests(self, entries, *, sanitizer=default_sanitizer, strip=False):
         for before, after in entries:
@@ -830,3 +842,103 @@ git commit
             ],
             sanitizer=sanitizer,
         )
+
+    def test_provenance_report(self):
+        sanitizer = Sanitizer(
+            {"element_preprocessors": [("move-and-link", move_content_and_add_link)]}
+        )
+        result = sanitizer.sanitize_with_report("<p>keep <strong>moved</strong></p>")
+
+        # The hook did its job and plain sanitize() produces the same HTML.
+        self.assertIn('<a href="https://example.com/">hook link</a>', result.html)
+        self.assertEqual(
+            sanitizer.sanitize("<p>keep <strong>moved</strong></p>"), result.html
+        )
+
+        # The auditor finds the action which produced the link.
+        (link_event,) = [
+            e
+            for e in result.report.find("https://example.com/")
+            if e.action == "create"
+        ]
+        self.assertEqual(link_event.stage, "move-and-link")
+        self.assertEqual(link_event.action, "create")
+
+        # The moved content was relocated by the same hook but is still
+        # attributed to the initial fragment.
+        (move_event,) = [e for e in result.report.events if e.action == "move"]
+        self.assertEqual(move_event.stage, "move-and-link")
+        self.assertIn("moved", move_event.detail)
+        self.assertEqual(
+            result.report.origin_of(result.tree.find(".//strong")), "initial"
+        )
+        self.assertEqual(
+            result.report.origin_of(result.tree.find(".//a")), "move-and-link"
+        )
+
+        # Nothing was left unattributed, nothing had to be suspended.
+        self.assertEqual(result.report.unattributed, [])
+        self.assertEqual(result.report.suspended, [])
+
+    def test_provenance_unnamed_hook(self):
+        sanitizer = Sanitizer({"element_preprocessors": [move_content_and_add_link]})
+        result = sanitizer.sanitize_with_report("<p>keep <strong>moved</strong></p>")
+        (link_event,) = [
+            e
+            for e in result.report.find("https://example.com/")
+            if e.action == "create"
+        ]
+        self.assertEqual(link_event.stage, "move_content_and_add_link")
+
+    def test_provenance_autolink_stage(self):
+        # Links mounted after the main cleaning pass (here: by autolink)
+        # are attributed to their own stage, not to the initial fragment.
+        sanitizer = Sanitizer({"autolink": True})
+        result = sanitizer.sanitize_with_report("<p>https://github.com/</p>")
+        self.assertEqual(result.report.origin_of(result.tree.find(".//a")), "autolink")
+
+    def test_provenance_remount_recheck(self):
+        sanitizer = Sanitizer()
+        result = sanitizer.sanitize_with_report("<p>hello</p>")
+
+        # Simulate a re-mount after cleaning which injects a new link.
+        link = result.tree.makeelement("a", {"href": "https://evil.example/"})
+        link.text = "injected"
+        result.tree.find("p").append(link)
+
+        (found,) = result.report.recheck(result.tree)
+        self.assertEqual(found.action, "unattributed")
+        self.assertIn("evil.example", found.detail)
+        # Not in audit mode: the node is reported but kept.
+        self.assertIsNotNone(result.tree.find(".//a"))
+        self.assertEqual(result.report.suspended, [])
+
+    def test_provenance_audit_suspends_unattributable(self):
+        sanitizer = Sanitizer({"audit": True})
+        result = sanitizer.sanitize_with_report("<p>hello</p>")
+
+        link = result.tree.makeelement("a", {"href": "https://evil.example/"})
+        link.text = "injected"
+        result.tree.find("p").append(link)
+
+        (found,) = result.report.recheck(result.tree)
+        self.assertIn("evil.example", found.detail)
+        # Audit mode: the unattributable node is suspended.
+        (suspended,) = result.report.suspended
+        self.assertEqual(suspended.action, "suspended")
+        self.assertIn("evil.example", suspended.detail)
+        self.assertIsNone(result.tree.find(".//a"))
+
+    def test_provenance_audit_keeps_attributable(self):
+        # Audit mode does not suspend nodes which a declared hook
+        # legitimately introduced.
+        sanitizer = Sanitizer(
+            {
+                "audit": True,
+                "element_preprocessors": [("move-and-link", move_content_and_add_link)],
+            }
+        )
+        result = sanitizer.sanitize_with_report("<p>keep <strong>moved</strong></p>")
+        self.assertIn('<a href="https://example.com/">hook link</a>', result.html)
+        self.assertEqual(result.report.unattributed, [])
+        self.assertEqual(result.report.suspended, [])

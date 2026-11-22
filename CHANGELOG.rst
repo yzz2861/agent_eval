@@ -7,6 +7,14 @@ Next version
 
 - Dropped support for Python < 3.10.
 - Added Python 3.14 and 3.15 to the CI matrix.
+- Added ``Sanitizer.sanitize_with_report()`` which tracks the provenance
+  of every node: content of the initial fragment is attributed to the
+  ``"initial"`` stage, nodes introduced by hooks (declared as
+  ``(name, callable)`` pairs or plain callables) are attributed to the
+  responsible stage. Added the ``audit`` setting which suspends generated
+  nodes that cannot be attributed to any declared stage, and
+  ``SanitizeReport.recheck()`` for checking re-mounted trees against the
+  final attribution.
 
 2.7 (2026-10-25)
 ================
