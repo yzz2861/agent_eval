@@ -1,0 +1,413 @@
+[
+  {
+    "file": "normal_embedded.docx",
+    "zip_ok": true,
+    "outer": {
+      "layer": "ooxml_outer",
+      "entries": {
+        "core.xml": true,
+        "app.xml": true,
+        "custom.xml": true,
+        "settings.xml": true
+      },
+      "findings": [],
+      "values": {
+        "creator": "Outer Reviewer",
+        "last_modified_by": "Outer SaveAs Tool",
+        "application": "Contoso SaveAs Converter",
+        "app_version": "7.0",
+        "readonly_claim": true,
+        "readonly_evidence": [
+          "settings.xml:documentProtection@edit=readOnly",
+          "custom.xml:ReadModeEnforced",
+          "custom.xml:_MarkAsFinal"
+        ],
+        "generator_residue": [
+          "docProps/generator-residue.txt"
+        ]
+      }
+    },
+    "embedded": [
+      {
+        "member": "word/embeddings/oleObject1.bin",
+        "layer": "ole_embedded",
+        "parseable": true,
+        "signature_ok": true,
+        "streams": [
+          "\\x01CompObj",
+          "\\x05DocumentSummaryInformation",
+          "\\x05SummaryInformation",
+          "package"
+        ],
+        "properties": {
+          "SI:1": 1252,
+          "SI:2": "Inner Evidence Title",
+          "SI:4": "Inner Evidence Author",
+          "SI:18": "Inner Saved By",
+          "DSI:1": 1252,
+          "DSI:15": "Inner Org Company"
+        },
+        "error": null,
+        "has_summary": true,
+        "has_dsi": true,
+        "has_package": true,
+        "has_native": false,
+        "has_compobj": true
+      }
+    ],
+    "errors": [],
+    "classifications": [
+      {
+        "attribute": "OUT-CREATOR",
+        "scope": "ooxml_outer",
+        "claim": "外层作者",
+        "status": "supported",
+        "evidence": "docProps/core.xml dc:creator",
+        "observed": "Outer Reviewer"
+      },
+      {
+        "attribute": "OUT-MODIFIEDBY",
+        "scope": "ooxml_outer",
+        "claim": "外层最后保存者",
+        "status": "supported",
+        "evidence": "docProps/core.xml cp:lastModifiedBy",
+        "observed": "Outer SaveAs Tool"
+      },
+      {
+        "attribute": "OUT-READONLY",
+        "scope": "ooxml_outer",
+        "claim": "只供阅读/标记最终",
+        "status": "supported",
+        "evidence": "settings.xml:documentProtection@edit=readOnly; custom.xml:ReadModeEnforced; custom.xml:_MarkAsFinal",
+        "observed": true
+      },
+      {
+        "attribute": "OUT-APP",
+        "scope": "package_residue",
+        "claim": "生成应用/版本",
+        "status": "packaging_only",
+        "evidence": "docProps/app.xml self-reported tool",
+        "observed": [
+          "Contoso SaveAs Converter",
+          "7.0"
+        ]
+      },
+      {
+        "attribute": "OUT-GENRESIDUE",
+        "scope": "package_residue",
+        "claim": "打包工具残留",
+        "status": "packaging_only",
+        "evidence": "non-semantic residue part",
+        "observed": [
+          "docProps/generator-residue.txt"
+        ]
+      },
+      {
+        "attribute": "OLE-TITLE",
+        "scope": "ole_embedded",
+        "claim": "内嵌标题",
+        "status": "supported",
+        "evidence": "CFB property SI:2",
+        "observed": "Inner Evidence Title"
+      },
+      {
+        "attribute": "OLE-AUTHOR",
+        "scope": "ole_embedded",
+        "claim": "内嵌作者",
+        "status": "supported",
+        "evidence": "CFB property SI:4",
+        "observed": "Inner Evidence Author"
+      },
+      {
+        "attribute": "OLE-LASTSAVED",
+        "scope": "ole_embedded",
+        "claim": "内嵌保存者",
+        "status": "supported",
+        "evidence": "CFB property SI:18",
+        "observed": "Inner Saved By"
+      },
+      {
+        "attribute": "OLE-COMPANY",
+        "scope": "ole_embedded",
+        "claim": "内嵌单位",
+        "status": "supported",
+        "evidence": "CFB property DSI:15",
+        "observed": "Inner Org Company"
+      },
+      {
+        "attribute": "OLE-PACKAGE",
+        "scope": "ole_embedded",
+        "claim": "独立内嵌载荷",
+        "status": "supported",
+        "evidence": "package/Ole10Native stream",
+        "observed": [
+          "\\x01CompObj",
+          "\\x05DocumentSummaryInformation",
+          "\\x05SummaryInformation",
+          "package"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "packaging_only.docx",
+    "zip_ok": true,
+    "outer": {
+      "layer": "ooxml_outer",
+      "entries": {
+        "core.xml": true,
+        "app.xml": true,
+        "custom.xml": true,
+        "settings.xml": true
+      },
+      "findings": [],
+      "values": {
+        "creator": null,
+        "last_modified_by": "SaveAs Converter",
+        "application": "Contoso SaveAs Converter",
+        "app_version": "7.0",
+        "readonly_claim": true,
+        "readonly_evidence": [
+          "settings.xml:documentProtection@edit=readOnly",
+          "custom.xml:ReadModeEnforced"
+        ],
+        "generator_residue": [
+          "docProps/generator-residue.txt"
+        ]
+      }
+    },
+    "embedded": [
+      {
+        "member": "word/embeddings/oleObject1.bin",
+        "layer": "ole_embedded",
+        "parseable": true,
+        "signature_ok": true,
+        "streams": [
+          "\u0001CompObj",
+          "Ole10Native"
+        ],
+        "properties": {},
+        "error": null,
+        "has_summary": false,
+        "has_dsi": false,
+        "has_package": false,
+        "has_native": true,
+        "has_compobj": false
+      }
+    ],
+    "errors": [],
+    "classifications": [
+      {
+        "attribute": "OUT-CREATOR",
+        "scope": "ooxml_outer",
+        "claim": "外层作者",
+        "status": "unparsable",
+        "evidence": "docProps/core.xml dc:creator",
+        "observed": null
+      },
+      {
+        "attribute": "OUT-MODIFIEDBY",
+        "scope": "ooxml_outer",
+        "claim": "外层最后保存者",
+        "status": "supported",
+        "evidence": "docProps/core.xml cp:lastModifiedBy",
+        "observed": "SaveAs Converter"
+      },
+      {
+        "attribute": "OUT-READONLY",
+        "scope": "ooxml_outer",
+        "claim": "只供阅读/标记最终",
+        "status": "supported",
+        "evidence": "settings.xml:documentProtection@edit=readOnly; custom.xml:ReadModeEnforced",
+        "observed": true
+      },
+      {
+        "attribute": "OUT-APP",
+        "scope": "package_residue",
+        "claim": "生成应用/版本",
+        "status": "packaging_only",
+        "evidence": "docProps/app.xml self-reported tool",
+        "observed": [
+          "Contoso SaveAs Converter",
+          "7.0"
+        ]
+      },
+      {
+        "attribute": "OUT-GENRESIDUE",
+        "scope": "package_residue",
+        "claim": "打包工具残留",
+        "status": "packaging_only",
+        "evidence": "non-semantic residue part",
+        "observed": [
+          "docProps/generator-residue.txt"
+        ]
+      },
+      {
+        "attribute": "OLE-TITLE",
+        "scope": "ole_embedded",
+        "claim": "内嵌标题",
+        "status": "unparsable",
+        "evidence": "CFB property SI:2",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-AUTHOR",
+        "scope": "ole_embedded",
+        "claim": "内嵌作者",
+        "status": "unparsable",
+        "evidence": "CFB property SI:4",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-LASTSAVED",
+        "scope": "ole_embedded",
+        "claim": "内嵌保存者",
+        "status": "unparsable",
+        "evidence": "CFB property SI:18",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-COMPANY",
+        "scope": "ole_embedded",
+        "claim": "内嵌单位",
+        "status": "unparsable",
+        "evidence": "CFB property DSI:15",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-PACKAGE",
+        "scope": "ole_embedded",
+        "claim": "独立内嵌载荷",
+        "status": "supported",
+        "evidence": "package/Ole10Native stream",
+        "observed": [
+          "\u0001CompObj",
+          "Ole10Native"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "unparsable_embed.docx",
+    "zip_ok": true,
+    "outer": {
+      "layer": "ooxml_outer",
+      "entries": {
+        "core.xml": true,
+        "app.xml": true,
+        "custom.xml": true,
+        "settings.xml": true
+      },
+      "findings": [],
+      "values": {
+        "creator": "Outer Reviewer",
+        "last_modified_by": "Outer SaveAs Tool",
+        "application": "Contoso SaveAs Converter",
+        "app_version": "7.0",
+        "readonly_claim": true,
+        "readonly_evidence": [
+          "settings.xml:documentProtection@edit=readOnly",
+          "custom.xml:_MarkAsFinal"
+        ],
+        "generator_residue": []
+      }
+    },
+    "embedded": [
+      {
+        "member": "word/embeddings/oleObject1.bin",
+        "layer": "ole_embedded",
+        "parseable": false,
+        "signature_ok": false,
+        "streams": [],
+        "properties": {},
+        "error": "not_a_compound_file_signature"
+      }
+    ],
+    "errors": [],
+    "classifications": [
+      {
+        "attribute": "OUT-CREATOR",
+        "scope": "ooxml_outer",
+        "claim": "外层作者",
+        "status": "supported",
+        "evidence": "docProps/core.xml dc:creator",
+        "observed": "Outer Reviewer"
+      },
+      {
+        "attribute": "OUT-MODIFIEDBY",
+        "scope": "ooxml_outer",
+        "claim": "外层最后保存者",
+        "status": "supported",
+        "evidence": "docProps/core.xml cp:lastModifiedBy",
+        "observed": "Outer SaveAs Tool"
+      },
+      {
+        "attribute": "OUT-READONLY",
+        "scope": "ooxml_outer",
+        "claim": "只供阅读/标记最终",
+        "status": "supported",
+        "evidence": "settings.xml:documentProtection@edit=readOnly; custom.xml:_MarkAsFinal",
+        "observed": true
+      },
+      {
+        "attribute": "OUT-APP",
+        "scope": "package_residue",
+        "claim": "生成应用/版本",
+        "status": "packaging_only",
+        "evidence": "docProps/app.xml self-reported tool",
+        "observed": [
+          "Contoso SaveAs Converter",
+          "7.0"
+        ]
+      },
+      {
+        "attribute": "OUT-GENRESIDUE",
+        "scope": "package_residue",
+        "claim": "打包工具残留",
+        "status": "unparsable",
+        "evidence": "non-semantic residue part",
+        "observed": []
+      },
+      {
+        "attribute": "OLE-TITLE",
+        "scope": "ole_embedded",
+        "claim": "内嵌标题",
+        "status": "unparsable",
+        "evidence": "not_a_compound_file_signature",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-AUTHOR",
+        "scope": "ole_embedded",
+        "claim": "内嵌作者",
+        "status": "unparsable",
+        "evidence": "not_a_compound_file_signature",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-LASTSAVED",
+        "scope": "ole_embedded",
+        "claim": "内嵌保存者",
+        "status": "unparsable",
+        "evidence": "not_a_compound_file_signature",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-COMPANY",
+        "scope": "ole_embedded",
+        "claim": "内嵌单位",
+        "status": "unparsable",
+        "evidence": "not_a_compound_file_signature",
+        "observed": null
+      },
+      {
+        "attribute": "OLE-PACKAGE",
+        "scope": "ole_embedded",
+        "claim": "内嵌载荷",
+        "status": "unparsable",
+        "evidence": "not_a_compound_file_signature",
+        "observed": null
+      }
+    ]
+  }
+]
