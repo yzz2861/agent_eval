@@ -1,0 +1,39 @@
+{
+ "signatures": [
+  {
+   "keyid": "6828d65f2d3b1a31c9235bc16d91bd19fca33c1f766163e6dd67adb9980cc500",
+   "sig": "f6a81495e5c5de1eac44297e734494104a236bdbcd10af836047550dcfeed53641eddded577edfd87206606ca46a319425aac9c61a94b741c404c48d339ca90f"
+  }
+ ],
+ "signed": {
+  "_type": "targets",
+  "delegations": {
+   "keys": {
+    "0ea66ea29d8b47a5f79974bc0de46f514189b9b7d376f300413e07cfc6e2e54e": {
+     "keytype": "ed25519",
+     "keyval": {
+      "public": "1c70be88bf895a88067e525e2fffd400d467d2fa6d64d8ac173fcb7a043509e7"
+     },
+     "scheme": "ed25519"
+    }
+   },
+   "roles": [
+    {
+     "keyids": [
+      "0ea66ea29d8b47a5f79974bc0de46f514189b9b7d376f300413e07cfc6e2e54e"
+     ],
+     "name": "hardware",
+     "paths": [
+      "hardware/*"
+     ],
+     "terminating": true,
+     "threshold": 1
+    }
+   ]
+  },
+  "expires": "2026-07-01T09:00:00Z",
+  "spec_version": "1.0.31",
+  "targets": {},
+  "version": 1
+ }
+}

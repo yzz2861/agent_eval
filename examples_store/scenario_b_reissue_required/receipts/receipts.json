@@ -1,0 +1,16 @@
+[
+  {
+    "delegation_path": [
+      "targets",
+      "legacy-hardware"
+    ],
+    "evidence_relpath": "artifacts/valve-3.bin",
+    "hashes": {
+      "sha256": "b44b349b847a6a04e72ec197ef31bacc43f8073c19254a8d8faf44c04493671b"
+    },
+    "issued_at": "2026-06-01T09:00:00Z",
+    "length": 44,
+    "receipt_id": "R-B-001",
+    "target_path": "hardware/valve-3.bin"
+  }
+]

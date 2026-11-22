@@ -1,0 +1,46 @@
+{
+ "signatures": [
+  {
+   "keyid": "2e6187470d74807855beb03a39506b0040a8965e5045d026fd0e6d65a00ec9b0",
+   "sig": "84f4225f9dabc08648b61035cdba4bfd69c5b9a568542ac8f56aaab9c72954936799f60ec9ef048fdb7ea37a0cb66253b8e079465cbe451f7240f3b8f2513a0c"
+  }
+ ],
+ "signed": {
+  "_type": "targets",
+  "delegations": {
+   "keys": {
+    "cb5ee803428f1ed8f2a831428b625d64d68e9871e7e3e5506a23f55a16979439": {
+     "keytype": "ed25519",
+     "keyval": {
+      "public": "a13deec74a3faf87e59df3845b36cb176b73f8bd4c41ff0ec95d3dd798331045"
+     },
+     "scheme": "ed25519"
+    }
+   },
+   "roles": [
+    {
+     "keyids": [
+      "cb5ee803428f1ed8f2a831428b625d64d68e9871e7e3e5506a23f55a16979439"
+     ],
+     "name": "legacy-hardware",
+     "paths": [
+      "hardware/*"
+     ],
+     "terminating": true,
+     "threshold": 1
+    }
+   ]
+  },
+  "expires": "2026-06-30T09:00:00Z",
+  "spec_version": "1.0.31",
+  "targets": {
+   "misc/internal.log": {
+    "hashes": {
+     "sha256": "f23cdbd604a7cdf36a5c44bbf8713a2bcdf950a07e908c6731d6eaef5f80da3e"
+    },
+    "length": 45
+   }
+  },
+  "version": 1
+ }
+}

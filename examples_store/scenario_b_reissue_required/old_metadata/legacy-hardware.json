@@ -1,0 +1,22 @@
+{
+ "signatures": [
+  {
+   "keyid": "5ac97367d61e76986d09264bf2e198592e02e181ca4036b70f1ae52ff364960b",
+   "sig": "870ddada05dcc54a34f19be80766079842a34b9005a60203e931223f30fe96638e261f449690badb867f3eacf70fb2e635583114f8c199889b7d217f99375a0d"
+  }
+ ],
+ "signed": {
+  "_type": "targets",
+  "expires": "2026-06-30T09:00:00Z",
+  "spec_version": "1.0.31",
+  "targets": {
+   "hardware/valve-3.bin": {
+    "hashes": {
+     "sha256": "b44b349b847a6a04e72ec197ef31bacc43f8073c19254a8d8faf44c04493671b"
+    },
+    "length": 44
+   }
+  },
+  "version": 1
+ }
+}

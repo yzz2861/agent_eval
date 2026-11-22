@@ -1,0 +1,22 @@
+{
+ "signatures": [
+  {
+   "keyid": "cb5ee803428f1ed8f2a831428b625d64d68e9871e7e3e5506a23f55a16979439",
+   "sig": "0468ac53bed59a9e379cc33ac51851d0c1e8e319c3515b344bb2e646b2eae38c7e05f6db63b138b9c23176c6b347bdf13324af3d4dd0b881f617efa8e381100f"
+  }
+ ],
+ "signed": {
+  "_type": "targets",
+  "expires": "2026-06-30T09:00:00Z",
+  "spec_version": "1.0.31",
+  "targets": {
+   "hardware/pump-7.bin": {
+    "hashes": {
+     "sha256": "fb085170d7fd6a30f580d326329f5d5e39ef8bed092b9e4da39e03cf15512c5a"
+    },
+    "length": 56
+   }
+  },
+  "version": 1
+ }
+}
