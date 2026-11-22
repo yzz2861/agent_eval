@@ -93,6 +93,24 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+String heap usage
+-----------------
+
+The ``#Strings`` heap is a shared byte pool, so equal text may live at
+different offsets, multiple table fields may share one offset, and a field may
+point into the suffix of another string.  Use ``string_usage`` to map a byte
+range back to the exact table rows and fields, including effective string ends
+and incomplete-ownership candidates.
+
+.. code-block:: python
+
+   usage = pe.net.string_usage
+   for ref in usage.for_range(start, end):
+       print(ref.table, ref.row_index, ref.field, ref.index,
+             ref.effective_end, ref.complete)
+   for candidate in usage.for_range(start, end).candidates:
+       print("incomplete candidate:", candidate)
+
 TODO
 ----
 

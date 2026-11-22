@@ -459,6 +459,25 @@ class ClrData(DataContainer):
             assert self._resources is not None
         return self._resources
 
+    @property
+    def string_usage(self) -> stream.StringHeapUsage:
+        """Read-only inventory of metadata-table fields that use #Strings."""
+        if self.mdtables is None:
+            return stream.StringHeapUsage.empty()
+        return self.mdtables.string_usage
+
+    @property
+    def string_heap_usage(self) -> stream.StringHeapUsage:
+        return self.string_usage
+
+    def get_string_usage(
+        self, start: int = 0, end: Optional[int] = None
+    ) -> stream.StringRangeUsage:
+        """Reverse lookup a byte range in #Strings."""
+        if self.mdtables is None:
+            return stream.StringHeapUsage.empty().for_range(start, end)
+        return self.mdtables.get_string_usage(start, end)
+
     # Structure description from:
     # http://www.ntcore.com/files/dotnetformat.htm
     _format = (

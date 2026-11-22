@@ -5,6 +5,7 @@ History
 0.18.0 (2026)
 -------------
 
+* FEATURE: read-only #Strings heap usage inventory with byte-range reverse lookup, effective string ends, and incomplete-ownership candidates
 * BUGFIX: sanity check value of mdtable num_rows value; do not process if larger than stream size
 * FEATURE: UserString objects, add ability to set string decode error option
 * add py 3.10 and 3.11 to supported versions list

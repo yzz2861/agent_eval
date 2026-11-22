@@ -13,9 +13,10 @@ Copyright (c) 2020-2024 MalwareFrank
 
 import struct as _struct
 import logging
-from typing import Dict, List, Tuple, Union, Optional, overload
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Dict, Iterator, List, Mapping, Sequence, Tuple, Union, Optional, overload
 from binascii import hexlify as _hexlify
-from collections.abc import Sequence
 
 from pefile import MAX_STRING_LENGTH, Structure
 
@@ -92,8 +93,494 @@ class HeapItemBinary(base.HeapItem):
         return False
 
 
+@dataclass(frozen=True)
+class StringReference:
+    """A single metadata-table field that points into the #Strings heap.
+
+    The record is intentionally read-only: it is a snapshot of the raw
+    structure value and the heap bytes it resolved to.  A bad index does not
+    abort an inventory; it is represented by a record with ``valid == False``
+    and no span.
+    """
+
+    table: str
+    table_number: int
+    row_index: int
+    field: str
+    attribute: Optional[str]
+    index: int
+    start: Optional[int]
+    end: Optional[int]
+    terminator: Optional[int]
+    boundary: bool
+    terminated: bool
+    valid: bool
+    raw: bytes
+    value: Optional[str]
+    row: Optional[Any] = field(default=None, repr=False, compare=False)
+
+    @property
+    def table_name(self) -> str:
+        return self.table
+
+    @property
+    def field_name(self) -> str:
+        return self.field
+
+    @property
+    def rid(self) -> int:
+        """The one-based row index, as used by metadata tokens."""
+        return self.row_index
+
+    @property
+    def row_offset(self) -> int:
+        """The zero-based position of this row in its table."""
+        return self.row_index - 1
+
+    @property
+    def table_index(self) -> int:
+        return self.table_number
+
+    @property
+    def effective_end(self) -> Optional[int]:
+        """Exclusive end of the referenced string, i.e. the NUL position.
+
+        If the string is not NUL-terminated, this is the end of the heap.
+        Invalid indexes have no effective end.
+        """
+        return self.end
+
+    @property
+    def end_offset(self) -> Optional[int]:
+        return self.effective_end
+
+    @property
+    def end_including_terminator(self) -> Optional[int]:
+        if self.terminator is not None:
+            return self.terminator + 1
+        return self.end
+
+    @property
+    def next_index(self) -> Optional[int]:
+        return self.end_including_terminator
+
+    @property
+    def length(self) -> Optional[int]:
+        if self.start is None or self.end is None:
+            return None
+        return self.end - self.start
+
+    @property
+    def span(self) -> Optional[Tuple[int, int]]:
+        if self.start is None or self.end is None:
+            return None
+        return self.start, self.end
+
+    @property
+    def complete(self) -> bool:
+        """Whether this field owns a whole, terminated heap string.
+
+        A suffix reference (an index that points into the middle of another
+        string) is valid but has incomplete ownership of the bytes before it.
+        An unterminated or out-of-range reference is also incomplete.
+        """
+        return self.valid and self.boundary and self.terminated
+
+    @property
+    def incomplete(self) -> bool:
+        return not self.complete
+
+    @property
+    def shares_prefix(self) -> bool:
+        """True when the index does not begin at a string boundary."""
+        return self.valid and not self.boundary
+
+    @property
+    def interior(self) -> bool:
+        return self.shares_prefix
+
+    def overlaps(self, start: int, end: int) -> bool:
+        if self.start is None or self.end is None:
+            return False
+        if start == end:
+            return self.start <= start <= self.end
+        return self.start < end and self.end > start
+
+    def match_kind(self, start: int, end: int) -> str:
+        """Describe how this reference relates to a requested byte range."""
+        if not self.valid or self.start is None or self.end is None:
+            return "invalid"
+        if not self.overlaps(start, end):
+            return "none"
+        if self.start == start and self.end == end:
+            return "exact"
+        if self.start <= start and self.end >= end:
+            return "contains"
+        if self.start >= start and self.end <= end:
+            return "inside"
+        return "partial"
+
+
+@dataclass(frozen=True)
+class StringRangeUsage(Sequence[StringReference]):
+    """Read-only reverse lookup result for a byte range in #Strings.
+
+    Iterating the object yields all references whose effective string span
+    overlaps the requested range.  ``exact`` holds references whose span is
+    exactly the requested range.  ``candidates`` holds overlap records whose
+    ownership is not complete: they are only a prefix/suffix/partial match, or
+    the reference itself starts inside another string or is unterminated.
+    ``unowned`` holds sub-ranges of the request that no valid reference covers.
+    """
+
+    start: int
+    end: int
+    references: Tuple[StringReference, ...]
+    exact: Tuple[StringReference, ...]
+    candidates: Tuple[StringReference, ...]
+    unowned: Tuple[Tuple[int, int], ...]
+
+    def __iter__(self) -> Iterator[StringReference]:
+        return iter(self.references)
+
+    def __len__(self) -> int:
+        return len(self.references)
+
+    @overload
+    def __getitem__(self, i: int) -> StringReference:
+        ...
+
+    @overload
+    def __getitem__(self, i: slice) -> Tuple[StringReference, ...]:
+        ...
+
+    def __getitem__(self, i):
+        return self.references[i]
+
+    @property
+    def refs(self) -> Tuple[StringReference, ...]:
+        return self.references
+
+    def at(self, index: int) -> Tuple[StringReference, ...]:
+        """Return overlapping references that use exactly this heap index."""
+        return tuple(ref for ref in self.references if ref.index == index)
+
+    at_offset = at
+
+    @property
+    def incomplete(self) -> Tuple[StringReference, ...]:
+        return tuple(ref for ref in self.references if ref.incomplete)
+
+    @property
+    def incomplete_candidates(self) -> Tuple[StringReference, ...]:
+        return self.candidates
+
+
+class StringHeapUsage(Sequence[StringReference]):
+    """A read-only inventory of metadata-table fields that use #Strings."""
+
+    def __init__(self, heap: Optional["StringsHeap"], references: Sequence[StringReference]):
+        self.heap = heap
+        self.heap_size = heap.sizeof() if heap is not None else 0
+        self.references: Tuple[StringReference, ...] = tuple(
+            sorted(
+                references,
+                key=lambda ref: (
+                    ref.start is None,
+                    ref.start if ref.start is not None else ref.index,
+                    ref.table_number,
+                    ref.row_index,
+                    ref.field,
+                ),
+            )
+        )
+
+        by_index: Dict[int, List[StringReference]] = {}
+        for ref in self.references:
+            by_index.setdefault(ref.index, []).append(ref)
+        self.by_index: Mapping[int, Tuple[StringReference, ...]] = MappingProxyType(
+            {index: tuple(refs) for index, refs in by_index.items()}
+        )
+
+    @classmethod
+    def empty(cls) -> "StringHeapUsage":
+        return cls(None, ())
+
+    def __iter__(self) -> Iterator[StringReference]:
+        return iter(self.references)
+
+    def __len__(self) -> int:
+        return len(self.references)
+
+    def __getitem__(self, i):
+        return self.references[i]
+
+    def at(self, index: int) -> Tuple[StringReference, ...]:
+        """Return every field that uses exactly the given heap index."""
+        return self.by_index.get(index, ())
+
+    at_offset = at
+    references_to = at
+
+    def __call__(self, start: Optional[int] = None, end: Optional[int] = None):
+        """Use the inventory directly as a range query.
+
+        ``usage()`` returns the inventory, while ``usage(start, end)`` is
+        shorthand for ``usage.for_range(start, end)``.
+        """
+        if start is None and end is None:
+            return self
+        return self.for_range(0 if start is None else start, end)
+
+    def for_range(self, start: int = 0, end: Optional[int] = None) -> StringRangeUsage:
+        """Reverse lookup a byte range in the #Strings heap.
+
+        ``start`` is inclusive and ``end`` is exclusive, matching Python byte
+        slicing.  The range is clamped to the heap so that a damaged index or
+        an investigator-provided range cannot raise.
+        """
+        if end is None:
+            end = self.heap_size
+        if start < 0:
+            start = 0
+        if end < 0:
+            end = 0
+        if start > self.heap_size:
+            start = self.heap_size
+        if end > self.heap_size:
+            end = self.heap_size
+        if end < start:
+            end = start
+
+        refs = tuple(ref for ref in self.references if ref.overlaps(start, end))
+        exact = tuple(ref for ref in refs if ref.match_kind(start, end) == "exact")
+        candidates = tuple(
+            ref
+            for ref in refs
+            if ref.match_kind(start, end) != "exact" or ref.incomplete
+        )
+
+        covered = []
+        for ref in refs:
+            if ref.start is None or ref.end is None or ref.end <= ref.start:
+                continue
+            covered.append((max(start, ref.start), min(end, ref.end)))
+        covered.sort()
+
+        unowned = []
+        cursor = start
+        for cover_start, cover_end in covered:
+            if cover_start > cursor:
+                unowned.append((cursor, cover_start))
+            if cover_end > cursor:
+                cursor = cover_end
+        if cursor < end:
+            unowned.append((cursor, end))
+
+        return StringRangeUsage(
+            start=start,
+            end=end,
+            references=refs,
+            exact=exact,
+            candidates=candidates,
+            unowned=tuple(unowned),
+        )
+
+    def find(self, value: Union[str, bytes], encoding: str = "utf-8") -> Tuple[StringRangeUsage, ...]:
+        """Find each byte occurrence of ``value`` and reverse lookup its range."""
+        if self.heap is None:
+            return ()
+        needle = value.encode(encoding) if isinstance(value, str) else value
+        if not needle:
+            return ()
+        data = self.heap.raw_data
+        results = []
+        offset = data.find(needle)
+        while offset >= 0:
+            results.append(self.for_range(offset, offset + len(needle)))
+            offset = data.find(needle, offset + 1)
+        return tuple(results)
+
+    for_byte_range = for_range
+
+
 class StringsHeap(base.ClrHeap):
     offset_size = 0
+
+    _mdtables: Optional["MetaDataTables"] = None
+
+    @property
+    def raw_data(self) -> bytes:
+        """The immutable raw bytes of the #Strings stream."""
+        return self.__data__
+
+    def bind(self, mdtables: Optional["MetaDataTables"]):
+        """Associate this heap with the table stream that references it."""
+        self._mdtables = mdtables
+
+    def usage_inventory(
+        self,
+        tables: Optional[Union["MetaDataTables", List[base.ClrMetaDataTable], Tuple[base.ClrMetaDataTable, ...]]] = None,
+    ) -> StringHeapUsage:
+        """Build a fresh, read-only inventory of table fields using this heap.
+
+        Only raw row structures are read.  In particular this does not call
+        ``MetaDataTables.parse()`` or ``MDTableRow.parse()`` and therefore does
+        not force a lazy-loaded table to resolve its coded indexes or lists.
+        """
+        if tables is None:
+            tables = self._mdtables
+        if tables is None:
+            return StringHeapUsage(self, ())
+
+        references: List[StringReference] = []
+        if isinstance(tables, (list, tuple)):
+            table_list = tables
+        else:
+            table_list = getattr(tables, "tables_list", ())
+        for table in table_list:
+            try:
+                row_class = table._row_class
+                string_fields = getattr(row_class, "_struct_strings", None)
+            except Exception:
+                continue
+            if not string_fields:
+                continue
+
+            rows = getattr(table, "rows", ())
+            row_count = len(rows)
+            for row_offset in range(row_count):
+                try:
+                    row = rows[row_offset]
+                except Exception as e:
+                    # A corrupt row must not hide the other rows in this table.
+                    logger.debug("string usage: failed to load %s row %d: %s", table.name, row_offset + 1, e)
+                    continue
+                if row is None:
+                    continue
+                struct = getattr(row, "struct", None)
+                if struct is None:
+                    continue
+
+                for struct_name, attribute_name in string_fields.items():
+                    try:
+                        index = getattr(struct, struct_name)
+                    except Exception:
+                        continue
+                    if index is None:
+                        continue
+                    try:
+                        reference = self._make_reference(
+                            table, row_offset, row, struct_name, attribute_name, index
+                        )
+                    except Exception as e:
+                        # Keep malformed individual fields from aborting the inventory.
+                        logger.debug(
+                            "string usage: failed to resolve %s row %d %s: %s",
+                            table.name, row_offset + 1, struct_name, e,
+                        )
+                        continue
+                    references.append(reference)
+
+        return StringHeapUsage(self, references)
+
+    # Conventional aliases for callers that prefer a verb or a property.
+    get_usage_inventory = usage_inventory
+
+    @property
+    def usage(self) -> StringHeapUsage:
+        return self.usage_inventory()
+
+    def iter_usage(self, tables: Optional["MetaDataTables"] = None) -> Iterator[StringReference]:
+        return iter(self.usage_inventory(tables))
+
+    def usage_for_range(
+        self,
+        start: int = 0,
+        end: Optional[int] = None,
+        tables: Optional["MetaDataTables"] = None,
+    ) -> StringRangeUsage:
+        return self.usage_inventory(tables).for_range(start, end)
+
+    def get_usage(
+        self,
+        start: int = 0,
+        end: Optional[int] = None,
+        tables: Optional["MetaDataTables"] = None,
+    ) -> StringRangeUsage:
+        return self.usage_for_range(start, end, tables=tables)
+
+    def get_usage_at(
+        self,
+        index: int,
+        tables: Optional["MetaDataTables"] = None,
+    ) -> Tuple[StringReference, ...]:
+        """Return every field whose raw string index is exactly ``index``."""
+        return self.usage_inventory(tables).at(index)
+
+    references_at = get_usage_at
+
+    def _make_reference(
+        self,
+        table: base.ClrMetaDataTable,
+        row_offset: int,
+        row: base.MDTableRow,
+        struct_name: str,
+        attribute_name: Optional[str],
+        index: int,
+    ) -> StringReference:
+        data = self.__data__
+        valid = (
+            isinstance(index, int)
+            and not isinstance(index, bool)
+            and 0 <= index < len(data)
+        )
+        if not valid:
+            return StringReference(
+                table=table.name,
+                table_number=table.number,
+                row_index=row_offset + 1,
+                field=struct_name,
+                attribute=attribute_name,
+                index=index,
+                start=None,
+                end=None,
+                terminator=None,
+                boundary=False,
+                terminated=False,
+                valid=False,
+                raw=b"",
+                value=None,
+                row=row,
+            )
+
+        terminator = data.find(b"\x00", index)
+        terminated = terminator >= 0
+        end = terminator if terminated else len(data)
+        boundary = index == 0 or data[index - 1] == 0
+        raw = data[index:end]
+        try:
+            value: Optional[str] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            value = None
+
+        return StringReference(
+            table=table.name,
+            table_number=table.number,
+            row_index=row_offset + 1,
+            field=struct_name,
+            attribute=attribute_name,
+            index=index,
+            start=index,
+            end=end,
+            terminator=terminator if terminated else None,
+            boundary=boundary,
+            terminated=terminated,
+            valid=True,
+            raw=raw,
+            value=value,
+            row=row,
+        )
 
     def get_str(self, index, max_length=MAX_STRING_LENGTH, encoding="utf-8", as_bytes=False):
         """
@@ -365,6 +852,8 @@ class MetaDataTables(base.ClrStream):
     header:     IMAGE_CLR_METADATA_TABLES structure
     tables:     dict of tables where table number is key and value is CLRMetaDataTable object
     tables_list:            list of tables, in processing order
+    strings_heap:           the #Strings stream used by the table fields
+    string_usage:           read-only inventory of #Strings references
     strings_offset_size:    number of bytes
     guids_offset_size:      number of bytes
     blobs_offset_size:      number of bytes
@@ -386,6 +875,7 @@ class MetaDataTables(base.ClrStream):
     header: Optional[MDTablesStruct]
     tables: Dict[Union[str, int], base.ClrMetaDataTable]
     tables_list: List[base.ClrMetaDataTable]
+    strings_heap: Optional["StringsHeap"]
     strings_offset_size: int
     guids_offset_size: int
     blobs_offset_size: int
@@ -436,6 +926,7 @@ class MetaDataTables(base.ClrStream):
         self.header = None
         self.tables = dict()
         self.tables_list = list()
+        self.strings_heap = None
         strings_offset_size = 0
         guids_offset_size = 0
         blobs_offset_size = 0
@@ -536,6 +1027,12 @@ class MetaDataTables(base.ClrStream):
                 guid_heap = s
             elif isinstance(s, BlobHeap):
                 blob_heap = s
+
+        # Keep a shortcut to the heap and bind it back to this table stream so
+        # callers can build a usage inventory directly from ``dn.net.strings``.
+        self.strings_heap = strings_heap
+        if strings_heap is not None:
+            strings_heap.bind(self)
 
         #### Parse tables rows list.
         #  It is a variable length array of dwords.  Each dword is
@@ -687,3 +1184,26 @@ class MetaDataTables(base.ClrStream):
         # raise warning/error
         if deferred_exceptions:
             raise deferred_exceptions[0]
+
+    @property
+    def string_usage(self) -> StringHeapUsage:
+        """Read-only inventory of metadata fields that use the #Strings heap.
+
+        The inventory is rebuilt on each access, so it also reflects rows that
+        are only materialized when a lazy-loaded table is read.
+        """
+        if self.strings_heap is None:
+            return StringHeapUsage.empty()
+        return self.strings_heap.usage_inventory(self)
+
+    @property
+    def string_heap_usage(self) -> StringHeapUsage:
+        return self.string_usage
+
+    def get_string_usage(
+        self, start: int = 0, end: Optional[int] = None
+    ) -> StringRangeUsage:
+        """Reverse lookup a byte range in #Strings without a full table parse."""
+        if self.strings_heap is None:
+            return StringHeapUsage.empty().for_range(start, end)
+        return self.strings_heap.usage_for_range(start, end, tables=self)
