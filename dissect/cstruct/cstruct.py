@@ -427,17 +427,38 @@ class cstruct:
 
         return "\n\n".join(blocks)
 
-    def read(self, name: str, stream: BinaryIO) -> Any:
+    def read(self, name: str, stream: BinaryIO, *, evidence: bool = False, **kwargs: Any) -> Any:
         """Parse data using a given type.
 
         Args:
             name: Type name to read.
             stream: File-like object or byte string to parse.
+            evidence: Return an evidence-aware ``(value, ReadEvidence)`` tuple
+                for structures and unions.
+            **kwargs: Additional arguments for evidence-aware reads, such as
+                ``generation``, ``field_generations`` and ``defaults``.
 
         Returns:
-            The parsed data.
+            The parsed data, or a ``(value, evidence)`` tuple when ``evidence``
+            is true.
         """
-        return self.resolve(name).read(stream)
+        type_ = self.resolve(name)
+        if evidence:
+            reader = getattr(type_, "read_with_evidence", None)
+            if reader is None:
+                raise TypeError(f"{type_.__name__} does not support evidence-aware reads")
+            return reader(stream, **kwargs)
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {kwargs}")
+        return type_.read(stream)
+
+    def read_with_evidence(self, name: str, obj: Any, **kwargs: Any) -> Any:
+        """Parse data using a given type and return an audit view as well."""
+        type_ = self.resolve(name)
+        reader = getattr(type_, "read_with_evidence", None)
+        if reader is None:
+            raise TypeError(f"{type_.__name__} does not support evidence-aware reads")
+        return reader(obj, **kwargs)
 
     def resolve(self, name: type[BaseType] | str) -> type[BaseType]:
         """Resolve a type name to get the actual type object.

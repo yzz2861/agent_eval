@@ -109,6 +109,54 @@ More examples can be found in the `examples` directory.
 ### Structure parsing
 Write simple C-like structures and use them to parse binary data, as can be seen in the examples.
 
+### Evidence-aware field presence
+
+When records from multiple firmware generations are read with one declaration, a newer field can be absent from an older record. The normal readers are strict and raise :class:`EOFError` for missing bytes. Use an evidence-aware read when you want the regular structure object plus an audit view that explains the origin of every field value::
+
+    from dissect.cstruct import Presence, cstruct
+
+    cs = cstruct("""
+    struct RecordV1 { uint16 serial; uint16 a; uint16 b; uint16 c; uint16 d; };
+    struct RecordV2 { uint16 serial; uint16 a; uint16 b; uint16 c; uint16 d; uint16 extra; };
+    """)
+
+    old_record = bytes(10)
+    record, evidence = cs.RecordV2.read_with_evidence(old_record)
+
+    assert record.serial == 0 and record.extra == 0
+    assert evidence["serial"].presence is Presence.READ
+    assert evidence["serial"].raw == b"\x00\x00"
+    assert evidence["extra"].presence is Presence.ABSENT
+    assert evidence["extra"].default_source == "absence"
+    assert record.dumps() == bytes(12)  # The returned object is a normal structure
+
+A partial field is reported as ``TRUNCATED`` instead of ``ABSENT``. Fields with generation metadata can also be derived from a known record generation, even when extra bytes are present::
+
+    record, evidence = cs.RecordV2.read_with_evidence(
+        bytes(12),
+        generation=1,
+        field_generations={"extra": 2},
+        defaults={"extra": 0},
+    )
+    assert evidence["extra"].presence is Presence.DERIVED
+    assert evidence["extra"].default_source == "generation"
+
+Declarative fields can carry the metadata directly, and a :class:`DeclarationSet` can select a declaration by generation or record size while recording the basis of that choice::
+
+    from dissect.cstruct import DeclarationSet
+    from dissect.cstruct.declarative import Struct, field, uint16
+
+    class V2(Struct, generation=2):
+        serial: uint16
+        extra: field(uint16, introduced=2)
+
+    declarations = DeclarationSet("Record", {1: cs.RecordV1, 2: V2})
+    record, evidence = declarations.read_with_evidence(bytes(10))
+    assert evidence.declaration == "RecordV1"
+    assert "exactly matches declaration generation 1" in evidence.basis
+
+The evidence view is a mapping of field name to :class:`FieldEvidence`. Each entry exposes ``presence``, ``raw``, ``offset``, ``size``, ``available``, ``default``, ``reason`` and ``default_source``, and the object keeps the view as ``__evidence__`` so it can be audited after being passed downstream.
+
 ### Declarative structure definitions
 Instead of with a C-like definition, structures can also be defined in Python by subclassing `Struct` (or `Union`) and annotating the fields. The resulting classes are regular cstruct structures.
 

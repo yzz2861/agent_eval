@@ -98,7 +98,17 @@ class MetaType(type):
         """Return the default value of this type."""
         return cls()
 
-    def reads(cls, data: bytes | memoryview | bytearray, *, endian: AllowedEndianness | None = None) -> Self:  # type: ignore
+    def reads(
+        cls,
+        data: bytes | memoryview | bytearray,
+        *,
+        endian: AllowedEndianness | None = None,
+        evidence: bool = False,
+        generation: Any = None,
+        field_generations: dict[str, Any] | None = None,
+        defaults: dict[str, Any] | None = None,
+        strict: bool = False,
+    ) -> Self:  # type: ignore
         """Parse the given data from a bytes-like object.
 
         Args:
@@ -109,10 +119,30 @@ class MetaType(type):
         Returns:
             The parsed value of this type.
         """
+        if evidence:
+            return cls._read_with_evidence_hook(
+                data,
+                endian=endian,
+                generation=generation,
+                field_generations=field_generations,
+                defaults=defaults,
+                strict=strict,
+            )
+
         endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
         return cls._read(BytesIO(data), endian=endian)
 
-    def read(cls, obj: BinaryIO | bytes | memoryview | bytearray, *, endian: AllowedEndianness | None = None) -> Self:  # type: ignore
+    def read(
+        cls,
+        obj: BinaryIO | bytes | memoryview | bytearray,
+        *,
+        endian: AllowedEndianness | None = None,
+        evidence: bool = False,
+        generation: Any = None,
+        field_generations: dict[str, Any] | None = None,
+        defaults: dict[str, Any] | None = None,
+        strict: bool = False,
+    ) -> Self:  # type: ignore
         """Parse the given data.
 
         Args:
@@ -123,6 +153,16 @@ class MetaType(type):
         Returns:
             The parsed value of this type.
         """
+        if evidence:
+            return cls._read_with_evidence_hook(
+                obj,
+                endian=endian,
+                generation=generation,
+                field_generations=field_generations,
+                defaults=defaults,
+                strict=strict,
+            )
+
         if _is_buffer_type(obj):
             return cls.reads(obj, endian=endian)
 
@@ -131,6 +171,13 @@ class MetaType(type):
 
         endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
         return cls._read(obj, endian=endian)
+
+    def _read_with_evidence_hook(cls, obj: Any, **kwargs: Any) -> Any:
+        """Dispatch an evidence-aware read to structures and unions."""
+        reader = getattr(cls, "read_with_evidence", None)
+        if reader is None:
+            raise TypeError(f"{cls.__name__} does not support evidence-aware reads")
+        return reader(obj, **kwargs)
 
     def write(cls, stream: BinaryIO, value: Any, *, endian: AllowedEndianness | None = None) -> int:
         """Write a value to a writable file-like object.

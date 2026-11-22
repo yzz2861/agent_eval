@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import warnings
 from collections import ChainMap
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from contextlib import contextmanager
 from enum import Enum
 from functools import lru_cache
@@ -14,6 +14,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cstruct.bitbuffer import BitBuffer
+from dissect.cstruct.evidence import FieldEvidence, Presence, ReadEvidence, prepare_stream
 from dissect.cstruct.expression import Expression
 from dissect.cstruct.lexer import IDENTIFIER_TYPES
 from dissect.cstruct.types.base import (
@@ -26,9 +27,10 @@ from dissect.cstruct.types.base import (
 )
 from dissect.cstruct.types.enum import EnumMetaType
 from dissect.cstruct.types.pointer import Pointer
+from dissect.cstruct.util import normalize_endianness
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator
     from types import FunctionType
 
     from typing_extensions import Self
@@ -36,20 +38,139 @@ if TYPE_CHECKING:
     from dissect.cstruct.cstruct import Endianness
 
 
+_DEFAULT_UNSET = object()
+
+
 class Field:
     """Structure field."""
 
-    def __init__(self, name: str | None, type_: type[BaseType], bits: int | None = None, offset: int | None = None):
+    def __init__(
+        self,
+        name: str | None,
+        type_: type[BaseType],
+        bits: int | None = None,
+        offset: int | None = None,
+        *,
+        introduced: Any = None,
+        removed: Any = None,
+        default: Any = _DEFAULT_UNSET,
+    ):
         self.name = name  # The name of the field, or None if anonymous
         self._name = name or type_.__name__  # The name of the field, or the type name if anonymous
         self.type = type_
         self.bits = bits
         self.offset = offset
         self.alignment = type_.__alignment__ or 1
+        # Optional declaration metadata for evidence-aware reads
+        self.introduced = introduced
+        self.removed = removed
+        self.default = default
+        self._has_default = default is not _DEFAULT_UNSET
 
     def __repr__(self) -> str:
         bits_str = f" : {self.bits}" if self.bits else ""
         return f"<Field {self.name} {self.type.__name__}{bits_str}>"
+
+
+def _field_generation_info(
+    field: Field, overrides: Mapping[str, Any] | None
+) -> tuple[Any, Any]:
+    """Return the introduced and removed generation for a field, with per-read overrides."""
+    introduced = field.introduced
+    removed = field.removed
+
+    if overrides and field._name in overrides:
+        spec = overrides[field._name]
+        if isinstance(spec, Mapping):
+            introduced = spec.get("introduced", introduced)
+            removed = spec.get("removed", removed)
+        elif isinstance(spec, tuple):
+            introduced = spec[0]
+            if len(spec) > 1:
+                removed = spec[1]
+        else:
+            introduced = spec
+
+    return introduced, removed
+
+
+def _generation_state(generation: Any, introduced: Any, removed: Any) -> bool | None:
+    """Return whether a field exists in the given generation.
+
+    ``None`` means the generation is unknown, so no conclusion can be drawn
+    from generation metadata alone.
+    """
+    if generation is None:
+        return None
+
+    try:
+        if introduced is not None and generation < introduced:
+            return False
+        if removed is not None and generation > removed:
+            return False
+    except TypeError:
+        return None
+
+    return True
+
+
+def _expected_field_size(field: Field) -> int | None:
+    """Return the number of bytes a field is expected to occupy, if statically known."""
+    try:
+        return len(field.type)
+    except TypeError:
+        return None
+
+
+def _resolve_field_default(
+    field: Field, defaults: Mapping[str, Any] | None, generation: Any = None
+) -> Any:
+    """Return the default value for a field.
+
+    A default can be a plain value, a callable, or a mapping of generation to
+    value for defaults that differ between known generations.
+    """
+    if defaults and field._name in defaults:
+        value = defaults[field._name]
+    elif field._has_default:
+        value = field.default
+    else:
+        return field.type.__default__()
+
+    if isinstance(value, Mapping):
+        if generation in value:
+            return value[generation]
+        if None in value:
+            return value[None]
+        return field.type.__default__()
+
+    if callable(value) and not isinstance(value, type):
+        try:
+            value = value(generation)
+        except TypeError:
+            value = value()
+
+    # cstruct initializers treat None as "use the type default", so keep the
+    # evidence value consistent with the object that will be constructed.
+    return field.type.__default__() if value is None else value
+
+
+def _generation_reason(generation: Any, introduced: Any, removed: Any) -> str:
+    if removed is not None and generation is not None and generation > removed:
+        return f"field was removed after generation {removed!r}, record is generation {generation!r}"
+    if introduced is not None and generation is not None and generation < introduced:
+        return f"field was introduced in generation {introduced!r}, record is generation {generation!r}"
+    return "field is not part of the record generation"
+
+
+def _slice_stream(stream: BinaryIO, start: int, length: int) -> bytes:
+    """Read bytes from a seekable stream without changing its position."""
+    pos = stream.tell()
+    try:
+        stream.seek(start)
+        return bytes(stream.read(length))
+    finally:
+        stream.seek(pos)
 
 
 class StructureMetaType(MetaType):
@@ -288,6 +409,325 @@ class StructureMetaType(MetaType):
         obj.__dynamic_sizes__ = sizes
         return obj
 
+    def read_with_evidence(
+        cls,
+        obj: BinaryIO | bytes | bytearray | memoryview,
+        *,
+        endian: Endianness | str | None = None,
+        generation: Any = None,
+        field_generations: Mapping[str, Any] | None = None,
+        defaults: Mapping[str, Any] | None = None,
+        strict: bool = False,
+        declaration: str | None = None,
+        declaration_generation: Any = None,
+        selection: str = "explicit",
+        basis: str | None = None,
+    ) -> tuple[Self, ReadEvidence]:  # type: ignore
+        """Read data and return the regular object together with an audit view.
+
+        Unlike the normal read methods, this is lenient by default: fields that
+        are absent from the record or cut off by the end of the data are filled
+        with their default values.  The returned :class:`ReadEvidence` records
+        for every declared field whether its value came from actual bytes or
+        from a default, and why.
+
+        Args:
+            obj: Bytes-like data or a file-like object.
+            endian: Endianness to use. Defaults to the endianness of this
+                structure's cstruct instance.
+            generation: The generation of the record that is being read. When a
+                field has ``introduced`` or ``removed`` metadata, this is used
+                to distinguish a field that was never in the record from a
+                record that was truncated inside the field.
+            field_generations: Per-read generation metadata, for declarations
+                that cannot carry it themselves.  Values can be an introduced
+                generation, an ``(introduced, removed)`` tuple, or a mapping
+                with ``introduced`` and/or ``removed`` keys.
+            defaults: Optional per-field defaults to use instead of the type's
+                default value, for example defaults derived from a known
+                generation.
+            strict: Raise the first :class:`EOFError` instead of filling in a
+                default for truncated data.
+            declaration: Name of the declaration to record in the audit view.
+            declaration_generation: Generation of the selected declaration.
+            selection: How the declaration was selected (``"explicit"`` is the
+                default for a direct call).
+            basis: Human-readable reason for selecting the declaration.
+
+        Returns:
+            A ``(value, evidence)`` tuple.  ``value`` is a normal cstruct
+            object and can be passed to existing consumers unchanged.  The
+            evidence is also available on the object as ``__evidence__``.
+        """
+        endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
+        if declaration_generation is None:
+            declaration_generation = getattr(cls, "__generation__", None)
+        snapshot = prepare_stream(obj)
+        value, evidence = cls._read_with_evidence(
+            snapshot.stream,
+            endian=endian,
+            generation=generation,
+            field_generations=field_generations,
+            defaults=defaults,
+            strict=strict,
+            declaration=declaration or cls.__name__,
+            declaration_generation=declaration_generation,
+            selection=selection,
+            basis=basis or f"explicitly selected declaration {cls.__name__!r}",
+            start=snapshot.start,
+            end=snapshot.end,
+            raw=snapshot.raw,
+        )
+        return value, evidence
+
+    def read_audited(
+        cls, obj: BinaryIO | bytes | bytearray | memoryview, **kwargs: Any
+    ) -> tuple[Self, ReadEvidence]:  # type: ignore
+        """Alias of :meth:`read_with_evidence`."""
+        return cls.read_with_evidence(obj, **kwargs)
+
+    def read_with_presence(
+        cls, obj: BinaryIO | bytes | bytearray | memoryview, **kwargs: Any
+    ) -> tuple[Self, ReadEvidence]:  # type: ignore
+        """Alias of :meth:`read_with_evidence`."""
+        return cls.read_with_evidence(obj, **kwargs)
+
+    def _read_with_evidence(
+        cls,
+        stream: BinaryIO,
+        *,
+        context: dict[str, Any] | None = None,
+        endian: Endianness,
+        generation: Any = None,
+        field_generations: Mapping[str, Any] | None = None,
+        defaults: Mapping[str, Any] | None = None,
+        strict: bool = False,
+        declaration: str | None = None,
+        declaration_generation: Any = None,
+        selection: str = "explicit",
+        basis: str = "",
+        start: int | None = None,
+        end: int | None = None,
+        raw: bytes | None = None,
+    ) -> tuple[Self, ReadEvidence]:  # type: ignore
+        struct_start = stream.tell() if start is None else start
+        if end is None:
+            pos = stream.tell()
+            end = stream.seek(0, io.SEEK_END)
+            stream.seek(pos)
+
+        result: dict[str, Any] = {}
+        sizes: dict[str, int] = {}
+        evidence: dict[str, FieldEvidence] = {}
+        bit_buffer = None
+
+        for field in cls.__fields__:
+            if field.offset is not None:
+                target = struct_start + field.offset
+                if stream.tell() != target:
+                    stream.seek(min(target, end))
+
+            if cls.__align__ and field.offset is None:
+                offset = stream.tell()
+                aligned = offset + (-offset & (field.alignment - 1))
+                stream.seek(min(aligned, end))
+
+            field_offset = stream.tell()
+            expected = _expected_field_size(field)
+            available = max(0, end - field_offset)
+            if expected is not None:
+                available = min(available, expected)
+            introduced, removed = _field_generation_info(field, field_generations)
+            in_generation = _generation_state(generation, introduced, removed)
+            default = _resolve_field_default(field, defaults, generation)
+
+            if in_generation is True and introduced is None and removed is None:
+                try:
+                    if (
+                        generation is not None
+                        and declaration_generation is not None
+                        and declaration_generation > generation
+                        and available == 0
+                    ):
+                        in_generation = False
+                        introduced = declaration_generation
+                except TypeError:
+                    pass
+
+            if in_generation is False:
+                value = default
+                result[field._name] = value
+                if field.type.__dynamic__:
+                    sizes[field._name] = 0
+                evidence[field._name] = FieldEvidence(
+                    name=field._name,
+                    presence=Presence.DERIVED,
+                    value=value,
+                    offset=field_offset,
+                    relative_offset=field_offset - struct_start,
+                    size=expected,
+                    available=available,
+                    consumed=0,
+                    default=default,
+                    generation=generation,
+                    introduced=introduced,
+                    removed=removed,
+                    declaration=declaration,
+                    reason=_generation_reason(generation, introduced, removed),
+                )
+                continue
+
+            if bit_buffer is not None and not field.bits:
+                bit_buffer.reset()
+                bit_buffer = None
+
+            try:
+                children = None
+                if field.bits:
+                    if bit_buffer is None:
+                        bit_buffer = BitBuffer(stream, endian=endian)
+
+                    if isinstance(field.type, EnumMetaType):
+                        value = field.type(bit_buffer.read(field.type.__type__, field.bits))
+                    else:
+                        value = bit_buffer.read(field.type, field.bits)
+                elif isinstance(field.type, StructureMetaType) and not issubclass(field.type, Union):
+                    field_end = end if expected is None else min(end, field_offset + expected)
+                    value, nested = field.type._read_with_evidence(
+                        stream,
+                        context=result,
+                        endian=endian,
+                        generation=generation,
+                        field_generations=field_generations,
+                        defaults=defaults,
+                        strict=strict,
+                        declaration=field.type.__name__,
+                        declaration_generation=getattr(
+                            field.type, "__generation__", declaration_generation
+                        ),
+                        selection=selection,
+                        basis=basis,
+                        start=field_offset,
+                        end=field_end,
+                    )
+                    children = nested.fields
+                else:
+                    value = field.type._read(stream, context=result, endian=endian)
+
+                consumed = max(0, stream.tell() - field_offset)
+                result[field._name] = value
+                if field.type.__dynamic__:
+                    sizes[field._name] = consumed
+
+                presence = Presence.READ
+                reason = "value read from record bytes"
+
+                if children is not None:
+                    if any(child.is_truncated for child in children.values()):
+                        presence = Presence.TRUNCATED
+                        reason = "one or more nested fields are truncated"
+                    elif consumed == 0 and children and all(not child.is_read for child in children.values()):
+                        if available == 0 and in_generation is None:
+                            presence = Presence.ABSENT
+                            reason = "no bytes remain at the field boundary"
+                        elif available == 0:
+                            presence = Presence.TRUNCATED
+                            reason = "field belongs to the record generation but no bytes are available"
+                        else:
+                            presence = Presence.TRUNCATED
+                            reason = "insufficient bytes for the nested structure"
+
+                evidence[field._name] = FieldEvidence(
+                    name=field._name,
+                    presence=presence,
+                    value=value,
+                    offset=field_offset,
+                    relative_offset=field_offset - struct_start,
+                    size=expected,
+                    available=available,
+                    consumed=consumed,
+                    raw=_slice_stream(stream, field_offset, consumed),
+                    default=default,
+                    generation=generation,
+                    introduced=introduced,
+                    removed=removed,
+                    declaration=declaration,
+                    reason=reason,
+                    children=children,
+                )
+            except EOFError as exc:
+                available = max(0, end - field_offset)
+                if expected is not None:
+                    available = min(available, expected)
+                if available == 0 and in_generation is None:
+                    presence = Presence.ABSENT
+                    reason = "no bytes remain at the field boundary"
+                else:
+                    presence = Presence.TRUNCATED
+                    if expected is None:
+                        reason = f"insufficient bytes for dynamic field {field._name!r}: {exc}"
+                    else:
+                        reason = (
+                            f"insufficient bytes for {field._name!r}: "
+                            f"expected {expected}, only {available} available"
+                        )
+
+                if strict:
+                    raise
+
+                value = default
+                result[field._name] = value
+                if field.type.__dynamic__:
+                    sizes[field._name] = 0
+
+                consumed = min(available, expected) if expected is not None else available
+                raw_field = _slice_stream(stream, field_offset, consumed)
+                if expected is not None:
+                    stream.seek(min(field_offset + expected, end))
+                else:
+                    stream.seek(end)
+
+                evidence[field._name] = FieldEvidence(
+                    name=field._name,
+                    presence=presence,
+                    value=value,
+                    offset=field_offset,
+                    relative_offset=field_offset - struct_start,
+                    size=expected,
+                    available=available,
+                    consumed=consumed,
+                    raw=raw_field,
+                    default=default,
+                    generation=generation,
+                    introduced=introduced,
+                    removed=removed,
+                    declaration=declaration,
+                    reason=reason,
+                )
+
+        if cls.__align__:
+            stream.seek(min(end, stream.tell() + (-stream.tell() & (cls.__alignment__ - 1))))
+
+        obj = type.__call__(cls, **result)
+        obj.__dynamic_sizes__ = sizes
+
+        consumed = max(0, stream.tell() - struct_start)
+        view = ReadEvidence(
+            fields=evidence,
+            declaration=declaration or cls.__name__,
+            declaration_type=cls,
+            declaration_generation=declaration_generation,
+            generation=generation,
+            selection=selection,
+            basis=basis,
+            data_size=max(0, end - struct_start),
+            start=struct_start,
+            consumed=consumed,
+            raw=(raw[:consumed] if raw else _slice_stream(stream, struct_start, consumed)),
+        )
+        object.__setattr__(obj, "__evidence__", view)
+        return obj, view
+
     def _read_0(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> list[Self]:  # type: ignore
         result = []
 
@@ -354,8 +794,61 @@ class StructureMetaType(MetaType):
 
         return stream.tell() - struct_start
 
-    def add_field(cls, name: str, type_: type[BaseType], bits: int | None = None, offset: int | None = None) -> None:
-        field = Field(name, type_, bits=bits, offset=offset)
+    def set_field_metadata(
+        cls,
+        name: str,
+        *,
+        introduced: Any = _DEFAULT_UNSET,
+        removed: Any = _DEFAULT_UNSET,
+        default: Any = _DEFAULT_UNSET,
+    ) -> None:
+        """Set generation metadata on a declared field.
+
+        This is useful for declarations loaded from C-style definitions, which
+        have no syntax for generation metadata.  Use :func:`evidence.field`
+        with declarative structures instead.
+
+        Args:
+            name: Name of the field, including folded anonymous fields.
+            introduced: Generation in which the field was introduced.
+            removed: Generation after which the field was removed.
+            default: Value to use when the field is absent for a generation.
+        """
+        try:
+            field = cls.__lookup__[name]
+        except KeyError:
+            field = cls.__members__[name]
+
+        if introduced is not _DEFAULT_UNSET:
+            field.introduced = introduced
+        if removed is not _DEFAULT_UNSET:
+            field.removed = removed
+        if default is not _DEFAULT_UNSET:
+            field.default = default
+            field._has_default = True
+
+        cls.commit()
+
+    def add_field(
+        cls,
+        name: str,
+        type_: type[BaseType],
+        bits: int | None = None,
+        offset: int | None = None,
+        *,
+        introduced: Any = None,
+        removed: Any = None,
+        default: Any = _DEFAULT_UNSET,
+    ) -> None:
+        field = Field(
+            name,
+            type_,
+            bits=bits,
+            offset=offset,
+            introduced=introduced,
+            removed=removed,
+            default=default,
+        )
         cls.__fields__.append(field)
 
         if not cls.__updating__:
@@ -507,6 +1000,12 @@ class Structure(BaseType, metaclass=StructureMetaType):
     """
 
     __dynamic_sizes__: dict[str, int]
+    __evidence__: ReadEvidence | None = None
+
+    @property
+    def __presence__(self) -> ReadEvidence | None:
+        """Alias of :attr:`__evidence__` for an evidence-aware read."""
+        return self.__evidence__
 
     def __len__(self) -> int:
         return len(self.dumps())
@@ -696,6 +1195,138 @@ class UnionMetaType(StructureMetaType):
         obj._proxify()
 
         return obj
+
+    def _read_with_evidence(
+        cls,
+        stream: BinaryIO,
+        *,
+        context: dict[str, Any] | None = None,
+        endian: Endianness,
+        generation: Any = None,
+        field_generations: Mapping[str, Any] | None = None,
+        defaults: Mapping[str, Any] | None = None,
+        strict: bool = False,
+        declaration: str | None = None,
+        declaration_generation: Any = None,
+        selection: str = "explicit",
+        basis: str = "",
+        start: int | None = None,
+        end: int | None = None,
+        raw: bytes | None = None,
+    ) -> tuple[Self, ReadEvidence]:  # type: ignore
+        struct_start = stream.tell() if start is None else start
+        if end is None:
+            pos = stream.tell()
+            end = stream.seek(0, io.SEEK_END)
+            stream.seek(pos)
+
+        if cls.__size__ is not None:
+            available = max(0, end - struct_start)
+            buf = _slice_stream(stream, struct_start, min(cls.__size__, available))
+            if available >= cls.__size__:
+                obj = cls._read(io.BytesIO(buf), endian=endian)
+            else:
+                try:
+                    obj = type.__call__(cls)
+                except Exception:
+                    obj = None
+            stream.seek(min(struct_start + cls.__size__, end))
+        else:
+            try:
+                obj = cls._read(stream, endian=endian)
+            except EOFError:
+                if strict:
+                    raise
+                obj = type.__call__(cls)
+            buf = _slice_stream(stream, struct_start, max(0, stream.tell() - struct_start))
+
+        result = {}
+        evidence: dict[str, FieldEvidence] = {}
+        full = cls.__size__ is not None and len(buf) >= cls.__size__
+
+        for field in cls.__fields__:
+            rel_offset = field.offset or 0
+            field_offset = struct_start + rel_offset
+            expected = _expected_field_size(field)
+            field_available = max(0, end - field_offset)
+            if expected is not None:
+                field_available = min(field_available, expected)
+            introduced, removed = _field_generation_info(field, field_generations)
+            in_generation = _generation_state(generation, introduced, removed)
+            default = _resolve_field_default(field, defaults, generation)
+            value = getattr(obj, field._name, default) if obj is not None else default
+            result[field._name] = value
+
+            if in_generation is False:
+                presence = Presence.DERIVED
+                consumed = 0
+                reason = _generation_reason(generation, introduced, removed)
+            elif full:
+                presence = Presence.READ
+                consumed = expected if expected is not None else field_available
+                reason = "value read from record bytes"
+            elif expected is not None and field_available >= expected:
+                try:
+                    value = field.type._read(
+                        io.BytesIO(buf[rel_offset : rel_offset + expected]),
+                        context=result,
+                        endian=endian,
+                    )
+                    presence = Presence.READ
+                    consumed = expected
+                    reason = "value read from record bytes"
+                    if obj is not None:
+                        object.__setattr__(obj, field._name, value)
+                except EOFError:
+                    presence = Presence.TRUNCATED
+                    consumed = field_available
+                    reason = "insufficient bytes for the union member"
+            elif field_available == 0 and in_generation is None:
+                presence = Presence.ABSENT
+                consumed = 0
+                reason = "no bytes remain at the field boundary"
+            else:
+                presence = Presence.TRUNCATED
+                consumed = min(field_available, expected) if expected is not None else field_available
+                reason = "insufficient bytes for the union member"
+
+            evidence[field._name] = FieldEvidence(
+                name=field._name,
+                presence=presence,
+                value=value,
+                offset=field_offset,
+                relative_offset=rel_offset,
+                size=expected,
+                available=field_available,
+                consumed=consumed,
+                raw=buf[rel_offset : rel_offset + (expected if expected is not None else field_available)],
+                default=default,
+                generation=generation,
+                introduced=introduced,
+                removed=removed,
+                declaration=declaration,
+                reason=reason,
+            )
+
+        if obj is None:
+            obj = type.__call__(cls, **result)
+
+        obj.__dynamic_sizes__ = {}
+        view = ReadEvidence(
+            fields=evidence,
+            declaration=declaration or cls.__name__,
+            declaration_type=cls,
+            declaration_generation=declaration_generation,
+            generation=generation,
+            selection=selection,
+            basis=basis,
+            data_size=max(0, end - struct_start),
+            start=struct_start,
+            consumed=max(0, stream.tell() - struct_start),
+            raw=raw if raw is not None else buf,
+        )
+        object.__setattr__(obj, "__evidence__", view)
+        return obj, view
 
     def _write_field(cls) -> Field | None:
         """Return the field to write a union by, its largest field and preferably not an anonymous structure."""

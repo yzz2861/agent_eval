@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ForwardRef, get_args
 from dissect.cstruct import compiler
 from dissect.cstruct.cstruct import cstruct
 from dissect.cstruct.types.base import BaseArray, MetaType
-from dissect.cstruct.types.structure import Field
+from dissect.cstruct.types.structure import Field, _DEFAULT_UNSET
 from dissect.cstruct.types.structure import Structure as _Structure
 from dissect.cstruct.types.structure import Union as _Union
 
@@ -137,17 +137,36 @@ class _PointerFactory:
 
 
 class FieldSpec:
-    """A field with a bit size or explicit offset. See :func:`field`."""
+    """A field with a bit size, explicit offset or generation metadata. See :func:`field`."""
 
-    __slots__ = ("bits", "offset", "type")
+    __slots__ = ("bits", "offset", "type", "introduced", "removed", "default")
 
-    def __init__(self, type_: Any = None, bits: int | None = None, offset: int | None = None):
+    def __init__(
+        self,
+        type_: Any = None,
+        bits: int | None = None,
+        offset: int | None = None,
+        introduced: Any = None,
+        removed: Any = None,
+        default: Any = _DEFAULT_UNSET,
+    ):
         self.type = type_
         self.bits = bits
         self.offset = offset
+        self.introduced = introduced
+        self.removed = removed
+        self.default = default
 
 
-def field(type_: Any = None, *, bits: int | None = None, offset: int | None = None) -> FieldSpec:
+def field(
+    type_: Any = None,
+    *,
+    bits: int | None = None,
+    offset: int | None = None,
+    introduced: Any = None,
+    removed: Any = None,
+    default: Any = _DEFAULT_UNSET,
+) -> FieldSpec:
     """Describe a bit field or a field at an explicit offset.
 
     For example::
@@ -166,8 +185,18 @@ def field(type_: Any = None, *, bits: int | None = None, offset: int | None = No
         type_: The field type. Omitted when used as :data:`typing.Annotated` metadata.
         bits: The amount of bits for a bit field.
         offset: The offset of the field within the structure.
+        introduced: The generation in which the field was introduced.
+        removed: The generation after which the field was removed.
+        default: The value to use when the field is absent for a generation.
     """
-    return FieldSpec(type_, bits=bits, offset=offset)
+    return FieldSpec(
+        type_,
+        bits=bits,
+        offset=offset,
+        introduced=introduced,
+        removed=removed,
+        default=default,
+    )
 
 
 if TYPE_CHECKING:
@@ -323,12 +352,26 @@ def _parse_annotation(annotation: Any, globalns: dict[str, Any], localns: dict[s
             # E.g. Annotated["uint16", ...]
             type_ = type_.__forward_arg__
         spec = next((meta for meta in metadata if isinstance(meta, FieldSpec)), FieldSpec())
-        spec = FieldSpec(type_, bits=spec.bits, offset=spec.offset)
+        spec = FieldSpec(
+            type_,
+            bits=spec.bits,
+            offset=spec.offset,
+            introduced=spec.introduced,
+            removed=spec.removed,
+            default=spec.default,
+        )
     else:
         spec = FieldSpec(annotation)
 
     # A new FieldSpec, because a field() can be shared between structures
-    return FieldSpec(_eval(spec.type, globalns, localns), bits=spec.bits, offset=spec.offset)
+    return FieldSpec(
+        _eval(spec.type, globalns, localns),
+        bits=spec.bits,
+        offset=spec.offset,
+        introduced=spec.introduced,
+        removed=spec.removed,
+        default=spec.default,
+    )
 
 
 def _bound_cs(type_: Any) -> cstruct | None:
@@ -382,7 +425,15 @@ def _resolve_field(cls: type, name: str, spec: FieldSpec) -> Field:
     if embedded is cls:
         raise TypeError(f"Field {name!r} embeds {cls.__name__!r} in itself, use a pointer instead")
 
-    return Field(name, type_, spec.bits, spec.offset)
+    return Field(
+        name,
+        type_,
+        spec.bits,
+        spec.offset,
+        introduced=spec.introduced,
+        removed=spec.removed,
+        default=spec.default,
+    )
 
 
 class _Declarative:
@@ -390,14 +441,24 @@ class _Declarative:
 
     __align__ = False
     __anonymous__ = False
+    __generation__ = None
 
-    def __init_subclass__(cls, *, cs: cstruct | None = None, align: bool | None = None, **kwargs):
+    def __init_subclass__(
+        cls,
+        *,
+        cs: cstruct | None = None,
+        align: bool | None = None,
+        generation: Any = None,
+        **kwargs,
+    ):
         super().__init_subclass__(**kwargs)
 
         if cs is not None:
             cls.__cs__ = cs
         if align is not None:
             cls.__align__ = align
+        if generation is not None:
+            cls.__generation__ = generation
 
         # The scope of the class statement, skipping StructureMetaType.__new__. Its locals are needed to evaluate
         # annotations that refer to other structures defined in a function.
@@ -409,7 +470,15 @@ class _Declarative:
         }
 
         fields = [
-            Field(inherited.name, inherited.type, inherited.bits, inherited.offset)
+            Field(
+                inherited.name,
+                inherited.type,
+                inherited.bits,
+                inherited.offset,
+                introduced=inherited.introduced,
+                removed=inherited.removed,
+                default=inherited.default,
+            )
             for base in cls.__bases__
             for inherited in getattr(base, "__fields__", [])
         ]

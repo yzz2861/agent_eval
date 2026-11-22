@@ -3,6 +3,17 @@ from __future__ import annotations
 from dissect.cstruct.bitbuffer import BitBuffer
 from dissect.cstruct.cstruct import cstruct, ctypes, ctypes_type
 from dissect.cstruct.dump import dumpstruct, hexdump
+from dissect.cstruct.evidence import (
+    DeclarationSet,
+    Declarations,
+    Evidence,
+    FieldEvidence,
+    FieldPresence,
+    FieldState,
+    Presence,
+    ReadEvidence,
+    RecordEvidence,
+)
 from dissect.cstruct.exception import (
     Error,
     NullPointerDereference,
@@ -59,10 +70,16 @@ __all__ = [
     "BitBuffer",
     "Char",
     "CharArray",
+    "DeclarationSet",
+    "Declarations",
     "Enum",
     "Error",
+    "Evidence",
     "Expression",
     "Field",
+    "FieldEvidence",
+    "FieldPresence",
+    "FieldState",
     "Flag",
     "Int",
     "MetaType",
@@ -70,6 +87,9 @@ __all__ = [
     "Packed",
     "ParserError",
     "Pointer",
+    "Presence",
+    "ReadEvidence",
+    "RecordEvidence",
     "ResolveError",
     "Structure",
     "Union",

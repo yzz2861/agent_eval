@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Evidence-aware reads for structures and unions with `read_with_evidence`, `read_audited` and `evidence=True`, returning the regular object plus a per-field presence view that distinguishes read bytes, genuine absence, truncation and defaults derived from generation metadata.
+- Generation metadata on fields through `introduced` and `removed`, and `DeclarationSet` for selecting a declaration by generation or record size while recording the selection basis.
 
 ### Changed
 
