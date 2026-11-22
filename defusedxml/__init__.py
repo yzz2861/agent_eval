@@ -17,6 +17,13 @@ from .common import (
     NotSupportedError,
     _apply_defusing,
 )
+from .session import (
+    BoundedReadSession,
+    ProtectedReadSession,
+    ReadSession,
+    ReadState,
+    SessionState,
+)
 
 
 def defuse_stdlib():
@@ -65,4 +72,9 @@ __all__ = [
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
     "NotSupportedError",
+    "ProtectedReadSession",
+    "BoundedReadSession",
+    "ReadSession",
+    "ReadState",
+    "SessionState",
 ]

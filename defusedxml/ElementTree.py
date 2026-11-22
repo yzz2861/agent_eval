@@ -11,6 +11,7 @@ import sys
 import warnings
 from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import TreeBuilder as _TreeBuilder
+from xml.etree.ElementTree import XMLPullParser as _XMLPullParser
 from xml.etree.ElementTree import parse as _parse
 from xml.etree.ElementTree import tostring
 
@@ -18,6 +19,7 @@ import importlib
 
 
 from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .session import ProtectedReadSession, ReadState
 
 __origin__ = "xml.etree.ElementTree"
 
@@ -114,6 +116,162 @@ class DefusedXMLParser(_XMLParser):
         raise ExternalReferenceForbidden(context, base, sysid, pubid)
 
 
+class _TargetTracker(object):
+    """Proxy a tree builder and notice when the document element closes."""
+
+    def __init__(self, target):
+        self.target = target
+        self.depth = 0
+        self.root_closed = False
+        self.root_element = None
+
+    def __getattr__(self, name):
+        return getattr(self.target, name)
+
+    def start(self, tag, attrs):
+        element = self.target.start(tag, attrs)
+        if self.depth == 0:
+            self.root_element = element
+        self.depth += 1
+        return element
+
+    def end(self, tag):
+        element = self.target.end(tag)
+        if self.depth:
+            self.depth -= 1
+        if self.depth == 0:
+            self.root_closed = True
+        return element
+
+
+class IterParseSession(ProtectedReadSession):
+    """Bounded, explicitly closable session for :func:`iterparse`.
+
+    The session yields events exactly like ``iterparse``.  It stops feeding
+    the parser as soon as the single document element is complete, so bytes
+    after the document remain available to the owner of the stream.
+    """
+
+    def __init__(
+        self,
+        source,
+        events=None,
+        parser=None,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+        close_source=None,
+        bufsize=16 * 1024,
+    ):
+        super().__init__(source, close_source=close_source, bufsize=bufsize)
+        self._parser = None
+        self._pullparser = None
+        self._tracker = None
+        try:
+            if parser is None:
+                parser = DefusedXMLParser(
+                    target=_TreeBuilder(),
+                    forbid_dtd=forbid_dtd,
+                    forbid_entities=forbid_entities,
+                    forbid_external=forbid_external,
+                )
+            self._parser = parser
+            target = getattr(parser, "target", None)
+            if target is not None and hasattr(target, "start") and hasattr(target, "end"):
+                self._tracker = _TargetTracker(target)
+                parser.target = self._tracker
+                if hasattr(parser, "_target"):
+                    parser._target = self._tracker
+            self._pullparser = _XMLPullParser(events=events, _parser=parser)
+        except BaseException as exc:
+            self._mark_failed(exc)
+            raise
+
+    def _record_event(self, event):
+        super()._record_event(event)
+        if self._tracker is not None and self._tracker.root_element is not None:
+            self._partial_document = self._tracker.root_element
+
+    def _poll_event(self):
+        if self._pullparser is None:
+            return None
+        try:
+            return next(self._pullparser.read_events())
+        except StopIteration:
+            return None
+
+    def _next_event(self):
+        while True:
+            if self._state is not ReadState.OPEN:
+                raise StopIteration
+            try:
+                event = self._poll_event()
+            except BaseException as exc:
+                self._mark_failed(exc)
+                raise
+            if event is not None:
+                self._record_event(event)
+                return event
+            if self._tracker is not None and self._tracker.root_closed:
+                segment = self._reader.read_trailing_misc_segment()
+                if segment is not None:
+                    try:
+                        self._pullparser.feed(segment)
+                    except BaseException as exc:
+                        self._mark_failed(exc)
+                        raise
+                    continue
+                self._finalize_complete()
+                if self._state is not ReadState.OPEN:
+                    raise StopIteration
+                continue
+            if self._owner.eof:
+                self._finalize_complete()
+                if self._state is not ReadState.OPEN:
+                    raise StopIteration
+                continue
+            segment = self._reader.read_segment()
+            if segment is None:
+                continue
+            try:
+                self._pullparser.feed(segment)
+            except BaseException as exc:
+                self._mark_failed(exc)
+                raise
+
+    def _finalize_complete(self):
+        if self._finalized:
+            return
+        self._finalized = True
+        try:
+            close_and_return_root = getattr(
+                self._pullparser, "_close_and_return_root", None
+            )
+            if close_and_return_root is not None:
+                document = close_and_return_root()
+            else:  # pragma: no cover - old ElementTree implementations
+                self._pullparser.close()
+                document = getattr(self._parser, "root", None)
+        except BaseException as exc:
+            self._mark_failed(exc)
+            raise
+        if document is None and self._tracker is not None:
+            document = self._tracker.root_element
+        self._mark_complete(document)
+
+    def _release_parser(self):
+        parser = self._parser
+        tracker = self._tracker
+        self._pullparser = None
+        self._parser = None
+        self._tracker = None
+        if parser is not None and tracker is not None:
+            if getattr(parser, "target", None) is tracker:
+                parser.target = tracker.target
+            if getattr(parser, "_target", None) is tracker:
+                parser._target = tracker.target
+
+
 # aliases
 # XMLParse is a typo, keep it for backwards compatibility
 XMLTreeBuilder = XMLParse = XMLParser = DefusedXMLParser
@@ -137,15 +295,25 @@ def iterparse(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    close_source=None,
+    bufsize=16 * 1024,
 ):
-    if parser is None:
-        parser = DefusedXMLParser(
-            target=_TreeBuilder(),
-            forbid_dtd=forbid_dtd,
-            forbid_entities=forbid_entities,
-            forbid_external=forbid_external,
-        )
-    return _iterparse(source, events, parser)
+    return IterParseSession(
+        source,
+        events=events,
+        parser=parser,
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+        close_source=close_source,
+        bufsize=bufsize,
+    )
+
+
+iterparse_session = iterparse
+open_session = iterparse
+IterparseSession = IterParseSession
+BoundedIterParseSession = IterParseSession
 
 
 def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=True):
@@ -182,7 +350,12 @@ __all__ = [
     "XMLTreeBuilder",
     "fromstring",
     "fromstringlist",
+    "IterParseSession",
+    "IterparseSession",
+    "BoundedIterParseSession",
     "iterparse",
+    "iterparse_session",
+    "open_session",
     "parse",
     "tostring",
 ]

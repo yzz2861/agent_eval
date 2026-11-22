@@ -319,7 +319,8 @@ parse(), iterparse(), fromstring(), XMLParser
 
 ### defusedxml.ElementTree
 
-parse(), iterparse(), fromstring(), XMLParser
+parse(), iterparse(), iterparse_session(), fromstring(), XMLParser,
+IterParseSession
 
 ### defusedxml.expatreader
 
@@ -339,7 +340,32 @@ parse(), parseString()
 
 ### defusedxml.pulldom
 
-parse(), parseString()
+parse(), parseString(), parse_session(), PullDomSession
+
+### Bounded read sessions
+
+`defusedxml.ElementTree.iterparse()` and `defusedxml.pulldom.parse()` return
+an explicitly closable session. The session consumes one document element and
+keeps the usual entity and external-reference protections:
+
+    import defusedxml.ElementTree as ET
+
+    with ET.iterparse(stream, events=("end",)) as session:
+        for event, element in session:
+            if element.tag == "target":
+                break
+
+    usable_events = session.events
+    document = session.document  # None unless parsing completed
+
+`session.close()` ends a short read explicitly. `session.events` contains the
+events already delivered. `session.document` is populated only after the
+parser has confirmed the complete document; `session.partial_document` holds
+the incomplete tree after an early stop. A stream opened from a path is
+closed on completion, early stop, failure and garbage collection. A
+stream passed by the caller is never closed. Unread bytes after the document
+are pushed back when the source is seekable; otherwise they are available as
+`session.unread` (or from `session.read_remaining()`).
 
 ### defusedxml.xmlrpc
 

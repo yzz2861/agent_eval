@@ -3,6 +3,7 @@ from __future__ import print_function
 import io
 import os
 import sys
+import tempfile
 import unittest
 import warnings
 from unittest import mock
@@ -579,6 +580,162 @@ class TestDefusedGzip(DefusedTestCase):
             self.decode_response(response, 4095, 8192)
 
 
+class CloseCountingStream(io.BytesIO):
+    def __init__(self, data):
+        super().__init__(data)
+        self.close_count = 0
+
+    def close(self):
+        self.close_count += 1
+        return super().close()
+
+
+class NonSeekableStream(object):
+    def __init__(self, data):
+        self._data = io.BytesIO(data)
+        self.closed = False
+
+    def read(self, size=-1):
+        return self._data.read(size)
+
+    def close(self):
+        self.closed = True
+        self._data.close()
+
+
+class TestBoundedReadSessions(DefusedTestCase):
+    """Short reads with ordinary XML; record close count, state and next byte."""
+
+    xml = b'<root><item>one</item><item>two</item></root>NEXT'
+
+    def open_session(self, module, stream, **kwargs):
+        if module is ElementTree:
+            return module.iterparse(stream, **kwargs)
+        return module.parse(stream, **kwargs)
+
+    def record(self, session, stream):
+        return (stream.close_count, str(session.state), stream.read(1))
+
+    def test_elementtree_short_read_records(self):
+        complete = CloseCountingStream(self.xml)
+        session = self.open_session(ElementTree, complete)
+        events = list(session)
+        self.assertEqual(self.record(session, complete), (0, "complete", b"N"))
+        self.assertEqual(session.events, events)
+        self.assertEqual(session.document.tag, "root")
+        self.assertFalse(complete.closed)
+
+        short = CloseCountingStream(self.xml)
+        session = self.open_session(ElementTree, short)
+        event = next(session)
+        session.close()
+        self.assertEqual(self.record(session, short), (0, "stopped", b"<"))
+        self.assertEqual(session.events, [event])
+        self.assertIsNone(session.document)
+        self.assertEqual(session.partial_document.tag, "root")
+        self.assertTrue(session.events_usable)
+        self.assertFalse(short.closed)
+
+        broken = CloseCountingStream(b"<root><item></root>TAIL")
+        session = self.open_session(ElementTree, broken)
+        with self.assertRaises(ElementTree.ParseError):
+            list(session)
+        self.assertEqual(self.record(session, broken), (0, "failed", b"T"))
+        self.assertIsNone(session.document)
+        self.assertIsNotNone(session.error)
+        self.assertFalse(broken.closed)
+
+    def test_pulldom_short_read_records(self):
+        complete = CloseCountingStream(self.xml)
+        session = self.open_session(pulldom, complete)
+        events = list(session)
+        self.assertEqual(self.record(session, complete), (0, "complete", b"N"))
+        self.assertEqual(session.events, events)
+        self.assertEqual(events[-1][0], "END_DOCUMENT")
+        self.assertIsNotNone(session.document)
+        self.assertFalse(complete.closed)
+
+        short = CloseCountingStream(self.xml)
+        session = self.open_session(pulldom, short)
+        event = next(session)
+        session.close()
+        self.assertEqual(self.record(session, short), (0, "stopped", b"<"))
+        self.assertEqual(session.events, [event])
+        self.assertIsNone(session.document)
+        self.assertIsNotNone(session.partial_document)
+        self.assertFalse(short.closed)
+
+        broken = CloseCountingStream(b"<root><item></root>TAIL")
+        session = self.open_session(pulldom, broken)
+        with self.assertRaises(SAXParseException):
+            list(session)
+        self.assertEqual(self.record(session, broken), (0, "failed", b"T"))
+        self.assertIsNone(session.document)
+        self.assertIsNotNone(session.error)
+        self.assertFalse(broken.closed)
+
+    def test_owned_source_is_closed_once(self):
+        fd, path = tempfile.mkstemp(dir=HERE, suffix=".xml")
+        try:
+            with os.fdopen(fd, "wb") as fp:
+                fp.write(self.xml)
+            for module in (ElementTree, pulldom):
+                with self.subTest(module=module.__name__):
+                    session = self.open_session(module, path)
+                    next(session)
+                    session.close()
+                    self.assertEqual(session.state, "stopped")
+                    self.assertTrue(session.source_owned)
+                    self.assertEqual(session.close_count, 1)
+                    self.assertTrue(session.source.closed)
+                    self.assertFalse(session.readable_after_close)
+                    session.close()
+                    self.assertEqual(session.close_count, 1)
+        finally:
+            os.unlink(path)
+
+    def test_non_seekable_tail_is_exposed(self):
+        stream = NonSeekableStream(self.xml)
+        session = ElementTree.iterparse(stream)
+        list(session)
+        self.assertEqual(session.state, "complete")
+        self.assertFalse(stream.closed)
+        self.assertEqual(session.unread, b"NEXT")
+        self.assertEqual(session.read_remaining(), b"NEXT")
+        self.assertFalse(stream.closed)
+
+    def test_owned_source_is_closed_on_failure(self):
+        fd, path = tempfile.mkstemp(dir=HERE, suffix=".xml")
+        try:
+            with os.fdopen(fd, "wb") as fp:
+                fp.write(b"<root><item></root>TAIL")
+            for module, error in (
+                (ElementTree, ElementTree.ParseError),
+                (pulldom, SAXParseException),
+            ):
+                with self.subTest(module=module.__name__):
+                    session = self.open_session(module, path)
+                    with self.assertRaises(error):
+                        list(session)
+                    self.assertEqual(session.state, "failed")
+                    self.assertEqual(session.close_count, 1)
+                    self.assertTrue(session.source.closed)
+        finally:
+            os.unlink(path)
+
+    def test_trailing_misc_stays_in_document(self):
+        data = b"<root><item>one</item></root>\n<!-- note -->\nNEXT"
+        for module in (ElementTree, pulldom):
+            with self.subTest(module=module.__name__):
+                stream = CloseCountingStream(data)
+                session = self.open_session(module, stream)
+                list(session)
+                self.assertEqual(session.state, "complete")
+                self.assertEqual(stream.close_count, 0)
+                self.assertFalse(stream.closed)
+                self.assertEqual(stream.read(1), b"N")
+
+
 def test_main():
     suite = unittest.TestSuite()
     cls = [
@@ -591,6 +748,7 @@ def test_main():
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,
+        TestBoundedReadSessions,
     ]
     for c in cls:
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(c))

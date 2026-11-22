@@ -8,6 +8,8 @@ defusedxml 0.8.0
 
 - Fix testing without lxml
 - Test on 3.13-dev and PyPy 3.9
+- Add bounded, explicitly closable read sessions for ElementTree.iterparse()
+  and pulldom.
 
 
 defusedxml 0.8.0rc2
