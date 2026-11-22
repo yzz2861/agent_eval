@@ -109,3 +109,75 @@ For example, the power (``**``) operator can be disabled:
                 return self.undefined("The power (**) operator is unavailable.")
 
             return super().call_binop(self, context, operator, left, right)
+
+Outbound disclosure protection
+-----------------------------
+
+Regular sandboxing controls what a template is allowed to *do*. The
+optional egress protection mode in :mod:`jinja2.egress` instead controls
+what the rendered output is allowed to *contain*. A report template can
+reference ticket fields that only an internal export may see, and the same
+template rendered for a public audience fails rather than disclosing them.
+
+Tag values with a disclosure level when building the render context, then
+give the environment an egress license -- the most restrictive level that
+may leave the renderer.
+
+.. code-block:: python
+
+    from jinja2.egress import (
+        DisclosureLevel,
+        EgressError,
+        EgressSandboxedEnvironment,
+        wrap,
+    )
+
+    data = {
+        "agent": "Ada",
+        "ticket_id": wrap("T-1024", DisclosureLevel.INTERNAL),
+    }
+
+    internal = EgressSandboxedEnvironment(
+        egress_license=DisclosureLevel.INTERNAL
+    )
+    internal.from_string("{{ agent }} {{ ticket_id }}").render(data)
+    # -> "Ada T-1024"
+
+    public = EgressSandboxedEnvironment(
+        egress_license=DisclosureLevel.PUBLIC
+    )
+    public.from_string("{{ agent }} {{ ticket_id }}").render(data)
+    # raises EgressError
+
+Taint follows the data through every operation. A restricted value labels
+the result of a field read, ``~`` concatenation, arithmetic, filter, macro
+or call, and even a conditional branch: a template that only prints
+different static text depending on a restricted value is still rejected.
+
+Streaming is safe by construction. The whole template is evaluated and the
+license is checked before any chunk is yielded, so a rejected render never
+returns a prefix that could reveal the protected decision. ``render()`` and
+``generate()`` raise the same :class:`~jinja2.egress.EgressError`.
+
+Constructs the mode does not support can be declared up front so a template
+fails safely at compile time instead of producing a partially protected
+result:
+
+.. code-block:: python
+
+    from jinja2 import nodes
+
+    env = EgressSandboxedEnvironment(
+        egress_license=DisclosureLevel.PUBLIC,
+        unsupported_constructs=(nodes.Include,),
+    )
+
+Without any labeled values, rendering is byte-for-byte identical to a normal
+:class:`~jinja2.sandbox.SandboxedEnvironment`, so the mode can be enabled
+unconditionally.
+
+API
+~~~
+
+.. automodule:: jinja2.egress
+    :members:
