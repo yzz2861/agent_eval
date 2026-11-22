@@ -8,6 +8,12 @@ from __future__ import (
 from . import base  # noqa F401
 from . import helpers  # noqa F401
 
+from .approval_reuse import (  # noqa F401
+    ApprovalReuseLinter,
+    BadApprovalReuseLinter,  # noqa F401
+    OneTimeApprovalReuseLinter,  # noqa F401
+    TicketReuseLinter,  # noqa F401
+)
 from .bad_commands_use import BadCommandsUseLinter
 from .bad_compile_use import BadCompileUseLinter
 from .bad_cryptography_module_attribute_use import BadCryptographyModuleAttributeUseLinter
@@ -84,6 +90,7 @@ ALL = (
     BadXmlsecModuleAttributeUseLinter,
     BadYAMLUseLinter,
     BadZipfileUseLinter,
+    ApprovalReuseLinter,
     InlineCallbacksYieldStatementLinter,
     ReturnValueInInlineCallbacksLinter,
     YieldReturnStatementLinter,
