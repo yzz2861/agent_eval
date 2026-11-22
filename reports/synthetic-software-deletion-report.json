@@ -1,0 +1,465 @@
+{
+  "schema": "registry-deletion-evidence/v1",
+  "read_only": true,
+  "query": {
+    "input_key_path": "SOFTWARE\\Contoso\\Agent",
+    "value_name": "Policy",
+    "resolved_key_path": "SOFTWARE\\Contoso\\Agent",
+    "value_path": "SOFTWARE\\Contoso\\Agent!Policy"
+  },
+  "verdict": "REALLOCATED",
+  "verdict_label_en": "slot reallocated",
+  "verdict_label_zh": "原槽位已再分配",
+  "reason_code": "OLD_VK_CELL_START_REUSED",
+  "explanation": "The value was present in the baseline and is absent from the later live tree.  The exact VK cell start is allocated in the later hive to value 'Rotation'.",
+  "explanation_zh": "较早快照确实捕获过该值；后续快照的活动树中没有该值，而同一 VK cell 起始位置已被另一个配置项占用。这证明原槽位发生了再分配，但不能单独证明两次采集之间曾出现可观察的“先释放、后复用”中间状态，也不能证明删除动作、时间和操作者。",
+  "materials": {
+    "status": "MATCH",
+    "same_image": false,
+    "reasons": []
+  },
+  "before": {
+    "snapshot": {
+      "source": "tests/reg_samples/deletion/software_before.hive",
+      "sha256": "4fb9f5833bee62b8b50aaa67393eadb9e766129456cd0d0edeb466c2d6fa79ef",
+      "size": 8192,
+      "parse_error": null,
+      "hive_name": "SOFTWARE",
+      "hive_type": "SOFTWARE",
+      "root_key_path": "SOFTWARE",
+      "file_type": "FILE_TYPE_PRIMARY",
+      "major_version": 1,
+      "minor_version": 5,
+      "cluster_factor": 1,
+      "sequence1": 7,
+      "sequence2": 7,
+      "sequence_consistent": true,
+      "last_write_utc": "2026-11-20T08:00:00Z",
+      "hbins_size": 4096,
+      "hbins_size_hex": "0x1000",
+      "hbins_end_absolute": 8192,
+      "checksum_valid": true,
+      "recovery_required": {
+        "header": false,
+        "data": false
+      },
+      "cells_total": 9,
+      "cells_allocated": 8,
+      "cells_free": 1,
+      "batch": {
+        "kind": "collected_snapshot",
+        "sequence1": 7,
+        "sequence2": 7,
+        "sha256": "4fb9f5833bee62b8b50aaa67393eadb9e766129456cd0d0edeb466c2d6fa79ef"
+      },
+      "warnings": []
+    },
+    "target": {
+      "key_present": true,
+      "value_present": true,
+      "resolved_key_path": "SOFTWARE\\Contoso\\Agent",
+      "full_value_path": "SOFTWARE\\Contoso\\Agent!Policy",
+      "value": {
+        "name": "Policy",
+        "value_type": 1,
+        "value_type_str": "RegSZ",
+        "data_length": 16,
+        "data_sha256": "808d711a54cc1b8bb8b7cc406ecbec0f9f4e9a8d98b7f88538cc5376b81b8472",
+        "value_preview": "Enabled",
+        "data_storage": "external_cell",
+        "data_identity": {
+          "storage": "external_cell",
+          "cell_offset_absolute": 4472,
+          "cell_offset_absolute_hex": "0x1178",
+          "cell_offset_relative_to_first_hbin": 376,
+          "cell": {
+            "cell_offset_relative_to_first_hbin": 376,
+            "cell_offset_relative_to_first_hbin_hex": "0x178",
+            "cell_offset_absolute": 4472,
+            "cell_offset_absolute_hex": "0x1178",
+            "cell_size": 24,
+            "state": "allocated",
+            "signature": null,
+            "residual_signature": null,
+            "cell_sha256": "515c281c1b1c01d9d938e54846c854a21d52cefc52b4206f86a0c1eb4760f63a",
+            "record_sha256": "88b735d61a148219a6374a1798b2b1f2ea04c28c4bafdc6a0d5fa3ef720fbc80"
+          }
+        },
+        "key_nk_cell": {
+          "cell_offset_relative_to_first_hbin": 208,
+          "cell_offset_relative_to_first_hbin_hex": "0xd0",
+          "cell_offset_absolute": 4304,
+          "cell_offset_absolute_hex": "0x10d0",
+          "cell_size": 88,
+          "state": "allocated",
+          "signature": "nk",
+          "residual_signature": "nk",
+          "cell_sha256": "3837cf2feb0184976cef59c4f7fa7699c97c4ccb76bae297e23feb3722d7a67c",
+          "record_sha256": "3f1ce5ff69e1e32ab36e597f75190c2b5159167c655c4cda3bdffd9765095de6"
+        },
+        "values_list_cell": {
+          "cell_offset_relative_to_first_hbin": 328,
+          "cell_offset_relative_to_first_hbin_hex": "0x148",
+          "cell_offset_absolute": 4424,
+          "cell_offset_absolute_hex": "0x1148",
+          "cell_size": 8,
+          "state": "allocated",
+          "signature": null,
+          "residual_signature": null,
+          "cell_sha256": "ee9d6dfb2e911fc0eef5ca93ff776c36ebe61d849e60e3c57319eff111760755",
+          "record_sha256": "2e61bcea597570e82112505d266b413c3013bf4c8f40c2d096dc2584643eb1ce"
+        },
+        "values_list_index": 0,
+        "vk_cell": {
+          "cell_offset_relative_to_first_hbin": 336,
+          "cell_offset_relative_to_first_hbin_hex": "0x150",
+          "cell_offset_absolute": 4432,
+          "cell_offset_absolute_hex": "0x1150",
+          "cell_size": 40,
+          "state": "allocated",
+          "signature": "vk",
+          "residual_signature": "vk",
+          "cell_sha256": "a6aeda5140547de08eca220a7c47f5c8bac8d22e25167ea58926b6b5688a472c",
+          "record_sha256": "3d72308da242b48d67f05a7a280bde4334ee68ac8d01a10ef19e1bf6b0508f3e"
+        },
+        "physical_identity": {
+          "comparison_basis": "cell offsets relative to the first HBIN (0x1000); comparable only while the HBIN layout is unchanged",
+          "hive_name": "SOFTWARE",
+          "full_value_path": "SOFTWARE\\Contoso\\Agent!Policy",
+          "key_nk_cell_rva": 208,
+          "values_list_index": 0,
+          "vk_cell_rva": 336,
+          "vk_cell_size": 40,
+          "data_storage": "external_cell",
+          "data_cell_rva": 376
+        }
+      },
+      "error": null
+    },
+    "old_vk_slot": {
+      "cell_offset_relative_to_first_hbin": 336,
+      "cell_offset_relative_to_first_hbin_hex": "0x150",
+      "cell_offset_absolute": 4432,
+      "cell_offset_absolute_hex": "0x1150",
+      "cell_size": 40,
+      "state": "allocated",
+      "signature": "vk",
+      "residual_signature": "vk",
+      "cell_sha256": "a6aeda5140547de08eca220a7c47f5c8bac8d22e25167ea58926b6b5688a472c",
+      "record_sha256": "3d72308da242b48d67f05a7a280bde4334ee68ac8d01a10ef19e1bf6b0508f3e"
+    },
+    "old_data_slot": {
+      "cell_offset_relative_to_first_hbin": 376,
+      "cell_offset_relative_to_first_hbin_hex": "0x178",
+      "cell_offset_absolute": 4472,
+      "cell_offset_absolute_hex": "0x1178",
+      "cell_size": 24,
+      "state": "allocated",
+      "signature": null,
+      "residual_signature": null,
+      "cell_sha256": "515c281c1b1c01d9d938e54846c854a21d52cefc52b4206f86a0c1eb4760f63a",
+      "record_sha256": "88b735d61a148219a6374a1798b2b1f2ea04c28c4bafdc6a0d5fa3ef720fbc80"
+    }
+  },
+  "after": {
+    "snapshot": {
+      "source": "tests/reg_samples/deletion/software_after_reallocated.hive",
+      "sha256": "7e745cbe52357f8d5283716cd15b1ef37fd4e1b36811e238e8c81ed0cbfafc14",
+      "size": 8192,
+      "parse_error": null,
+      "hive_name": "SOFTWARE",
+      "hive_type": "SOFTWARE",
+      "root_key_path": "SOFTWARE",
+      "file_type": "FILE_TYPE_PRIMARY",
+      "major_version": 1,
+      "minor_version": 5,
+      "cluster_factor": 1,
+      "sequence1": 8,
+      "sequence2": 8,
+      "sequence_consistent": true,
+      "last_write_utc": "2026-11-20T09:00:00Z",
+      "hbins_size": 4096,
+      "hbins_size_hex": "0x1000",
+      "hbins_end_absolute": 8192,
+      "checksum_valid": true,
+      "recovery_required": {
+        "header": false,
+        "data": false
+      },
+      "cells_total": 9,
+      "cells_allocated": 7,
+      "cells_free": 2,
+      "batch": {
+        "kind": "collected_snapshot",
+        "sequence1": 8,
+        "sequence2": 8,
+        "sha256": "7e745cbe52357f8d5283716cd15b1ef37fd4e1b36811e238e8c81ed0cbfafc14"
+      },
+      "warnings": []
+    },
+    "target": {
+      "key_present": true,
+      "value_present": false,
+      "resolved_key_path": "SOFTWARE\\Contoso\\Agent",
+      "full_value_path": null,
+      "value": null,
+      "error": "value not found: Registry value not found: SOFTWARE\\Contoso\\Agent : Policy"
+    },
+    "old_vk_slot": {
+      "cell_offset_absolute": 4432,
+      "cell_offset_absolute_hex": "0x1150",
+      "cell_offset_relative_to_first_hbin": 336,
+      "cell_offset_relative_to_first_hbin_hex": "0x150",
+      "relation": "exact",
+      "state": "allocated",
+      "cell": {
+        "cell_offset_relative_to_first_hbin": 336,
+        "cell_offset_relative_to_first_hbin_hex": "0x150",
+        "cell_offset_absolute": 4432,
+        "cell_offset_absolute_hex": "0x1150",
+        "cell_size": 40,
+        "state": "allocated",
+        "signature": "vk",
+        "residual_signature": "vk",
+        "cell_sha256": "5b583e4c226d517740f606840c23d489cd5915cdd9727aee68fe5943687e10d2",
+        "record_sha256": "8f65e09f89e44845aae8619b14b4199319608a9714bb537f8242de0ee609bc7d"
+      },
+      "covers_entire_before_cell": true,
+      "same_bytes_as_before": false,
+      "same_payload_as_before": false,
+      "allocated_vk": {
+        "name": "Rotation",
+        "value_type": 4,
+        "value_type_str": "RegDWord",
+        "data_length": 4,
+        "data_storage": "inline_in_vk",
+        "data_cell_offset": null,
+        "data_preview": "30",
+        "error": null
+      },
+      "residual_vk": null
+    },
+    "old_data_slot": {
+      "cell_offset_absolute": 4472,
+      "cell_offset_absolute_hex": "0x1178",
+      "cell_offset_relative_to_first_hbin": 376,
+      "cell_offset_relative_to_first_hbin_hex": "0x178",
+      "relation": "exact",
+      "state": "free",
+      "cell": {
+        "cell_offset_relative_to_first_hbin": 376,
+        "cell_offset_relative_to_first_hbin_hex": "0x178",
+        "cell_offset_absolute": 4472,
+        "cell_offset_absolute_hex": "0x1178",
+        "cell_size": 24,
+        "state": "free",
+        "signature": null,
+        "residual_signature": null,
+        "cell_sha256": "a510ec819a368033f9b0fe6212b6dfa3682e283f00edcd002e111463fc73ff20",
+        "record_sha256": "88b735d61a148219a6374a1798b2b1f2ea04c28c4bafdc6a0d5fa3ef720fbc80"
+      },
+      "covers_entire_before_cell": true,
+      "same_bytes_as_before": false,
+      "same_payload_as_before": true,
+      "allocated_vk": null,
+      "residual_vk": {
+        "name": null,
+        "value_type": null,
+        "value_type_str": null,
+        "data_length": null,
+        "data_storage": null,
+        "data_cell_offset": null,
+        "data_preview": null,
+        "error": "ParseException: Registry Parse Exception (Invalid VK Record ID)"
+      }
+    }
+  },
+  "transaction_batches": {
+    "snapshot_sequences": {
+      "before": {
+        "sequence1": 7,
+        "sequence2": 7,
+        "sha256": "4fb9f5833bee62b8b50aaa67393eadb9e766129456cd0d0edeb466c2d6fa79ef",
+        "batch_id": "snapshot:before:seq2=7:4fb9f5833bee"
+      },
+      "after": {
+        "sequence1": 8,
+        "sequence2": 8,
+        "sha256": "7e745cbe52357f8d5283716cd15b1ef37fd4e1b36811e238e8c81ed0cbfafc14",
+        "batch_id": "snapshot:after:seq2=8:7e745cbe5235"
+      }
+    },
+    "offline_batches": [
+      {
+        "source": "tests/reg_samples/deletion/software_after_reallocated.SOFTWARE.LOG1",
+        "sha256": "151fce8e9ce7f364e62b656909e10364c297ac073dd7e189a8a3fa0ab55b990a",
+        "size": 5120,
+        "parse_error": null,
+        "valid": true,
+        "old_format": false,
+        "header": {
+          "hive_name": "SOFTWARE",
+          "file_type": "FILE_TYPE_LOG_NEW",
+          "sequence1": 8,
+          "sequence2": 8,
+          "hbins_size": 4096,
+          "checksum_valid": true
+        },
+        "entries": [
+          {
+            "offset": 512,
+            "offset_hex": "0x200",
+            "size": 4608,
+            "sequence": 8,
+            "hive_flags": 0,
+            "hbins_size": 4096,
+            "dirty_pages_count": 1,
+            "valid": true,
+            "dirty_pages": [
+              {
+                "offset_relative_to_first_hbin": 0,
+                "offset_relative_to_first_hbin_hex": "0x0",
+                "absolute_offset": 4096,
+                "absolute_offset_hex": "0x1000",
+                "size": 4096,
+                "page_data_offset": 560,
+                "page_sha256": "1d49dd4ffe68af49d880706d8259f8b7ebc287853d24ecec828b89c8cf0ef152",
+                "vk_slot": {
+                  "covered": true,
+                  "state": "allocated",
+                  "signature": "vk",
+                  "cell_size": 40,
+                  "value_name": "Rotation",
+                  "value_preview": "30",
+                  "matches_after_cell": true,
+                  "cell_sha256": "5b583e4c226d517740f606840c23d489cd5915cdd9727aee68fe5943687e10d2"
+                },
+                "data_slot": {
+                  "covered": true,
+                  "state": "free",
+                  "signature": "E\u0000",
+                  "cell_size": 24,
+                  "value_name": null,
+                  "value_preview": null,
+                  "matches_after_cell": true,
+                  "cell_sha256": "a510ec819a368033f9b0fe6212b6dfa3682e283f00edcd002e111463fc73ff20"
+                }
+              }
+            ]
+          }
+        ],
+        "trailing_bytes": 0
+      }
+    ],
+    "alignment": "ALIGNED",
+    "alignment_reasons": [],
+    "alignment_warnings": [],
+    "coverage": {
+      "old_vk_cell": true,
+      "old_data_cell": true,
+      "dirty_page_matches_after_vk_cell": true,
+      "dirty_page_matches_after_data_cell": true
+    },
+    "slot_state_by_batch": [
+      {
+        "log": "tests/reg_samples/deletion/software_after_reallocated.SOFTWARE.LOG1",
+        "sequence": 8,
+        "vk_cell": [
+          {
+            "covered": true,
+            "state": "allocated",
+            "signature": "vk",
+            "cell_size": 40,
+            "value_name": "Rotation",
+            "value_preview": "30",
+            "matches_after_cell": true,
+            "cell_sha256": "5b583e4c226d517740f606840c23d489cd5915cdd9727aee68fe5943687e10d2"
+          }
+        ],
+        "data_cell": [
+          {
+            "covered": true,
+            "state": "free",
+            "signature": "E\u0000",
+            "cell_size": 24,
+            "value_name": null,
+            "value_preview": null,
+            "matches_after_cell": true,
+            "cell_sha256": "a510ec819a368033f9b0fe6212b6dfa3682e283f00edcd002e111463fc73ff20"
+          }
+        ]
+      }
+    ]
+  },
+  "findings": [
+    {
+      "kind": "BASELINE_CAPTURE",
+      "text": "The earlier snapshot captured SOFTWARE\\Contoso\\Agent!Policy with VK cell RVA 0x150 (absolute 0x1150), data storage external_cell.",
+      "text_zh": "较早快照确实捕获到 SOFTWARE\\Contoso\\Agent!Policy；VK cell RVA 为 0x150（绝对偏移 0x1150），数据存储方式为 external_cell。"
+    },
+    {
+      "kind": "AFTER_LIVE_TREE",
+      "text": "The later live tree does not contain SOFTWARE\\Contoso\\Agent!Policy.",
+      "text_zh": "后续快照的活动树中不存在 SOFTWARE\\Contoso\\Agent!Policy。"
+    },
+    {
+      "kind": "PHYSICAL_SLOT_STATE",
+      "text": "In the later snapshot, the old VK slot at RVA 0x150 is allocated (relation=exact, size=40, signature=vk).",
+      "text_zh": "后续快照中，旧 VK 槽位 RVA 0x150 的状态为 allocated（关系=exact，大小=40，签名=vk）。"
+    },
+    {
+      "kind": "SLOT_REUSE_TARGET",
+      "text": "The reused VK cell now holds value 'Rotation' (SOFTWARE\\Contoso\\Agent!Rotation) of type RegDWord with data preview '30'.",
+      "text_zh": "复用后的 VK cell 现在保存配置项 'Rotation'（SOFTWARE\\Contoso\\Agent!Rotation），类型为 RegDWord，数据预览为 '30'。"
+    },
+    {
+      "kind": "DATA_SLOT_STATE",
+      "text": "The old external data slot at RVA 0x178 is free in the later snapshot.",
+      "text_zh": "后续快照中，旧外部数据槽位 RVA 0x178 的状态为 free。"
+    },
+    {
+      "kind": "TRANSACTION_BATCH_COVERAGE",
+      "text": "Offline batch alignment=ALIGNED; old VK cell covered=True; dirty page matches the later slot=True.",
+      "text_zh": "离线事务批次对齐状态=ALIGNED；旧 VK cell 是否被脏页覆盖=True；脏页内容是否与后续槽位一致=True。"
+    }
+  ],
+  "limitations": [
+    {
+      "text": "Cell RVAs are comparable only if the later hive was not reorganized (Windows 8+ hive reorganization can move cells).",
+      "text_zh": "只有当后续 hive 没有被重新组织时，cell RVA 才可直接比较；Windows 8+ 的 hive 重组会移动 cell。"
+    },
+    {
+      "text": "A free cell proves storage release, not who or what requested the deletion; free-cell residue may also be stale.",
+      "text_zh": "空闲 cell 只能证明存储被释放，不能证明是谁或什么操作发起删除；空闲 cell 中的残留字节也可能来自更早的内容。"
+    },
+    {
+      "text": "Absence from a parsed hive is not proof that a value never existed; it may be a collection, scope, or acquisition gap.",
+      "text_zh": "解析后的 hive 中不存在某个值，不等于该值从未存在；也可能是采集范围、快照时点或获取过程造成的缺口。"
+    },
+    {
+      "text": "New-format transaction logs contain dirty page images and sequence numbers, not semantic operation names or actor identities.",
+      "text_zh": "新格式事务日志保存的是脏页映像和序号，不包含语义化的操作名称、进程、用户或操作者身份。"
+    },
+    {
+      "text": "Reallocation proves that the old slot start was overwritten or reused by the later state; it does not prove that a free state existed between the two snapshots.",
+      "text_zh": "槽位再分配只能证明后续状态覆盖或复用了旧槽位起始位置，不能证明两份快照之间一定出现过可观察的空闲状态。"
+    }
+  ],
+  "missing_evidence": [
+    {
+      "code": "INTERMEDIATE_FREE_STATE",
+      "description": "A snapshot or transaction batch showing the old VK slot free before a different item occupies it.",
+      "description_zh": "需要一份中间快照或事务批次，显示旧 VK 槽位在另一个配置项占用它之前确实处于空闲状态。"
+    },
+    {
+      "code": "DELETION_TRANSACTION_OR_AUDIT_EVENT",
+      "description": "A transaction/audit record tying the disappearance to a specific operation, time, and actor.",
+      "description_zh": "需要能把消失过程绑定到具体操作、时间和操作者的事务记录、审计日志、EDR 或部署工具日志。"
+    },
+    {
+      "code": "FULL_DISK_PROVENANCE",
+      "description": "Acquisition hashes, device/image identifiers, and a documented chain of custody for both hive snapshots.",
+      "description_zh": "需要两份 hive 快照的采集哈希、设备/镜像标识和完整的证据保管链记录。"
+    }
+  ]
+}
