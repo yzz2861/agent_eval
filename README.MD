@@ -100,3 +100,62 @@ The source directory for python-registry contains a `sample/`
 subdirectory that contains small programs that use python-registry.
 For example, `regview.py` is a read-only clone of Microsoft Window's
 Regedit, implemented in a few hundred lines.
+
+
+Read-only evidence export
+--------------------------
+
+Delivery pipelines that hand registry values to other teams as plain JSON
+values lose the on-disk context needed to tell a genuinely empty record apart
+from an empty string whose terminator was repaired by a reader.  The
+Registry.EvidenceExport module exports every value together with evidence
+that a recipient can verify independently:
+
+  * the key path and value name,
+  * the declared data type (numeric code and symbolic name),
+  * the declared/observed raw length, storage location (inline vs. data cell)
+    and absolute file offset of the observed bytes,
+  * the raw bytes as hex plus a SHA-256 digest for independent re-hashing,
+  * the python-registry parsed view, kept separate from the evidence,
+  * a restoration conclusion: restored for strings/numbers whose bytes
+    re-encode exactly, empty_record for zero-length data, raw_carry
+    for binary/structural data, and range_only when bad encoding, a
+    missing terminator or a type/length mismatch means only the observed byte
+    range can be asserted.
+
+The exporter only opens the hive for reading::
+
+    from Registry.EvidenceExport import export_evidence, export_evidence_json
+
+    report = export_evidence("SOFTWARE")
+    text = export_evidence_json("SOFTWARE")
+
+A command line entry point is provided as well::
+
+    python -m Registry.EvidenceExport SOFTWARE -o evidence.json
+
+Synthetic hive generation
+-------------------------
+
+Registry.SyntheticHive is a self contained, write-only producer of minimal
+single-HBIN hive images that the read-only parser can open again.  It exposes
+the low level controls (exact raw bytes, declared length and inline storage)
+needed to build forensic edge cases.  Two values can display identically after
+parsing while still carrying different declared types or raw lengths::
+
+    import struct
+    from Registry.SyntheticHive import SyntheticHive
+    from Registry import Registry
+    from Registry.EvidenceExport import export_evidence
+    import io
+
+    builder = SyntheticHive("RootKey", "SYNTHETIC")
+    builder.add_value("as_text", Registry.RegSZ,
+                      u"42".encode("utf-16-le") + bytes([0, 0]))
+    builder.add_value("as_dword", Registry.RegDWord, struct.pack("<I", 42))
+    data = builder.build()
+    report = export_evidence(io.BytesIO(data))
+
+See tests/test_evidence_export.py for the round-trip scenarios, including
+empty records, missing terminators, odd byte lengths and type/length
+mismatches.

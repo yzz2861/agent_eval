@@ -21,5 +21,7 @@ __all__ = [
     'Registry',
     'RegistryParse',
     'RegistryLog',
-    'SettingsParse'
+    'SettingsParse',
+    'EvidenceExport',
+    'SyntheticHive'
 ]
