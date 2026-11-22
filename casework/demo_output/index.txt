@@ -1,0 +1,74 @@
+Read-only registry evidence binding index
+Bundle root: /Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-062/casework/demo_bundle
+Artifacts: 6  Occurrences: 64  Exhibits: 63
+
+[excerpt] casefile_excerpts/excerpt_content_only_a.json  sha256=45efc0e0c546a9b155b3fdfab4ba5348ef6ac0f8acaf849cd91ef334a0387bf3
+[excerpt] casefile_excerpts/excerpt_content_only_b.json  sha256=45efc0e0c546a9b155b3fdfab4ba5348ef6ac0f8acaf849cd91ef334a0387bf3
+[excerpt] casefile_excerpts/excerpt_with_provenance.json  sha256=94b85a76fc2893c04a6da54d57e389bdf8b5bf010d15eee4209e6322bb4ca17e
+[primary] live_storage/TIMEZONE/issue22.hive  sha256=8c07023d99090b354194b319264762a3107e2e5d0614f03368de64e8ca5db11e
+[primary] live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS  sha256=c1779f92d319fedac9a44719cf80771c6487e117e20215de2ecdae9f7e8e01c1
+[primary] live_storage/UNICODE_TESTS/UNICODE_TESTS  sha256=0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0
+
+EXH-001  UNICODE_TESTS  occurrences=1  bound=False  -> exhibits/EXH-001/
+EXH-002  UNICODE_TESTS\ASCII_KEY_NAME0  occurrences=1  bound=False  -> exhibits/EXH-002/
+EXH-003  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}  occurrences=1  bound=False  -> exhibits/EXH-003/
+EXH-004  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME1  occurrences=1  bound=False  -> exhibits/EXH-004/
+EXH-005  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0  occurrences=1  bound=False  -> exhibits/EXH-005/
+EXH-006  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME2  occurrences=1  bound=False  -> exhibits/EXH-006/
+EXH-007  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME3  occurrences=1  bound=False  -> exhibits/EXH-007/
+EXH-008  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME8  occurrences=1  bound=False  -> exhibits/EXH-008/
+EXH-009  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME9  occurrences=1  bound=False  -> exhibits/EXH-009/
+EXH-010  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME10  occurrences=1  bound=False  -> exhibits/EXH-010/
+EXH-011  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}3  occurrences=1  bound=False  -> exhibits/EXH-011/
+EXH-012  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}4  occurrences=1  bound=False  -> exhibits/EXH-012/
+EXH-013  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}5  occurrences=1  bound=False  -> exhibits/EXH-013/
+EXH-014  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME4  occurrences=1  bound=False  -> exhibits/EXH-014/
+EXH-015  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}6  occurrences=1  bound=False  -> exhibits/EXH-015/
+EXH-016  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}7  occurrences=1  bound=False  -> exhibits/EXH-016/
+EXH-017  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}8  occurrences=1  bound=False  -> exhibits/EXH-017/
+EXH-018  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}9  occurrences=1  bound=False  -> exhibits/EXH-018/
+EXH-019  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME5  occurrences=1  bound=False  -> exhibits/EXH-019/
+EXH-020  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME6  occurrences=1  bound=False  -> exhibits/EXH-020/
+EXH-021  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME7  occurrences=1  bound=False  -> exhibits/EXH-021/
+EXH-022  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}10  occurrences=1  bound=False  -> exhibits/EXH-022/
+EXH-023  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}11  occurrences=1  bound=False  -> exhibits/EXH-023/
+EXH-024  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}12  occurrences=1  bound=False  -> exhibits/EXH-024/
+EXH-025  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}9  occurrences=1  bound=False  -> exhibits/EXH-025/
+EXH-026  TimeZoneInformation  occurrences=1  bound=False  -> exhibits/EXH-026/
+EXH-027  TimeZoneInformation!DaylightBias  occurrences=1  bound=False  -> exhibits/EXH-027/
+EXH-028  TimeZoneInformation!DaylightName  occurrences=1  bound=False  -> exhibits/EXH-028/
+EXH-029  TimeZoneInformation!StandardStart  occurrences=1  bound=False  -> exhibits/EXH-029/
+EXH-030  TimeZoneInformation!StandardBias  occurrences=1  bound=False  -> exhibits/EXH-030/
+EXH-031  TimeZoneInformation!StandardName  occurrences=1  bound=False  -> exhibits/EXH-031/
+EXH-032  TimeZoneInformation!Bias  occurrences=1  bound=False  -> exhibits/EXH-032/
+EXH-033  TimeZoneInformation!DaylightStart  occurrences=1  bound=False  -> exhibits/EXH-033/
+EXH-034  TimeZoneInformation!TimeZoneKeyName  occurrences=1  bound=False  -> exhibits/EXH-034/
+EXH-035  TimeZoneInformation!DynamicDaylightTimeDisabled  occurrences=1  bound=False  -> exhibits/EXH-035/
+EXH-036  TimeZoneInformation!ActiveTimeBias  occurrences=1  bound=False  -> exhibits/EXH-036/
+EXH-037  UNICODE_TESTS  occurrences=1  bound=False  -> exhibits/EXH-037/
+EXH-038  UNICODE_TESTS\ASCII_KEY_NAME0  occurrences=1  bound=False  -> exhibits/EXH-038/
+EXH-039  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}  occurrences=1  bound=False  -> exhibits/EXH-039/
+EXH-040  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME1  occurrences=1  bound=False  -> exhibits/EXH-040/
+EXH-041  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0  occurrences=2  bound=True  -> exhibits/EXH-041/
+EXH-042  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME2  occurrences=1  bound=False  -> exhibits/EXH-042/
+EXH-043  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME3  occurrences=1  bound=False  -> exhibits/EXH-043/
+EXH-044  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME8  occurrences=1  bound=False  -> exhibits/EXH-044/
+EXH-045  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME9  occurrences=1  bound=False  -> exhibits/EXH-045/
+EXH-046  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME10  occurrences=1  bound=False  -> exhibits/EXH-046/
+EXH-047  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}3  occurrences=1  bound=False  -> exhibits/EXH-047/
+EXH-048  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}4  occurrences=1  bound=False  -> exhibits/EXH-048/
+EXH-049  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}5  occurrences=1  bound=False  -> exhibits/EXH-049/
+EXH-050  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME4  occurrences=1  bound=False  -> exhibits/EXH-050/
+EXH-051  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}6  occurrences=1  bound=False  -> exhibits/EXH-051/
+EXH-052  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}7  occurrences=1  bound=False  -> exhibits/EXH-052/
+EXH-053  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}8  occurrences=1  bound=False  -> exhibits/EXH-053/
+EXH-054  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}9  occurrences=1  bound=False  -> exhibits/EXH-054/
+EXH-055  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME5  occurrences=1  bound=False  -> exhibits/EXH-055/
+EXH-056  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME6  occurrences=1  bound=False  -> exhibits/EXH-056/
+EXH-057  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME7  occurrences=1  bound=False  -> exhibits/EXH-057/
+EXH-058  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}10  occurrences=1  bound=False  -> exhibits/EXH-058/
+EXH-059  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}11  occurrences=1  bound=False  -> exhibits/EXH-059/
+EXH-060  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}12  occurrences=1  bound=False  -> exhibits/EXH-060/
+EXH-061  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}9  occurrences=1  bound=False  -> exhibits/EXH-061/
+EXH-062  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0  occurrences=1  bound=False  -> exhibits/EXH-062/
+EXH-063  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0  occurrences=1  bound=False  -> exhibits/EXH-063/

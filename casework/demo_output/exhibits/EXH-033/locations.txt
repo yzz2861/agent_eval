@@ -1,0 +1,19 @@
+EXH-033  TimeZoneInformation!DaylightStart
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: DaylightStart (RegBin)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x132c  (hive-relative 0x32c)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: c83b8f6f56585560ca9fc1f4162718d14ffad2919e0e03d85e3e22830f8b54e7
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 40, data id b'vk' @ 0x1328
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'DaylightStart' @ 0x132c
+    - data cell: raw value bytes, length 16 @ 0x1350

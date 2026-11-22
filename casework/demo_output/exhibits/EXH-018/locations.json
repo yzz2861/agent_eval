@@ -1,0 +1,66 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS @ 0x19f4 (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-018",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x19f4",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS",
+        "sha256": "c1779f92d319fedac9a44719cf80771c6487e117e20215de2ecdae9f7e8e01c1"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "f710d97d782349692d92d93ad179250f09b728812d4b3e04309804e8787728cd",
+      "hive_relative_offset_hex": "0x9f4",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x19f4",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 72, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x19f0"
+        },
+        {
+          "detail": "owning key 'ASCII_KEY_NAME0'",
+          "layer": "NK record",
+          "offset_hex": "0x1184"
+        },
+        {
+          "detail": "value 'UNICODE_JUMBLE_{H~░ô«}9'",
+          "layer": "VK record",
+          "offset_hex": "0x19f4"
+        },
+        {
+          "detail": "raw value bytes, length 84",
+          "layer": "data cell",
+          "offset_hex": "0x1a38"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "UNICODE_JUMBLE_{H~░ô«}9",
+      "value_type": "RegMultiSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}9"
+}

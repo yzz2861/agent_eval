@@ -1,0 +1,66 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/TIMEZONE/issue22.hive @ 0x11ac (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-027",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x11ac",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/TIMEZONE/issue22.hive",
+        "sha256": "8c07023d99090b354194b319264762a3107e2e5d0614f03368de64e8ca5db11e"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "8f4b5ff9096473ab6cebc29bd78dc7737dcb4f42a74707f9215301196c1a2fa5",
+      "hive_relative_offset_hex": "0x1ac",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x11ac",
+      "record_kind": "value",
+      "registry_path": "TimeZoneInformation",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 40, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x11a8"
+        },
+        {
+          "detail": "owning key 'TimeZoneInformation'",
+          "layer": "NK record",
+          "offset_hex": "0x1024"
+        },
+        {
+          "detail": "value 'DaylightBias'",
+          "layer": "VK record",
+          "offset_hex": "0x11ac"
+        },
+        {
+          "detail": "raw value bytes, length 4",
+          "layer": "data cell",
+          "offset_hex": "0x11b4"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-12-23 09:43:50.732212",
+      "value_name": "DaylightBias",
+      "value_type": "RegDWord"
+    }
+  ],
+  "title": "TimeZoneInformation!DaylightBias"
+}

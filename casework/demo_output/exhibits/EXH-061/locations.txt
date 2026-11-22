@@ -1,0 +1,19 @@
+EXH-061  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}9
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}
+  value: UNICODE_JUMBLE_{H~░ô«}9 (RegSZ)
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1dfc  (hive-relative 0xdfc)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: b52b76ba092df6a8736f0203ecc68226f362f9e89a148c20f71da527bb5f9784
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 72, data id b'vk' @ 0x1df8
+    - NK record: owning key 'UNICODE_JUMBLE_{H~░ô«}' @ 0x1ad4
+    - VK record: value 'UNICODE_JUMBLE_{H~░ô«}9' @ 0x1dfc
+    - data cell: raw value bytes, length 38 @ 0x1e40

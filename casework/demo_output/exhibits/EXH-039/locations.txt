@@ -1,0 +1,17 @@
+EXH-039  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: key UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1ad4  (hive-relative 0xad4)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: c1723e919bfe27b382e60e5873f1e90de10bebb25d925a2da8d990d23f63446f
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 128, data id b'nk' @ 0x1ad0
+    - NK record: key 'UNICODE_JUMBLE_{H~░ô«}' @ 0x1ad4
+    - parent NK link: parent key 'UNICODE_TESTS' @ 0x1024

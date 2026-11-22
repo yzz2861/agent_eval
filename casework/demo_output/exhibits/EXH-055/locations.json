@@ -1,0 +1,66 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/UNICODE_TESTS/UNICODE_TESTS @ 0x1b54 (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-055",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x1b54",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/UNICODE_TESTS/UNICODE_TESTS",
+        "sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "e70bd11b727d1068df80d1869b76a8f536340aba1a4c2d237ea1d3e723d26a8f",
+      "hive_relative_offset_hex": "0xb54",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x1b54",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 48, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x1b50"
+        },
+        {
+          "detail": "owning key 'UNICODE_JUMBLE_{H~░ô«}'",
+          "layer": "NK record",
+          "offset_hex": "0x1ad4"
+        },
+        {
+          "detail": "value 'ASCII_VALUE_NAME5'",
+          "layer": "VK record",
+          "offset_hex": "0x1b54"
+        },
+        {
+          "detail": "raw value bytes, length 38",
+          "layer": "data cell",
+          "offset_hex": "0x1b80"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:58:19.782001",
+      "value_name": "ASCII_VALUE_NAME5",
+      "value_type": "RegExpandSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME5"
+}

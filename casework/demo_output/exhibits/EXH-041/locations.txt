@@ -1,0 +1,33 @@
+EXH-041  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0
+Binding decision: full provenance resolves to the delivered source hive cell
+
+Occurrence 1:
+  record: value UNICODE_TESTS\ASCII_KEY_NAME0
+  value: ASCII_VALUE_NAME0 (RegSZ)
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1254  (hive-relative 0x254)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 48, data id b'vk' @ 0x1250
+    - NK record: owning key 'ASCII_KEY_NAME0' @ 0x1184
+    - VK record: value 'ASCII_VALUE_NAME0' @ 0x1254
+    - data cell: raw value bytes, length 48 @ 0x1280
+
+Occurrence 2:
+  record: value UNICODE_TESTS\ASCII_KEY_NAME0
+  value: ASCII_VALUE_NAME0 (RegSZ)
+  location: casefile_excerpts/excerpt_with_provenance.json
+  artifact kind: excerpt
+  absolute offset: 0x1254  (hive-relative 0x254)
+  reachability: excerpt_only
+  provenance grade: full
+  content fingerprint: b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116
+  source chain:
+    - excerpt manifest: standalone JSON manifest, record index 0
+    - claimed source file: source_sha256=0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0
+    - claimed record offset: offset claim carried by the excerpt @ 0x1254

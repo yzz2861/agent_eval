@@ -1,0 +1,19 @@
+EXH-030  TimeZoneInformation!StandardBias
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: StandardBias (RegDWord)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x1294  (hive-relative 0x294)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 9697d28d6f0c8292229cc08a44797245ae9d63050af50380532e5fc83daf3b86
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 40, data id b'vk' @ 0x1290
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'StandardBias' @ 0x1294
+    - data cell: raw value bytes, length 4 @ 0x129c

@@ -1,0 +1,16 @@
+EXH-026  TimeZoneInformation
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: key TimeZoneInformation
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x1024  (hive-relative 0x24)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: e68c823b3a3c072bed9c265079ff7fe3c6a4a542b2b50cd97aa8c6b4cf29c245
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 104, data id b'nk' @ 0x1020
+    - NK record: key 'TimeZoneInformation' @ 0x1024

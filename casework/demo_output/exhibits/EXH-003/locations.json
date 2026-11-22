@@ -1,0 +1,61 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS @ 0x1ad4 (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-003",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x1ad4",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS",
+        "sha256": "c1779f92d319fedac9a44719cf80771c6487e117e20215de2ecdae9f7e8e01c1"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "c1723e919bfe27b382e60e5873f1e90de10bebb25d925a2da8d990d23f63446f",
+      "hive_relative_offset_hex": "0xad4",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "key@0x1ad4",
+      "record_kind": "key",
+      "registry_path": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 128, data id b'nk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x1ad0"
+        },
+        {
+          "detail": "key 'UNICODE_JUMBLE_{H~░ô«}'",
+          "layer": "NK record",
+          "offset_hex": "0x1ad4"
+        },
+        {
+          "detail": "parent key 'UNICODE_TESTS'",
+          "layer": "parent NK link",
+          "offset_hex": "0x1024"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:58:19.782001",
+      "value_name": null,
+      "value_type": null
+    }
+  ],
+  "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}"
+}

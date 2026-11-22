@@ -1,0 +1,66 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS @ 0x132c (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-007",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x132c",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS",
+        "sha256": "c1779f92d319fedac9a44719cf80771c6487e117e20215de2ecdae9f7e8e01c1"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "0772f47ac7f77555a88adc1974337fc8e8c0c73a47514d5499df0c1ab8a606af",
+      "hive_relative_offset_hex": "0x32c",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x132c",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 48, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x1328"
+        },
+        {
+          "detail": "owning key 'ASCII_KEY_NAME0'",
+          "layer": "NK record",
+          "offset_hex": "0x1184"
+        },
+        {
+          "detail": "value 'ASCII_VALUE_NAME3'",
+          "layer": "VK record",
+          "offset_hex": "0x132c"
+        },
+        {
+          "detail": "raw value bytes, length 38",
+          "layer": "data cell",
+          "offset_hex": "0x1358"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "ASCII_VALUE_NAME3",
+      "value_type": "RegExpandSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME3"
+}

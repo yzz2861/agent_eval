@@ -1,0 +1,19 @@
+EXH-010  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME10
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value UNICODE_TESTS\ASCII_KEY_NAME0
+  value: ASCII_VALUE_NAME10 (RegMultiSZ)
+  location: live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS
+  artifact kind: primary
+  absolute offset: 0x154c  (hive-relative 0x54c)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: e4fa7af812de31072c28307131e909b7e13e09261b3cf53a0fb4d6ec0721b77e
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 48, data id b'vk' @ 0x1548
+    - NK record: owning key 'ASCII_KEY_NAME0' @ 0x1184
+    - VK record: value 'ASCII_VALUE_NAME10' @ 0x154c
+    - data cell: raw value bytes, length 140 @ 0x1578

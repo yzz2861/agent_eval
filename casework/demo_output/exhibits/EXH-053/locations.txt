@@ -1,0 +1,19 @@
+EXH-053  UNICODE_TESTS\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}8
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value UNICODE_TESTS\ASCII_KEY_NAME0
+  value: UNICODE_JUMBLE_{H~░ô«}8 (RegMultiSZ)
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x194c  (hive-relative 0x94c)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 4752aafdd7b2ce3b0b37b189fb9822fde2b93f19bad40d4acc3ca514a3a47fb6
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 72, data id b'vk' @ 0x1948
+    - NK record: owning key 'ASCII_KEY_NAME0' @ 0x1184
+    - VK record: value 'UNICODE_JUMBLE_{H~░ô«}8' @ 0x194c
+    - data cell: raw value bytes, length 86 @ 0x1990

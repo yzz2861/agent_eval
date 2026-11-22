@@ -1,0 +1,109 @@
+{
+  "binding_decision": {
+    "bound": true,
+    "evidence": [
+      "live_storage/UNICODE_TESTS/UNICODE_TESTS @ 0x1254 (reachable)",
+      "casefile_excerpts/excerpt_with_provenance.json @ 0x1254 (excerpt_only)"
+    ],
+    "reason": "full provenance resolves to the delivered source hive cell"
+  },
+  "exhibit_id": "EXH-041",
+  "occurrence_count": 2,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x1254",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/UNICODE_TESTS/UNICODE_TESTS",
+        "sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116",
+      "hive_relative_offset_hex": "0x254",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x1254",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 48, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x1250"
+        },
+        {
+          "detail": "owning key 'ASCII_KEY_NAME0'",
+          "layer": "NK record",
+          "offset_hex": "0x1184"
+        },
+        {
+          "detail": "value 'ASCII_VALUE_NAME0'",
+          "layer": "VK record",
+          "offset_hex": "0x1254"
+        },
+        {
+          "detail": "raw value bytes, length 48",
+          "layer": "data cell",
+          "offset_hex": "0x1280"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "ASCII_VALUE_NAME0",
+      "value_type": "RegSZ"
+    },
+    {
+      "absolute_offset_hex": "0x1254",
+      "artifact": {
+        "kind": "excerpt",
+        "relative_path": "casefile_excerpts/excerpt_with_provenance.json",
+        "sha256": "94b85a76fc2893c04a6da54d57e389bdf8b5bf010d15eee4209e6322bb4ca17e"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116",
+      "hive_relative_offset_hex": "0x254",
+      "provenance_grade": "full",
+      "reachability": "excerpt_only",
+      "record_id": "value@0x1254",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "standalone JSON manifest, record index 0",
+          "layer": "excerpt manifest"
+        },
+        {
+          "detail": "source_sha256=0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0",
+          "layer": "claimed source file"
+        },
+        {
+          "detail": "offset claim carried by the excerpt",
+          "layer": "claimed record offset",
+          "offset_hex": "0x1254"
+        }
+      ],
+      "source_claim": {
+        "record_absolute_offset_hex": "0x1254",
+        "record_kind": "value",
+        "record_relative_offset_hex": "0x254",
+        "source_sequence1": 1,
+        "source_sequence2": 1,
+        "source_sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0"
+      },
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "ASCII_VALUE_NAME0",
+      "value_type": "RegSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+}

@@ -1,0 +1,16 @@
+EXH-037  UNICODE_TESTS
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: key UNICODE_TESTS
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1024  (hive-relative 0x24)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: b5fa3e7ad2f7fde45ec1c954aa4275fe546ca60ab75264d542a15538d79a5957
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 96, data id b'nk' @ 0x1020
+    - NK record: key 'UNICODE_TESTS' @ 0x1024

@@ -1,0 +1,66 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "live_storage/UNICODE_TESTS/UNICODE_TESTS @ 0x1724 (reachable)"
+    ],
+    "reason": "single occurrence with an independent source chain"
+  },
+  "exhibit_id": "EXH-049",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": "0x1724",
+      "artifact": {
+        "kind": "primary",
+        "relative_path": "live_storage/UNICODE_TESTS/UNICODE_TESTS",
+        "sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0"
+      },
+      "binding_blockers": [],
+      "content_fingerprint": "78b0d5d0212b33d2f540308e073e692cc0cd7f273f9c5748e8d52f14717b80cb",
+      "hive_relative_offset_hex": "0x724",
+      "provenance_grade": "none",
+      "reachability": "reachable",
+      "record_id": "value@0x1724",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "hive root anchor, first HBIN at 0x1000",
+          "layer": "REGF header",
+          "offset_hex": "0x0"
+        },
+        {
+          "detail": "allocation block hosting the cell",
+          "layer": "HBIN block",
+          "offset_hex": "0x1000"
+        },
+        {
+          "detail": "cell size 72, data id b'vk'",
+          "layer": "HBIN cell",
+          "offset_hex": "0x1720"
+        },
+        {
+          "detail": "owning key 'ASCII_KEY_NAME0'",
+          "layer": "NK record",
+          "offset_hex": "0x1184"
+        },
+        {
+          "detail": "value 'UNICODE_JUMBLE_{H~░ô«}5'",
+          "layer": "VK record",
+          "offset_hex": "0x1724"
+        },
+        {
+          "detail": "raw value bytes, length 48",
+          "layer": "data cell",
+          "offset_hex": "0x1768"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "UNICODE_JUMBLE_{H~░ô«}5",
+      "value_type": "RegSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}5"
+}

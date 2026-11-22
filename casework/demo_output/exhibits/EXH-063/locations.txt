@@ -1,0 +1,16 @@
+EXH-063  UNICODE_TESTS\ASCII_KEY_NAME0!ASCII_VALUE_NAME0
+Binding decision: excerpt carries content only, no common-source proof
+
+Occurrence 1:
+  record: value UNICODE_TESTS\ASCII_KEY_NAME0
+  value: ASCII_VALUE_NAME0 (RegSZ)
+  location: casefile_excerpts/excerpt_content_only_b.json
+  artifact kind: excerpt
+  absolute offset: n/a  (hive-relative n/a)
+  reachability: excerpt_only
+  provenance grade: content_only
+  content fingerprint: b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116
+  source chain:
+    - excerpt manifest: standalone JSON manifest, record index 0
+  binding blockers:
+    ! excerpt carries content only, no common-source proof

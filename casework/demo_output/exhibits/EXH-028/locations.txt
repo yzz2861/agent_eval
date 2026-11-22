@@ -1,0 +1,19 @@
+EXH-028  TimeZoneInformation!DaylightName
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: DaylightName (RegSZ)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x1204  (hive-relative 0x204)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 4523c09464d129e5b0562f72b97312c3300b6115cb1e64179414cbfdf26422e1
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 40, data id b'vk' @ 0x1200
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'DaylightName' @ 0x1204
+    - data cell: raw value bytes, length 32 @ 0x1228

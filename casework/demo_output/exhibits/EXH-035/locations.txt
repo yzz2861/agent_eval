@@ -1,0 +1,19 @@
+EXH-035  TimeZoneInformation!DynamicDaylightTimeDisabled
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: DynamicDaylightTimeDisabled (RegDWord)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x13cc  (hive-relative 0x3cc)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 6943d0b9570dd4e6158ebc74c038149e06c4e145a46967a4b47d162d6f3d8d4c
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 56, data id b'vk' @ 0x13c8
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'DynamicDaylightTimeDisabled' @ 0x13cc
+    - data cell: raw value bytes, length 4 @ 0x13d4

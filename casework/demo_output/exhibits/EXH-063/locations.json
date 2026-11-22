@@ -1,0 +1,42 @@
+{
+  "binding_decision": {
+    "bound": false,
+    "evidence": [
+      "casefile_excerpts/excerpt_content_only_b.json @ 0x-1 (excerpt_only)"
+    ],
+    "reason": "excerpt carries content only, no common-source proof"
+  },
+  "exhibit_id": "EXH-063",
+  "occurrence_count": 1,
+  "occurrences": [
+    {
+      "absolute_offset_hex": null,
+      "artifact": {
+        "kind": "excerpt",
+        "relative_path": "casefile_excerpts/excerpt_content_only_b.json",
+        "sha256": "45efc0e0c546a9b155b3fdfab4ba5348ef6ac0f8acaf849cd91ef334a0387bf3"
+      },
+      "binding_blockers": [
+        "excerpt carries content only, no common-source proof"
+      ],
+      "content_fingerprint": "b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116",
+      "hive_relative_offset_hex": null,
+      "provenance_grade": "content_only",
+      "reachability": "excerpt_only",
+      "record_id": "value@0x-1",
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "source_chain": [
+        {
+          "detail": "standalone JSON manifest, record index 0",
+          "layer": "excerpt manifest"
+        }
+      ],
+      "source_claim": {},
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "value_name": "ASCII_VALUE_NAME0",
+      "value_type": "RegSZ"
+    }
+  ],
+  "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+}

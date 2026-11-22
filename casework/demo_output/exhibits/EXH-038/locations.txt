@@ -1,0 +1,17 @@
+EXH-038  UNICODE_TESTS\ASCII_KEY_NAME0
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: key UNICODE_TESTS\ASCII_KEY_NAME0
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1184  (hive-relative 0x184)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: a64a6f69133eb8f96b263270ff6fffb9436819a6c4df265cf31063c30315367a
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 96, data id b'nk' @ 0x1180
+    - NK record: key 'ASCII_KEY_NAME0' @ 0x1184
+    - parent NK link: parent key 'UNICODE_TESTS' @ 0x1024

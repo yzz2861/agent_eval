@@ -1,0 +1,19 @@
+EXH-027  TimeZoneInformation!DaylightBias
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: DaylightBias (RegDWord)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x11ac  (hive-relative 0x1ac)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 8f4b5ff9096473ab6cebc29bd78dc7737dcb4f42a74707f9215301196c1a2fa5
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 40, data id b'vk' @ 0x11a8
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'DaylightBias' @ 0x11ac
+    - data cell: raw value bytes, length 4 @ 0x11b4

@@ -1,0 +1,521 @@
+{
+  "artifact_count": 6,
+  "artifacts": [
+    {
+      "kind": "excerpt",
+      "relative_path": "casefile_excerpts/excerpt_content_only_a.json",
+      "sha256": "45efc0e0c546a9b155b3fdfab4ba5348ef6ac0f8acaf849cd91ef334a0387bf3",
+      "size": 520
+    },
+    {
+      "kind": "excerpt",
+      "relative_path": "casefile_excerpts/excerpt_content_only_b.json",
+      "sha256": "45efc0e0c546a9b155b3fdfab4ba5348ef6ac0f8acaf849cd91ef334a0387bf3",
+      "size": 520
+    },
+    {
+      "kind": "excerpt",
+      "relative_path": "casefile_excerpts/excerpt_with_provenance.json",
+      "sha256": "94b85a76fc2893c04a6da54d57e389bdf8b5bf010d15eee4209e6322bb4ca17e",
+      "size": 808
+    },
+    {
+      "checksum_valid": true,
+      "details": {
+        "hbins_size": 4096
+      },
+      "hive_name": "",
+      "hive_sequence1": 1,
+      "hive_sequence2": 1,
+      "kind": "primary",
+      "recovery_required": {
+        "recover_data": false,
+        "recover_header": false
+      },
+      "relative_path": "live_storage/TIMEZONE/issue22.hive",
+      "sha256": "8c07023d99090b354194b319264762a3107e2e5d0614f03368de64e8ca5db11e",
+      "size": 8192
+    },
+    {
+      "checksum_valid": true,
+      "details": {
+        "hbins_size": 4096
+      },
+      "hive_name": ":\\test\\REORGANIZED_VALUES_TESTS",
+      "hive_sequence1": 2,
+      "hive_sequence2": 2,
+      "kind": "primary",
+      "recovery_required": {
+        "recover_data": false,
+        "recover_header": false
+      },
+      "relative_path": "live_storage/REORGANIZED/REORGANIZED_VALUES_TESTS",
+      "sha256": "c1779f92d319fedac9a44719cf80771c6487e117e20215de2ecdae9f7e8e01c1",
+      "size": 8192
+    },
+    {
+      "checksum_valid": true,
+      "details": {
+        "hbins_size": 4096
+      },
+      "hive_name": "",
+      "hive_sequence1": 1,
+      "hive_sequence2": 1,
+      "kind": "primary",
+      "recovery_required": {
+        "recover_data": false,
+        "recover_header": false
+      },
+      "relative_path": "live_storage/UNICODE_TESTS/UNICODE_TESTS",
+      "sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0",
+      "size": 8192
+    }
+  ],
+  "bundle_root": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-062/casework/demo_bundle",
+  "exhibit_count": 63,
+  "exhibits": [
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-001",
+      "exhibit_id": "EXH-001",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-002",
+      "exhibit_id": "EXH-002",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-003",
+      "exhibit_id": "EXH-003",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-004",
+      "exhibit_id": "EXH-004",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME1"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-005",
+      "exhibit_id": "EXH-005",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-006",
+      "exhibit_id": "EXH-006",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME2"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-007",
+      "exhibit_id": "EXH-007",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME3"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-008",
+      "exhibit_id": "EXH-008",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME8"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-009",
+      "exhibit_id": "EXH-009",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-010",
+      "exhibit_id": "EXH-010",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME10"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-011",
+      "exhibit_id": "EXH-011",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}3"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-012",
+      "exhibit_id": "EXH-012",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}4"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-013",
+      "exhibit_id": "EXH-013",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}5"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-014",
+      "exhibit_id": "EXH-014",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME4"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-015",
+      "exhibit_id": "EXH-015",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}6"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-016",
+      "exhibit_id": "EXH-016",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}7"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-017",
+      "exhibit_id": "EXH-017",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}8"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-018",
+      "exhibit_id": "EXH-018",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-019",
+      "exhibit_id": "EXH-019",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME5"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-020",
+      "exhibit_id": "EXH-020",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME6"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-021",
+      "exhibit_id": "EXH-021",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME7"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-022",
+      "exhibit_id": "EXH-022",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}10"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-023",
+      "exhibit_id": "EXH-023",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}11"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-024",
+      "exhibit_id": "EXH-024",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}12"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-025",
+      "exhibit_id": "EXH-025",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-026",
+      "exhibit_id": "EXH-026",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-027",
+      "exhibit_id": "EXH-027",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!DaylightBias"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-028",
+      "exhibit_id": "EXH-028",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!DaylightName"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-029",
+      "exhibit_id": "EXH-029",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!StandardStart"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-030",
+      "exhibit_id": "EXH-030",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!StandardBias"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-031",
+      "exhibit_id": "EXH-031",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!StandardName"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-032",
+      "exhibit_id": "EXH-032",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!Bias"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-033",
+      "exhibit_id": "EXH-033",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!DaylightStart"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-034",
+      "exhibit_id": "EXH-034",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!TimeZoneKeyName"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-035",
+      "exhibit_id": "EXH-035",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!DynamicDaylightTimeDisabled"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-036",
+      "exhibit_id": "EXH-036",
+      "occurrence_count": 1,
+      "title": "TimeZoneInformation!ActiveTimeBias"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-037",
+      "exhibit_id": "EXH-037",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-038",
+      "exhibit_id": "EXH-038",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-039",
+      "exhibit_id": "EXH-039",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-040",
+      "exhibit_id": "EXH-040",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME1"
+    },
+    {
+      "bound": true,
+      "directory": "exhibits/EXH-041",
+      "exhibit_id": "EXH-041",
+      "occurrence_count": 2,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-042",
+      "exhibit_id": "EXH-042",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME2"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-043",
+      "exhibit_id": "EXH-043",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME3"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-044",
+      "exhibit_id": "EXH-044",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME8"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-045",
+      "exhibit_id": "EXH-045",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-046",
+      "exhibit_id": "EXH-046",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME10"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-047",
+      "exhibit_id": "EXH-047",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}3"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-048",
+      "exhibit_id": "EXH-048",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}4"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-049",
+      "exhibit_id": "EXH-049",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}5"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-050",
+      "exhibit_id": "EXH-050",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME4"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-051",
+      "exhibit_id": "EXH-051",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}6"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-052",
+      "exhibit_id": "EXH-052",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}7"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-053",
+      "exhibit_id": "EXH-053",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}8"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-054",
+      "exhibit_id": "EXH-054",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!UNICODE_JUMBLE_{H~░ô«}9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-055",
+      "exhibit_id": "EXH-055",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME5"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-056",
+      "exhibit_id": "EXH-056",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME6"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-057",
+      "exhibit_id": "EXH-057",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME7"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-058",
+      "exhibit_id": "EXH-058",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}10"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-059",
+      "exhibit_id": "EXH-059",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}11"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-060",
+      "exhibit_id": "EXH-060",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}12"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-061",
+      "exhibit_id": "EXH-061",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\UNICODE_JUMBLE_{H~░ô«}!UNICODE_JUMBLE_{H~░ô«}9"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-062",
+      "exhibit_id": "EXH-062",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+    },
+    {
+      "bound": false,
+      "directory": "exhibits/EXH-063",
+      "exhibit_id": "EXH-063",
+      "occurrence_count": 1,
+      "title": "UNICODE_TESTS\\ASCII_KEY_NAME0!ASCII_VALUE_NAME0"
+    }
+  ],
+  "occurrence_count": 64,
+  "warnings": []
+}

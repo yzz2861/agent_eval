@@ -1,0 +1,19 @@
+EXH-031  TimeZoneInformation!StandardName
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value TimeZoneInformation
+  value: StandardName (RegSZ)
+  location: live_storage/TIMEZONE/issue22.hive
+  artifact kind: primary
+  absolute offset: 0x12bc  (hive-relative 0x2bc)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 0ce0ca04e7865b0ef4ef8a1f9ffa99f6fc1d9f8a74edaad7de427ca16c046dc6
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 40, data id b'vk' @ 0x12b8
+    - NK record: owning key 'TimeZoneInformation' @ 0x1024
+    - VK record: value 'StandardName' @ 0x12bc
+    - data cell: raw value bytes, length 32 @ 0x12e0

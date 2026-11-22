@@ -1,0 +1,19 @@
+EXH-057  UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}!ASCII_VALUE_NAME7
+Binding decision: single occurrence with an independent source chain
+
+Occurrence 1:
+  record: value UNICODE_TESTS\UNICODE_JUMBLE_{H~░ô«}
+  value: ASCII_VALUE_NAME7 (RegExpandSZ)
+  location: live_storage/UNICODE_TESTS/UNICODE_TESTS
+  artifact kind: primary
+  absolute offset: 0x1c1c  (hive-relative 0xc1c)
+  reachability: reachable
+  provenance grade: none
+  content fingerprint: 6a4eec0b85ab785bc6f233f0336120c66aceec6733ac4b79387c8d8b4c9534e6
+  source chain:
+    - REGF header: hive root anchor, first HBIN at 0x1000 @ 0x0
+    - HBIN block: allocation block hosting the cell @ 0x1000
+    - HBIN cell: cell size 48, data id b'vk' @ 0x1c18
+    - NK record: owning key 'UNICODE_JUMBLE_{H~░ô«}' @ 0x1ad4
+    - VK record: value 'ASCII_VALUE_NAME7' @ 0x1c1c
+    - data cell: raw value bytes, length 50 @ 0x1c48

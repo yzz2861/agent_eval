@@ -1,0 +1,22 @@
+{
+  "manifest_type": "registry-excerpt/v1",
+  "records": [
+    {
+      "record_kind": "value",
+      "registry_path": "UNICODE_TESTS\\ASCII_KEY_NAME0",
+      "value_name": "ASCII_VALUE_NAME0",
+      "value_type": "RegSZ",
+      "timestamp": "2015-11-10 14:36:57.142104",
+      "content_fingerprint": "b95e4a35b8f493d66195e9781bd4d80c61628bfcabfdfd3f33f2ed2611d45116",
+      "data_hex": "55004e00490043004f00440045005f004a0055004d0042004c0045005f007b0048007e009125f400ab007d0031000000",
+      "provenance": {
+        "source_sha256": "0d379a9e9f00803166d06a070c89d8a06779b01edbda7d112e8d5ec054ed62f0",
+        "source_sequence1": 1,
+        "source_sequence2": 1,
+        "record_absolute_offset_hex": "0x1254",
+        "record_relative_offset_hex": "0x254",
+        "record_kind": "value"
+      }
+    }
+  ]
+}
