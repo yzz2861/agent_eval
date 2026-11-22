@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cpe:platform-specification xmlns:cpe="http://cpe.mitre.org/language/2.0">
+  <cpe:platform id="acme-edge-os">
+    <cpe:title>ACME Edge OS affected systems, excluding legacy releases</cpe:title>
+    <cpe:logical-test operator="AND" negate="FALSE">
+      <cpe:fact-ref name="cpe:2.3:o:acme:edge_os:*:*:*:*:*:*:*:*"/>
+      <cpe:logical-test operator="OR" negate="TRUE">
+        <cpe:fact-ref name="cpe:2.3:o:acme:edge_os:1.0:*:*:*:*:*:*:*"/>
+        <cpe:fact-ref name="cpe:2.3:o:acme:edge_os:1.1:*:*:*:*:*:*:*"/>
+      </cpe:logical-test>
+    </cpe:logical-test>
+  </cpe:platform>
+</cpe:platform-specification>

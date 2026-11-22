@@ -1,0 +1,34 @@
+{
+  "domain": {
+    "version": ["1.0", "1.1", "1.2", "2.0"]
+  },
+  "devices": [
+    {
+      "id": "edge-1.0",
+      "cpes": ["cpe:2.3:o:acme:edge_os:1.0:*:*:*:*:*:*:*"]
+    },
+    {
+      "id": "edge-1.1",
+      "cpes": ["cpe:2.3:o:acme:edge_os:1.1:*:*:*:*:*:*:*"]
+    },
+    {
+      "id": "edge-1.2",
+      "cpes": ["cpe:2.3:o:acme:edge_os:1.2:*:*:*:*:*:*:*"]
+    },
+    {
+      "id": "edge-2.0",
+      "cpes": ["cpe:2.3:o:acme:edge_os:2.0:*:*:*:*:*:*:*"]
+    },
+    {
+      "id": "edge-version-unconfirmed",
+      "components": [
+        {
+          "part": "o",
+          "vendor": "acme",
+          "product": "edge_os",
+          "version": null
+        }
+      ]
+    }
+  ]
+}

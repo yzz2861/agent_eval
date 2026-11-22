@@ -23,6 +23,7 @@ Contents:
    model
    install
    examples
+   cpediff
    issues
    bugtracker
    todo
