@@ -6,6 +6,9 @@
    pattern
    graph
    object
+   merge
 
 |
 """
+
+from . import merge  # noqa: F401

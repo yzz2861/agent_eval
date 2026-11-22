@@ -35,6 +35,11 @@ from .datastore.taxii import (
     TAXIICollectionSink, TAXIICollectionSource, TAXIICollectionStore,
 )
 from .environment import Environment, ObjectFactory
+from .equivalence.merge import (
+    EntityMergeReconciler, check_merge_consistency, compatible_groups,
+    find_minimal_conflicts, group_entities, merge_entities,
+    reconcile_entity_merges,
+)
 from .markings import (
     add_markings, clear_markings, get_markings, is_marked, remove_markings,
     set_markings,
