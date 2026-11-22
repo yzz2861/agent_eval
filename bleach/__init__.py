@@ -82,7 +82,13 @@ def clean(
     return cleaner.clean(text)
 
 
-def linkify(text, callbacks=DEFAULT_CALLBACKS, skip_tags=None, parse_email=False):
+def linkify(
+    text,
+    callbacks=DEFAULT_CALLBACKS,
+    skip_tags=None,
+    parse_email=False,
+    approved_ranges=None,
+):
     """Convert URL-like strings in an HTML fragment to links
 
     This function converts strings that look like URLs, domain names and email
@@ -118,8 +124,19 @@ def linkify(text, callbacks=DEFAULT_CALLBACKS, skip_tags=None, parse_email=False
 
     :arg bool parse_email: whether or not to linkify email addresses
 
+    :arg approved_ranges: iterable of ``(start, end)`` half-open character
+        offsets into ``text``. When provided, only brand-new links whose text
+        sits entirely inside one of these ranges are created; links already
+        present as ``<a>`` tags are handled by the callbacks as usual. ``None``
+        (the default) keeps the historical behavior of linkifying every match.
+
     :returns: linkified text as unicode
 
     """
-    linker = Linker(callbacks=callbacks, skip_tags=skip_tags, parse_email=parse_email)
+    linker = Linker(
+        callbacks=callbacks,
+        skip_tags=skip_tags,
+        parse_email=parse_email,
+        approved_ranges=approved_ranges,
+    )
     return linker.linkify(text)

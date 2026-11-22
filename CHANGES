@@ -1,6 +1,19 @@
 Bleach changes
 ==============
 
+Unreleased
+----------
+
+**New features**
+
+* Add an optional ``approved_ranges`` argument to ``linkify``, ``Linker`` and
+  ``LinkifyFilter``. It takes ``(start, end)`` half-open offsets into the original
+  input and restricts brand-new links to text fully inside an approved range.
+  Existing ``<a>`` tags are still handled by the callbacks. Offsets are resolved
+  against the original source, so HTML entities, adjacent text nodes and CR/LF
+  normalization are accounted for, and callback rewrites cannot widen an approved
+  region.
+
 Version 6.4.0 (June 5th, 2026)
 ------------------------------
 

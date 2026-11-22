@@ -297,6 +297,52 @@ This works for ``code``, ``div`` and any other blocks you want to skip over.
    This used to be ``skip_pre``, but this makes it more general.
 
 
+Approving only specific text ranges (``approved_ranges``)
+=========================================================
+
+Sometimes only part of a document is allowed to gain new links--for example,
+a reviewed caption, while a customer-service transcript next to it must keep
+its URL-like text as plain text. Pass ``approved_ranges`` with an iterable of
+``(start, end)`` half-open character offsets into the input string. A
+brand-new link is only created when the whole candidate link text falls inside
+one of those ranges.
+
+Offsets always refer to the original input text, so HTML entities, tag markup
+and adjacent text nodes are accounted for automatically. Links that already
+exist as ``<a>`` tags are not range-checked and keep going through the normal
+callbacks. When ``approved_ranges`` is ``None`` (the default) every match is
+eligible, which preserves the historical behavior.
+
+.. doctest::
+
+   >>> from bleach import linkify
+
+   >>> text = 'caption http://example.com note; transcript http://example.com'
+   >>> second = text.find('http://example.com', text.find('http://example.com') + 1)
+   >>> linkify(text, approved_ranges=[(second, second + len('http://example.com'))])
+   'caption http://example.com note; transcript <a href="http://example.com" rel="nofollow">http://example.com</a>'
+
+The same string can appear more than once; each occurrence is judged on its own
+source position, so approving one leaves the other untouched. The check runs
+before any callback, so a callback that rewrites the ``href`` or the link text
+can neither create a link outside an approved range nor expand one. A candidate
+that is not approved is emitted as its original text without invoking the
+callbacks.
+
+Pass an empty iterable to suppress all new links while leaving existing ``<a>``
+tags alone:
+
+.. doctest::
+
+   >>> linkify('see http://example.com', approved_ranges=[])
+   'see http://example.com'
+
+:py:class:`bleach.linkifier.Linker` and :py:class:`bleach.linkifier.LinkifyFilter`
+accept the same argument. ``LinkifyFilter`` additionally needs ``source_text``
+(the original input) so the offsets can be resolved; without it range approval
+is disabled.
+
+
 Linkifying email addresses (``parse_email``)
 ============================================
 

@@ -87,6 +87,98 @@ def build_email_re(tlds=TLDS):
 EMAIL_RE = build_email_re()
 
 
+class SourceOffsetTracker:
+    """Maps verbatim text tokens back to offsets in the original source
+
+    The html5lib treewalker emits the document text as a series of
+    ``Characters`` and ``SpaceCharacters`` tokens. Each token is a verbatim
+    slice of the original input, with two caveats:
+
+    * tag markup (``<b>``, ``</p>`` and friends) never appears in a text
+      token, so markup characters are skipped when locating a token; and
+    * carriage returns are normalized to line feeds (``\\r\\n`` and a bare
+      ``\\r`` both become ``\\n``).
+
+    The tracker walks the source string once in lockstep with the token
+    stream so every piece of text can be tied back to the character range it
+    occupied in the input passed to :meth:`Linker.linkify`. Those ranges are
+    what ``approved_ranges`` is checked against.
+
+    """
+
+    def __init__(self, source):
+        self.source = source
+        self.cursor = 0
+
+    def span_for(self, data):
+        """Locate a text token in the original source
+
+        Markup between text nodes is skipped automatically and repeated
+        text is disambiguated by always scanning forward from the current
+        cursor.
+
+        :arg str data: the verbatim (modulo newline normalization) text of a
+            ``Characters`` or ``SpaceCharacters`` token
+
+        :returns: a ``(start, end, position_map)`` tuple where ``start`` and
+            ``end`` are half-open offsets into the original source and
+            ``position_map`` maps every offset in the normalized ``data``
+            string (plus one extra for its end) onto the matching source
+            offset. The map lets regex match positions in normalized text be
+            translated back to source positions.
+
+        """
+        if not data:
+            return self.cursor, self.cursor, [self.cursor]
+
+        source = self.source
+        source_len = len(source)
+        candidate = self.cursor
+        while candidate < source_len:
+            source_index = candidate
+            position_map = []
+            matched = True
+            for char in data:
+                if source_index >= source_len:
+                    matched = False
+                    break
+                position_map.append(source_index)
+                if source[source_index] == char:
+                    source_index += 1
+                    continue
+                # Newline normalization: both a bare CR and CRLF collapse
+                # into a single LF in the token data.
+                if char == chr(10) and source[source_index] == chr(13):
+                    source_index += 1
+                    if source_index < source_len and source[source_index] == chr(10):
+                        source_index += 1
+                    continue
+                matched = False
+                break
+            if matched:
+                position_map.append(source_index)
+                self.cursor = source_index
+                return candidate, source_index, position_map
+            # Skip whatever sits between text nodes--tag markup and any
+            # other characters the tokenizer does not emit as text.
+            candidate += 1
+
+        # The tokenizer should only emit text that came from the source; if
+        # our bookkeeping ever disagrees, fail loudly rather than silently
+        # approving the wrong range.
+        raise ValueError("could not map token back to source: %r" % (data,))
+
+    def skip_data(self, length):
+        """Advance the cursor past ``length`` source characters
+
+        Used for text that never becomes a new link (entity tokens and the
+        contents of existing ``<a>`` tags) where the source span still has
+        to be walked so later tokens map to the right place.
+
+        """
+        self.cursor = min(len(self.source), self.cursor + length)
+
+
 class Linker:
     """Convert URL-like strings in an HTML fragment to links
 
@@ -110,6 +202,7 @@ class Linker:
         url_re=URL_RE,
         email_re=EMAIL_RE,
         recognized_tags=html5lib_shim.HTML_TAGS,
+        approved_ranges=None,
     ):
         """Creates a Linker instance
 
@@ -130,6 +223,12 @@ class Linker:
         :arg set recognized_tags: the set of tags that linkify knows about;
             everything else gets escaped
 
+        :arg approved_ranges: iterable of ``(start, end)`` half-open character
+            offsets into the input text; when provided, only brand-new links
+            whose text falls entirely inside one of these ranges are created.
+            Existing ``<a>`` tags are unaffected. ``None`` (the default) means
+            every match is eligible, preserving the historical behavior.
+
         :returns: linkified text as unicode
 
         """
@@ -138,6 +237,7 @@ class Linker:
         self.parse_email = parse_email
         self.url_re = url_re
         self.email_re = email_re
+        self.approved_ranges = approved_ranges
 
         # Create a parser/tokenizer that allows all HTML tags and escapes
         # anything not in that list.
@@ -184,6 +284,8 @@ class Linker:
             parse_email=self.parse_email,
             url_re=self.url_re,
             email_re=self.email_re,
+            source_text=text,
+            approved_ranges=self.approved_ranges,
         )
         return self.serializer.render(filtered)
 
@@ -210,6 +312,8 @@ class LinkifyFilter(html5lib_shim.Filter):
         parse_email=False,
         url_re=URL_RE,
         email_re=EMAIL_RE,
+        source_text=None,
+        approved_ranges=None,
     ):
         """Creates a LinkifyFilter instance
 
@@ -228,6 +332,14 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         :arg email_re: email matching regex
 
+        :arg str source_text: the original input string. Required for
+            ``approved_ranges`` to work; when this filter is used directly
+            as an html5lib filter without it, range approval is disabled.
+
+        :arg approved_ranges: iterable of ``(start, end)`` half-open offsets
+            into ``source_text``. Only new links whose source span is fully
+            inside one of these ranges are created; ``None`` allows all.
+
         """
         super().__init__(source)
 
@@ -237,6 +349,36 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         self.url_re = url_re
         self.email_re = email_re
+
+        # Normalize approved ranges once so the hot path stays cheap.
+        if approved_ranges is None or source_text is None:
+            self.approved_ranges = None
+        else:
+            self.approved_ranges = sorted(
+                (int(start), int(end)) for start, end in approved_ranges
+            )
+
+        # Tracks where the current token lives in the original source text.
+        # It is only meaningful while walking tokens for a single document.
+        self.source_text = source_text
+        self.offset_tracker = (
+            SourceOffsetTracker(source_text) if source_text is not None else None
+        )
+
+    def is_approved(self, start, end):
+        """Whether the source span ``[start, end)`` may become a new link
+
+        With no configured ranges every match is approved, which keeps the
+        pre-existing behavior. Otherwise the whole candidate span has to be
+        contained in a single approved range.
+
+        """
+        if self.approved_ranges is None:
+            return True
+        for range_start, range_end in self.approved_ranges:
+            if range_start <= start and end <= range_end:
+                return True
+        return False
 
     def apply_callbacks(self, attrs, is_new):
         """Given an attrs dict and an is_new bool, runs through callbacks
@@ -285,8 +427,14 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         return "".join(out)
 
-    def handle_email_addresses(self, src_iter):
-        """Handle email addresses in character tokens"""
+    def handle_email_addresses(self, src_iter, position_map=None):
+        """Handle email addresses in character tokens
+
+        :arg position_map: optional list mapping normalized token offsets to
+            offsets in the original source, used to check
+            ``approved_ranges`` against the original input
+
+        """
         for token in src_iter:
             if token["type"] == "Characters":
                 text = token["data"]
@@ -299,6 +447,19 @@ class LinkifyFilter(html5lib_shim.Filter):
                         new_tokens.append(
                             {"type": "Characters", "data": text[end : match.start()]}
                         )
+
+                    # Range approval is decided from where the match
+                    # sits in the original source, not from anything a
+                    # callback might rewrite it into.
+                    source_start, source_end = self._match_source_span(
+                        position_map, match.start(), match.end()
+                    )
+                    if not self.is_approved(source_start, source_end):
+                        new_tokens.append(
+                            {"type": "Characters", "data": match.group(0)}
+                        )
+                        end = match.end()
+                        continue
 
                     # URL-encode the "local-part" according to RFC6068
                     parts = match.group(0).split("@")
@@ -391,8 +552,14 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         return fragment, prefix, suffix
 
-    def handle_links(self, src_iter):
-        """Handle links in character tokens"""
+    def handle_links(self, src_iter, position_map=None):
+        """Handle links in character tokens
+
+        :arg position_map: optional list mapping normalized token offsets to
+            offsets in the original source, used to check
+            ``approved_ranges`` against the original input
+
+        """
         in_a = False  # happens, if parse_email=True and if a mail was found
         for token in src_iter:
             if in_a:
@@ -421,6 +588,24 @@ class LinkifyFilter(html5lib_shim.Filter):
                     # Sometimes we pick up too much in the url match, so look for
                     # bits we should drop and remove them from the match
                     url, prefix, suffix = self.strip_non_url_bits(url)
+
+                    # The approval decision is based on the location of the
+                    # actual link text in the original source. Parentheses,
+                    # commas and trailing periods stripped above are not part
+                    # of the candidate, and any callback rewrites are ignored
+                    # on purpose: a rewrite cannot expand the approved region.
+                    candidate_start, candidate_end = self._match_source_span(
+                        position_map,
+                        match.start() + len(prefix),
+                        match.start() + len(prefix) + len(url),
+                    )
+                    if not self.is_approved(candidate_start, candidate_end):
+                        # Keep the original text verbatim--no link, no callback.
+                        new_tokens.append(
+                            {"type": "Characters", "data": prefix + url + suffix}
+                        )
+                        end = match.end()
+                        continue
 
                     # If there's no protocol, add one
                     if PROTO_RE.search(url):
@@ -566,6 +751,43 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         yield from new_tokens
 
+    def _consume_source(self, length):
+        """Advances the source cursor for text that is not range-checked
+
+        Entity tokens and the verbatim contents of existing ``<a>`` tags map
+        back to the source, but never become brand-new links, so we only
+        need to keep the cursor moving.
+
+        """
+        if self.offset_tracker is not None and length:
+            self.offset_tracker.skip_data(length)
+
+    def _token_source_span(self, token):
+        """Returns the source span and position map for a text token
+
+        Falls back to a zero-width span and ``None`` map when no source text
+        is available, in which case range approval stays disabled anyway.
+
+        """
+        data = token["data"]
+        if self.offset_tracker is None:
+            return 0, 0, None
+        return self.offset_tracker.span_for(data)
+
+    def _match_source_span(self, position_map, start, end):
+        """Translates normalized match offsets into source offsets
+
+        Regex matches run over token data whose carriage returns have been
+        normalized, so their offsets need the per-character map produced by
+        the tracker to line up with the (unnormalized) approved ranges. When
+        no map is available the offsets are used unchanged, which is correct
+        whenever range approval is disabled.
+
+        """
+        if position_map is None:
+            return start, end
+        return position_map[start], position_map[end]
+
     def __iter__(self):
         in_a = False
         in_skip_tag = None
@@ -587,7 +809,17 @@ class LinkifyFilter(html5lib_shim.Filter):
                     in_a = False
                     token_buffer = []
                 else:
-                    token_buffer.extend(list(self.extract_entities(token)))
+                    entity_tokens = list(self.extract_entities(token))
+                    token_buffer.extend(entity_tokens)
+                    # Existing links are never range-checked, but their text
+                    # still occupies source positions we have to walk past.
+                    for buffered_token in entity_tokens:
+                        if buffered_token["type"] in ("Characters", "SpaceCharacters"):
+                            self._token_source_span(buffered_token)
+                        elif buffered_token["type"] == "Entity":
+                            # "&name;" in the source is re-emitted as an
+                            # Entity token; skip the verbatim entity text.
+                            self._consume_source(len(buffered_token["name"]) + 2)
                 continue
 
             if token["type"] in ["StartTag", "EmptyTag"]:
@@ -610,15 +842,27 @@ class LinkifyFilter(html5lib_shim.Filter):
             elif in_skip_tag and self.skip_tags:
                 # NOTE(willkg): We put this clause here since in_a and
                 # switching in and out of in_a takes precedence.
+                if token["type"] in ("Characters", "SpaceCharacters"):
+                    # Skipped content is never linkified, but it still moves
+                    # the source cursor so ranges after the block stay accurate.
+                    self._token_source_span(token)
                 if token["type"] == "EndTag" and token["name"] == in_skip_tag:
                     in_skip_tag = None
 
+            elif token["type"] == "SpaceCharacters":
+                # Whitespace-only tokens can never contain a match, but they
+                # still take up source positions that the tracker must cover.
+                self._token_source_span(token)
+
             elif not in_a and not in_skip_tag and token["type"] == "Characters":
+                _, _, position_map = self._token_source_span(token)
                 new_stream = iter([token])
                 if self.parse_email:
-                    new_stream = self.handle_email_addresses(new_stream)
+                    new_stream = self.handle_email_addresses(
+                        new_stream, position_map=position_map
+                    )
 
-                new_stream = self.handle_links(new_stream)
+                new_stream = self.handle_links(new_stream, position_map=position_map)
 
                 for new_token in new_stream:
                     yield from self.extract_entities(new_token)

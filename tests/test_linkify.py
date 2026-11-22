@@ -819,3 +819,207 @@ class TestLinkify:
 def test_linkify_filter(text, expected):
     cleaner = Cleaner(filters=[LinkifyFilter])
     assert cleaner.clean(text) == expected
+
+
+class TestApprovedRanges:
+    """Tests for the optional approved_ranges argument"""
+
+    def test_none_keeps_historical_behavior(self):
+        text = "a http://example.com b http://example.org"
+        assert linkify(text) == linkify(text, approved_ranges=None)
+
+    def test_empty_ranges_disables_new_links(self):
+        text = "a http://example.com b"
+        assert linkify(text, approved_ranges=[]) == text
+
+    def test_approves_only_matching_occurrence_in_text(self):
+        text = "cap http://example.com cs http://example.org"
+        second = text.find("http://example.org")
+        expected = (
+            "cap http://example.com cs "
+            '<a href="http://example.org" rel="nofollow">http://example.org</a>'
+        )
+        assert linkify(text, approved_ranges=[(second, second + 18)]) == expected
+
+    def test_duplicate_address_only_one_new_link(self):
+        # The same address appears twice, in separate paragraphs. Approving
+        # the second occurrence must produce exactly one new link, and it has
+        # to be the one built from the second piece of text.
+        text = (
+            "<p>caption http://example.com note</p>"
+            "<p>support http://example.com record</p>"
+        )
+        first = text.find("http://example.com")
+        second = text.find("http://example.com", first + 1)
+        linked = linkify(
+            text, approved_ranges=[(second, second + len("http://example.com"))]
+        )
+        expected = (
+            "<p>caption http://example.com note</p><p>support "
+            '<a href="http://example.com" rel="nofollow">http://example.com</a>'
+            " record</p>"
+        )
+        assert linked == expected
+        assert linked.count("<a ") == 1
+        assert linked.index("<a ") > linked.index("support")
+        assert linked.index("<a ") >= second
+
+    def test_duplicate_address_approve_first(self):
+        text = "http://example.com x http://example.com"
+        first = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(first, first + 18)])
+        expected = (
+            '<a href="http://example.com" rel="nofollow">http://example.com</a>'
+            " x http://example.com"
+        )
+        assert linked == expected
+
+    def test_partial_overlap_is_not_approved(self):
+        # A range covering only part of the candidate cannot link it.
+        text = "see http://example.com now"
+        start = text.find("http://example.com")
+        assert linkify(text, approved_ranges=[(start, start + 10)]) == text
+
+    def test_entities_in_same_token_still_map(self):
+        text = "foo &nbsp; http://example.com?a=1&amp;b=2 bar"
+        start = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(start, len(text))])
+        expected = (
+            "foo &nbsp; "
+            '<a href="http://example.com?a=1&amp;b=2" rel="nofollow">'
+            "http://example.com?a=1&amp;b=2</a> bar"
+        )
+        assert linked == expected
+        assert linkify(text, approved_ranges=[(0, 3)]) == text
+
+    def test_entities_between_two_matches(self):
+        text = "http://a.com &nbsp; http://b.com"
+        second = text.find("http://b.com")
+        linked = linkify(text, approved_ranges=[(second, second + 12)])
+        expected = (
+            'http://a.com &nbsp; <a href="http://b.com" rel="nofollow">http://b.com</a>'
+        )
+        assert linked == expected
+
+    def test_adjacent_node_split_keeps_offsets(self):
+        text = "see <b>http://example.com</b> now http://example.org"
+        first = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(first, first + 18)])
+        expected = (
+            "see <b>"
+            '<a href="http://example.com" rel="nofollow">http://example.com</a>'
+            "</b> now http://example.org"
+        )
+        assert linked == expected
+
+    def test_markup_between_repeated_text(self):
+        text = "<i>x</i>x http://example.com"
+        start = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(start, start + 18)])
+        assert linked == (
+            "<i>x</i>x "
+            '<a href="http://example.com" rel="nofollow">http://example.com</a>'
+        )
+        assert linkify(text, approved_ranges=[(0, 1)]) == text
+
+    def test_existing_a_tag_ignores_ranges(self):
+        text = 'txt http://example.com <a href="http://existing.example.com">label</a>'
+        linked = linkify(text, approved_ranges=[(0, 3)])
+        assert linked == (
+            "txt http://example.com "
+            '<a href="http://existing.example.com" rel="nofollow">label</a>'
+        )
+
+    def test_callback_rewrite_respects_approval(self):
+        def bouncer(attrs, new=False):
+            if new:
+                attrs[(None, "href")] = "http://bn.ce/?u=" + attrs[(None, "href")]
+            return attrs
+
+        text = "see http://example.com end"
+        start = text.find("http://example.com")
+        approved = linkify(
+            text, callbacks=[bouncer], approved_ranges=[(start, start + 18)]
+        )
+        assert approved == (
+            'see <a href="http://bn.ce/?u=http://example.com">'
+            "http://example.com</a> end"
+        )
+        assert linkify(text, callbacks=[bouncer], approved_ranges=[(0, 3)]) == text
+
+    def test_callback_text_rewrite_respects_approval(self):
+        def shorten(attrs, new=False):
+            if new:
+                attrs["_text"] = "short"
+            return attrs
+
+        text = "see http://example.com end"
+        start = text.find("http://example.com")
+        linked = linkify(
+            text, callbacks=[shorten], approved_ranges=[(start, start + 18)]
+        )
+        assert linked == 'see <a href="http://example.com">short</a> end'
+        assert linkify(text, callbacks=[shorten], approved_ranges=[(0, 3)]) == text
+
+    def test_callback_dropping_link_still_works_when_approved(self):
+        def drop(attrs, new=False):
+            return None
+
+        text = "see http://example.com end"
+        start = text.find("http://example.com")
+        assert (
+            linkify(text, callbacks=[drop], approved_ranges=[(start, start + 18)])
+            == text
+        )
+
+    def test_crlf_normalization_offsets(self):
+        text = "line1\r\nline2 http://example.com x"
+        start = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(start, start + 18)])
+        assert linked == (
+            "line1\nline2 "
+            '<a href="http://example.com" rel="nofollow">http://example.com</a> x'
+        )
+        assert (
+            linkify(text, approved_ranges=[(0, 5)])
+            == "line1\nline2 http://example.com x"
+        )
+
+    def test_bare_carriage_return_offsets(self):
+        text = "a\rb http://example.com"
+        start = text.find("http://example.com")
+        linked = linkify(text, approved_ranges=[(start, start + 18)])
+        assert linked == (
+            'a\nb <a href="http://example.com" rel="nofollow">http://example.com</a>'
+        )
+
+    def test_skip_tags_keep_later_offsets_accurate(self):
+        text = "aa http://x.com <pre>http://y.com</pre> tail http://z.com"
+        z_start = text.find("http://z.com")
+        linked = linkify(
+            text, skip_tags={"pre"}, approved_ranges=[(z_start, z_start + 12)]
+        )
+        assert linked == (
+            "aa http://x.com <pre>http://y.com</pre> tail "
+            '<a href="http://z.com" rel="nofollow">http://z.com</a>'
+        )
+
+    def test_email_uses_ranges(self):
+        text = "a foo@example.com b bar@example.org"
+        foo_start = text.find("foo@example.com")
+        linked = linkify(
+            text,
+            parse_email=True,
+            approved_ranges=[(foo_start, foo_start + 15)],
+        )
+        assert linked == (
+            'a <a href="mailto:foo@example.com">foo@example.com</a> b bar@example.org'
+        )
+
+    def test_linker_class_accepts_ranges(self):
+        text = "a http://example.com b"
+        start = text.find("http://example.com")
+        linker = Linker(approved_ranges=[(start, start + 18)])
+        assert linker.linkify(text) == (
+            'a <a href="http://example.com" rel="nofollow">http://example.com</a> b'
+        )
