@@ -76,6 +76,7 @@ from . import tpkt
 from . import udp
 from . import vrrp
 from . import yahoo
+from . import direction
 
 # Note: list() is used to get a copy of the dict in order to avoid
 # "RuntimeError: dictionary changed size during iteration"

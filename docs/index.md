@@ -15,6 +15,7 @@ pip install dpkt
 
 ### Documentation
 - [DPKT Key Concepts for Creating Parsers](creating_parsers.md)
+- [Offline Direction Attribution](direction.md)
 - [Changelog](changelog.md)
 - [Authors](authors.md)
 - [Contributing](contributing.md)
