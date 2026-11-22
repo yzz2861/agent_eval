@@ -110,3 +110,18 @@ class FileScanner(object):
         Read an integer from the stream, using current endianness
         """
         return read_int(self.stream, size, signed=signed, endianness=self.endianness)
+
+    def compare(self, other, approvals=None, **kwargs):
+        """
+        Compare this scanner stream with another capture without writing.
+
+        This is a convenience wrapper around
+        pcapng.review.compare_files
+        """
+        from pcapng.review import compare_files
+
+        return compare_files(self.stream, other, approvals=approvals, **kwargs)
+
+    def diff(self, other, approvals=None, **kwargs):
+        """Alias for compare"""
+        return self.compare(other, approvals=approvals, **kwargs)
