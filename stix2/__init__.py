@@ -31,6 +31,9 @@ from .datastore.filesystem import (
 )
 from .datastore.filters import Filter
 from .datastore.memory import MemorySink, MemorySource, MemoryStore
+from .datastore.replay import (
+    ReplayEntry, ReplayReceipt, SearchRecord, record_search, replay_search,
+)
 from .datastore.taxii import (
     TAXIICollectionSink, TAXIICollectionSource, TAXIICollectionStore,
 )

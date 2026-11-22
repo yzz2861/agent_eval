@@ -9,6 +9,7 @@ from stix2 import v20, v21
 from stix2.base import _STIXBase
 from stix2.datastore import DataSink, DataSource, DataStoreMixin
 from stix2.datastore.filters import FilterSet, apply_common_filters
+from stix2.datastore.replay import record_search, replay_search
 from stix2.parsing import parse
 
 
@@ -146,6 +147,17 @@ class MemoryStore(DataStoreMixin):
 
         """
         return self.source.load_from_file(*args, **kwargs)
+
+    def record_search(self, *args, **kwargs):
+        """Freeze the current search as an offline-replayable record.
+
+        Delegates to the paired :class:`MemorySource`.
+        """
+        return self.source.record_search(*args, **kwargs)
+
+    def replay_search(self, *args, **kwargs):
+        """Replay a recorded search offline via the paired source."""
+        return self.source.replay_search(*args, **kwargs)
 
 
 class MemorySink(DataSink):
@@ -365,3 +377,24 @@ class MemorySource(DataSource):
 
         _add(self, stix_data, self.allow_custom, version)
     load_from_file.__doc__ = MemoryStore.load_from_file.__doc__
+
+    def record_search(self, query=None, search_time=None, spec_version=None):
+        """Freeze the current search as an offline-replayable record.
+
+        The record binds the original filters, the object range provably
+        visible in this source at search time, and the selected STIX
+        specification version.  See
+        :func:`stix2.datastore.replay.record_search`.
+        """
+        return record_search(
+            self, query, search_time=search_time, spec_version=spec_version,
+        )
+
+    def replay_search(self, record, extra_objects=None):
+        """Replay a recorded search offline against the frozen record.
+
+        This source's current contents are never used to substitute missing
+        replay data.  See
+        :func:`stix2.datastore.replay.replay_search`.
+        """
+        return replay_search(record, extra_objects=extra_objects)
