@@ -1,0 +1,73 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:11111111-1111-4111-8111-111111111111",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-02-11T10:00:00Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "orders-api-REL-US-EARLY",
+      "name": "orders-api",
+      "version": "4.2.0",
+      "purl": "pkg:generic/orders-api@4.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "acme:release_id",
+          "value": "REL-US-EARLY"
+        },
+        {
+          "name": "acme:channel",
+          "value": "us-east"
+        }
+      ],
+      "evidence": {
+        "identity": [
+          {
+            "field": "hash",
+            "confidence": 1.0,
+            "concludedValue": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+            "methods": [
+              {
+                "technique": "hash-comparison",
+                "confidence": 1.0,
+                "value": "artifact digest from the release manifest"
+              }
+            ],
+            "tools": [
+              "tool:forgepack"
+            ]
+          },
+          {
+            "field": "name",
+            "confidence": 1.0,
+            "concludedValue": "orders-api"
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "artifact://us-east/orders-api-4.2.0.tar.gz",
+            "symbol": "us-east",
+            "additionalContext": "release_id=REL-US-EARLY; observed_at=2026-02-11T10:00:00Z"
+          }
+        ]
+      }
+    },
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "bom-ref": "tool:forgepack",
+          "name": "forgepack"
+        }
+      ]
+    }
+  }
+}

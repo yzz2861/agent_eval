@@ -4,6 +4,7 @@
 
 * [Build & Serialize](complex_serialize.py)
 * [Deserialize](complex_deserialize.py)
+* [Offline build-tool impact assessment](build_tool_impact/README.md)
 
 ## Data models
 

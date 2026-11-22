@@ -1,0 +1,73 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:55555555-5555-4555-8555-555555555555",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-03T12:00:00Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "orders-api-REL-LATAM-COPY",
+      "name": "orders-api",
+      "version": "4.2.0",
+      "purl": "pkg:generic/orders-api@4.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "acme:release_id",
+          "value": "REL-LATAM-COPY"
+        },
+        {
+          "name": "acme:channel",
+          "value": "latam"
+        }
+      ],
+      "evidence": {
+        "identity": [
+          {
+            "field": "hash",
+            "confidence": 1.0,
+            "concludedValue": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+            "methods": [
+              {
+                "technique": "hash-comparison",
+                "confidence": 1.0,
+                "value": "artifact digest from the release manifest"
+              }
+            ],
+            "tools": [
+              "tool:forgepack"
+            ]
+          },
+          {
+            "field": "name",
+            "confidence": 1.0,
+            "concludedValue": "orders-api"
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "artifact://latam/orders-api-4.2.0.tar.gz",
+            "symbol": "latam",
+            "additionalContext": "release_id=REL-LATAM-COPY; observed_at=2026-05-03T12:00:00Z"
+          }
+        ]
+      }
+    },
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "bom-ref": "tool:forgepack",
+          "name": "forgepack"
+        }
+      ]
+    }
+  }
+}

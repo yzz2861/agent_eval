@@ -1,0 +1,164 @@
+{
+  "schema": "acme-frozen-build-archive/1",
+  "archive_id": "ACME-BBA-2026-05-31",
+  "frozen": true,
+  "frozen_at": "2026-05-31T12:00:00Z",
+  "note": "Immutable export of the build-behaviour ledger. No conclusion may be inherited from a copy or mirror record.",
+  "builds": [
+    {
+      "build_id": "B-4101",
+      "release_id": "REL-US-EARLY",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "us-east"
+      },
+      "provenance_kind": "built",
+      "source_build_id": null,
+      "built_at": "2026-02-10T14:05:00Z",
+      "outcome": "success",
+      "tool_invocations": [
+        {
+          "tool": "forgepack",
+          "version": "2.3.0",
+          "source": {
+            "repository": "https://github.com/acme/forgepack",
+            "commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            "sha256": "00fb493a8cba32b50ecb18dda4c7bec5e6825045fc7555c3e6c214b79d0ddee8"
+          },
+          "fetched_at": "2026-02-08T09:12:00Z",
+          "used_at": "2026-02-10T14:00:00Z",
+          "phase": "compile"
+        }
+      ]
+    },
+    {
+      "build_id": "B-4102",
+      "release_id": "REL-EU-BAD",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "eu-central"
+      },
+      "provenance_kind": "built",
+      "source_build_id": null,
+      "built_at": "2026-03-20T08:40:00Z",
+      "outcome": "success",
+      "tool_invocations": [
+        {
+          "tool": "forgepack",
+          "version": "2.4.1",
+          "source": {
+            "repository": "https://github.com/acme/forgepack",
+            "commit": "9f2c7d1e4b6a8c0d2e4f60718293a4b5c6d7e8f9",
+            "sha256": "3eb43e330685dc080bcc76520721f6ae390a1a452886d122bc653d48007dd978"
+          },
+          "fetched_at": "2026-03-19T22:10:00Z",
+          "used_at": "2026-03-20T08:30:00Z",
+          "phase": "compile"
+        }
+      ]
+    },
+    {
+      "build_id": "B-4103",
+      "release_id": "REL-APAC-REBUILD",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "ap-southeast"
+      },
+      "provenance_kind": "rebuilt",
+      "source_build_id": "B-4101",
+      "built_at": "2026-04-12T03:20:00Z",
+      "outcome": "success",
+      "tool_invocations": [
+        {
+          "tool": "forgepack",
+          "version": "2.4.4",
+          "source": {
+            "repository": "https://github.com/acme/forgepack",
+            "commit": "5a6b7c8d9e0f1234567890abcdefabcdef123456",
+            "sha256": "da51cd3aa2ccfaddbde6164dd4b483ced34b16005c3bd6caef0173d5f1595f24"
+          },
+          "fetched_at": "2026-04-11T11:00:00Z",
+          "used_at": "2026-04-12T03:10:00Z",
+          "phase": "compile"
+        }
+      ]
+    },
+    {
+      "build_id": "B-4104",
+      "release_id": "REL-CN-PINNED",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "cn-north"
+      },
+      "provenance_kind": "built",
+      "source_build_id": null,
+      "built_at": "2026-01-15T06:15:00Z",
+      "outcome": "success",
+      "tool_invocations": [
+        {
+          "tool": "forgepack",
+          "version": "2.4.1",
+          "source": {
+            "repository": "https://github.com/acme/forgepack",
+            "commit": "c0ffee1234567890abcdef1234567890abcdef12",
+            "sha256": "55f1e0c0a0208a99728b0b2ae5421f7db5d96f3a528cbfb998f9f92e3ccbdb91"
+          },
+          "fetched_at": "2026-01-10T02:00:00Z",
+          "used_at": "2026-01-15T06:00:00Z",
+          "phase": "compile"
+        }
+      ]
+    },
+    {
+      "build_id": "B-4105",
+      "release_id": "REL-LATAM-COPY",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "latam"
+      },
+      "provenance_kind": "copied",
+      "source_build_id": "B-4101",
+      "built_at": "2026-05-02T17:45:00Z",
+      "outcome": "copied",
+      "tool_invocations": []
+    },
+    {
+      "build_id": "B-4106",
+      "release_id": "REL-US-LATE",
+      "artifact": {
+        "name": "orders-api",
+        "version": "4.2.0",
+        "sha256": "84ff0b62b508841b3010e8707eb0b0c9463bb8a052580903b08f93c30829cda0",
+        "channel": "us-west"
+      },
+      "provenance_kind": "built",
+      "source_build_id": null,
+      "built_at": "2026-04-20T12:30:00Z",
+      "outcome": "success",
+      "tool_invocations": [
+        {
+          "tool": "forgepack",
+          "version": "2.4.4",
+          "source": {
+            "repository": "https://github.com/acme/forgepack",
+            "commit": "5a6b7c8d9e0f1234567890abcdefabcdef123456",
+            "sha256": "da51cd3aa2ccfaddbde6164dd4b483ced34b16005c3bd6caef0173d5f1595f24"
+          },
+          "fetched_at": "2026-04-19T08:00:00Z",
+          "used_at": "2026-04-20T12:20:00Z",
+          "phase": "compile"
+        }
+      ]
+    }
+  ]
+}
