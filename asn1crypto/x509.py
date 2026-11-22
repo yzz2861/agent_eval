@@ -3027,6 +3027,25 @@ class Certificate(Sequence):
 
         return False
 
+    def compare_to_csr(self, certification_request, policy=None):
+        """
+        Compares this issued certificate with an approved CSR.
+
+        :param certification_request:
+            An asn1crypto.csr.CertificationRequest object, or DER/PEM bytes
+
+        :param policy:
+            An asn1crypto.approval.ApprovalPolicy object, or a dict of
+            ApprovalPolicy keyword arguments
+
+        :return:
+            An asn1crypto.approval.ComparisonView
+        """
+
+        from .approval import compare_csr_to_certificate
+
+        return compare_csr_to_certificate(certification_request, self, policy=policy)
+
 
 # The structures are taken from the OpenSSL source file x_x509a.c, and specify
 # extra information that is added to X.509 certificates to store trust

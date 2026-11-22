@@ -131,3 +131,22 @@ class CertificationRequest(Sequence):
         ('signature_algorithm', SignedDigestAlgorithm),
         ('signature', OctetBitString),
     ]
+
+    def compare_to_certificate(self, certificate, policy=None):
+        """
+        Compares this approved CSR with an issued certificate.
+
+        :param certificate:
+            An asn1crypto.x509.Certificate object, or DER/PEM bytes
+
+        :param policy:
+            An asn1crypto.approval.ApprovalPolicy object, or a dict of
+            ApprovalPolicy keyword arguments
+
+        :return:
+            An asn1crypto.approval.ComparisonView
+        """
+
+        from .approval import compare_csr_to_certificate
+
+        return compare_csr_to_certificate(self, certificate, policy=policy)

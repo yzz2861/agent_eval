@@ -38,6 +38,7 @@ def load_order():
         'asn1crypto.x509',
         'asn1crypto.crl',
         'asn1crypto.csr',
+        'asn1crypto.approval',
         'asn1crypto.ocsp',
         'asn1crypto.cms',
         'asn1crypto.pdf',

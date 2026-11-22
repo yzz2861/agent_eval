@@ -1,5 +1,11 @@
 # changelog
 
+## Unreleased
+
+ - Added asn1crypto.approval for comparing an approved CSR with an issued
+   certificate, including legal narrowing, issuer-added provenance and
+   request-path evidence for duplicate or differently encoded requests
+
 ## 1.5.1
 
  - Handle RSASSA-PSS in `keys.PrivateKeyInfo.bit_size` and
