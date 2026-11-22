@@ -1,0 +1,15 @@
+{
+  "roster_id": "roster-candidates",
+  "frozen_at": "2026-11-22T00:00:00+08:00",
+  "keys": [
+    {"keyid": "key-1", "owners": [{"domain": "domain-alpha", "status": "confirmed"}]},
+    {"keyid": "key-2", "owners": [
+      {"domain": "domain-alpha", "status": "candidate"},
+      {"domain": "domain-bravo", "status": "candidate"}
+    ]},
+    {"keyid": "key-3", "owners": [
+      {"domain": "domain-alpha", "status": "candidate"},
+      {"domain": "domain-charlie", "status": "candidate"}
+    ]}
+  ]
+}

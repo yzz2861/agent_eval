@@ -1,0 +1,18 @@
+{
+  "policy_id": "release-slots-alt",
+  "rules": [
+    {
+      "rule_id": "two-slots",
+      "type": "slots",
+      "slots": [
+        ["key-1", "key-2"],
+        ["key-3"]
+      ]
+    },
+    {
+      "rule_id": "backup-combo",
+      "type": "combination",
+      "keyids": ["key-1", "key-3"]
+    }
+  ]
+}

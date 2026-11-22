@@ -40,6 +40,19 @@ pip install securesystemslib[hsm]
 - Other issues and requests: [*Open a new
   issue*](https://github.com/secure-systems-lab/securesystemslib/issues/new)
 
+## Offline signing-policy review
+
+The policy-review subpackage is an offline, read-only companion to the
+DSSE signing code. It takes the key combinations accepted by a DSSE policy and
+a frozen roster mapping each key to its control domain, then reports the
+minimum number of domains that can jointly satisfy the policy (concentration)
+and the minimum number whose absence blocks every legal release
+(availability). Candidate-only ownership produces a pending-confirmation range
+rather than a single number, and every result includes witness sets and a
+per-key domain table for manual verification. See
+[POLICY_REVIEW.md](docs/POLICY_REVIEW.md) and the examples under
+[docs/policy_review_examples](docs/policy_review_examples).
+
 ## Contribute
 See [Instructions for contributors](docs/CONTRIBUTING.md).
 

@@ -1,0 +1,12 @@
+{
+  "roster_id": "roster-shared-owner",
+  "frozen_at": "2026-11-22T00:00:00+08:00",
+  "keys": [
+    {"keyid": "key-1", "owners": [{"domain": "domain-alpha", "status": "confirmed"}]},
+    {"keyid": "key-2", "owners": [{"domain": "domain-alpha", "status": "confirmed"}]},
+    {"keyid": "key-3", "owners": [{"domain": "domain-alpha", "status": "confirmed"}]},
+    {"keyid": "key-4", "owners": [{"domain": "domain-alpha", "status": "confirmed"}]},
+    {"keyid": "key-5", "owners": [{"domain": "domain-bravo", "status": "confirmed"}]},
+    {"keyid": "key-6", "owners": [{"domain": "domain-charlie", "status": "confirmed"}]}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "policy_id": "release-candidate-range",
+  "rules": [
+    {
+      "rule_id": "rule-east",
+      "type": "combination",
+      "keyids": ["key-1", "key-2"]
+    },
+    {
+      "rule_id": "rule-west",
+      "type": "combination",
+      "keyids": ["key-1", "key-3"]
+    }
+  ]
+}

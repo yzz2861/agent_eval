@@ -1,0 +1,11 @@
+{
+  "policy_id": "release-3of6",
+  "rules": [
+    {
+      "rule_id": "three-of-six",
+      "type": "threshold",
+      "keyids": ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"],
+      "threshold": 3
+    }
+  ]
+}
