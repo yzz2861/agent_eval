@@ -398,6 +398,19 @@ and newer come with [billion laughs
 protection](https://libexpat.github.io/doc/api/latest/#billion-laughs)
 against XML bombs.
 
+## Grant-scoped reads for import services
+
+`defusedxml.scoped` (also importable as `defusedxml.managed`) adds a managed
+read entry on top of the defused SAX parser.  An import service can give every
+business processor its own `ProcessorView` containing only the tree segments
+declared in the corresponding `ReadGrant`.  Views carry segment boundaries and
+missing-item hints, but have no reference to the complete tree, source bytes,
+parser, or handler.  Unauthorized lookups raise an opaque `AccessDenied`.
+
+See [SCOPED_READING.md](SCOPED_READING.md) for the API and security model.  Run
+`python demo_scoped_import.py` and `python test_scoped.py` for the placeholder
+fixture and the two stand-in processors.
+
 ## How to avoid XML vulnerabilities
 
 Update to Python 3.6.8, 3.7.1, or newer. The SAX and DOM parser do not

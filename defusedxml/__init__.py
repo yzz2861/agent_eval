@@ -17,6 +17,23 @@ from .common import (
     NotSupportedError,
     _apply_defusing,
 )
+from .scoped import (
+    AccessDenied,
+    AuditEntry,
+    DeniedEvidence,
+    FailureEvidence,
+    GrantView,
+    ManagedReader,
+    ProcessorView,
+    ReadGrant,
+    ScopedDocument,
+    ScopedReadError,
+    ScopedSegment,
+    SegmentBoundary,
+    SourceInfo,
+    open_scoped,
+    read_scoped,
+)
 
 
 def defuse_stdlib():
@@ -60,9 +77,24 @@ def defuse_stdlib():
 __version__ = "0.8.0rc2"
 
 __all__ = [
+    "AccessDenied",
+    "AuditEntry",
     "DefusedXmlException",
     "DTDForbidden",
+    "DeniedEvidence",
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
+    "FailureEvidence",
+    "GrantView",
+    "ManagedReader",
     "NotSupportedError",
+    "ProcessorView",
+    "ReadGrant",
+    "ScopedDocument",
+    "ScopedReadError",
+    "ScopedSegment",
+    "SegmentBoundary",
+    "SourceInfo",
+    "open_scoped",
+    "read_scoped",
 ]

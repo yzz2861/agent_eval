@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<import>
+  <orders>
+    <order id="ORD-PLACEHOLDER-1">
+      <customer>ORDER-CUSTOMER-PLACEHOLDER-1</customer>
+      <total>111.11</total>
+    </order>
+    <order id="ORD-PLACEHOLDER-2">
+      <customer>ORDER-CUSTOMER-PLACEHOLDER-2</customer>
+      <total>222.22</total>
+    </order>
+  </orders>
+  <billing>
+    <invoice id="INV-PLACEHOLDER-1">
+      <account>BILLING-ACCOUNT-PLACEHOLDER</account>
+      <amount>333.33</amount>
+    </invoice>
+  </billing>
+  <audit>
+    <note>AUDIT-ONLY-PLACEHOLDER</note>
+  </audit>
+</import>

@@ -24,6 +24,8 @@ from defusedxml import (
 
 from xml.etree.ElementTree import Element as ElementAfterImport
 
+from test_scoped import ScopedReadTests
+
 if sys.version_info < (3, 7):
     warnings.filterwarnings("once", category=DeprecationWarning)
 
@@ -591,6 +593,7 @@ def test_main():
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,
+        ScopedReadTests,
     ]
     for c in cls:
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(c))

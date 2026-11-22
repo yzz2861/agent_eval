@@ -3,7 +3,7 @@ include README.txt CHANGES.txt LICENSE README.html
 include void.css
 include MANIFEST.in
 include setup.py Makefile
-include tests.py
+include tests.py test_scoped.py demo_scoped_import.py SCOPED_READING.md
 recursive-include xmltestdata *.xml
 recursive-include other *.php *.pl *.rb *.py *.txt
 
