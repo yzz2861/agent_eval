@@ -17,6 +17,9 @@ Summary
     olefile.OleFileIO
     olefile.OleMetadata
     olefile.enable_logging
+    olefile.check_directory_evidence
+    olefile.DirectoryEvidence
+    olefile.DirectoryEntrySnapshot
 
 
 olefile module
@@ -26,5 +29,4 @@ olefile module
     :members:
     :undoc-members:
     :show-inheritance:
-
 

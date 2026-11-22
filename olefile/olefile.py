@@ -98,7 +98,11 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'check_directory_evidence',
+           'DirectoryEntrySnapshot', 'DirectoryEvidence',
+           'DirectoryEvidenceParent', 'DirectoryEvidenceRelation',
+           'DirectoryEvidenceConflict', 'DIRECTORY_EVIDENCE_PROVABLE',
+           'DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION'
 ]
 
 import io
@@ -1014,6 +1018,942 @@ class OleDirectoryEntry:
         return filetime2datetime(self.createTime)
 
 
+#--- Directory evidence -------------------------------------------------------
+
+DIRECTORY_EVIDENCE_PROVABLE = 'provable'
+DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION = 'needs_confirmation'
+
+
+def _directory_entry_sort_key(name):
+    """
+    Return the ordering key used by OLE sibling trees.
+
+    [MS-CFB] sorts directory entry names by their UTF-16 length first, then by
+    a case-insensitive name comparison.  This is deliberately different from
+    the convenient name-only sort used by OleDirectoryEntry.build_storage_tree.
+    """
+    if name is None:
+        return (0, u'')
+    return (_directory_name_length(name), name.upper())
+
+
+def _directory_name_length(name):
+    """Return the name length in UTF-16 code units when possible."""
+    if not name:
+        return 0
+    try:
+        return len(name.encode('UTF-16LE')) // 2
+    except (AttributeError, UnicodeError):
+        return len(name)
+
+
+class DirectoryEntrySnapshot(object):
+    """
+    An immutable-by-convention view of one 128-byte directory entry.
+
+    ``sid_left`` and ``sid_right`` are sibling links; ``sid_child`` is the
+    first child of a storage.  ``DirectoryEvidence`` objects are built from
+    these records so that callers can test a damaged directory without writing
+    it back to an OLE file.
+    """
+
+    __slots__ = ('sid', 'name', 'entry_type', 'sid_left', 'sid_right',
+                 'sid_child', 'color', 'namelength')
+
+    def __init__(self, sid, name, entry_type, sid_left=NOSTREAM,
+                 sid_right=NOSTREAM, sid_child=NOSTREAM, color=1,
+                 namelength=None):
+        self.sid = sid
+        self.name = name
+        self.entry_type = entry_type
+        self.sid_left = sid_left
+        self.sid_right = sid_right
+        self.sid_child = sid_child
+        self.color = color
+        self.namelength = namelength
+
+    @property
+    def left(self):
+        return self.sid_left
+
+    @property
+    def right(self):
+        return self.sid_right
+
+    @property
+    def child(self):
+        return self.sid_child
+
+    @property
+    def order_key(self):
+        return _directory_entry_sort_key(self.name)
+
+    def replace(self, **changes):
+        values = dict(
+            sid=self.sid,
+            name=self.name,
+            entry_type=self.entry_type,
+            sid_left=self.sid_left,
+            sid_right=self.sid_right,
+            sid_child=self.sid_child,
+            color=self.color,
+            namelength=self.namelength,
+        )
+        values.update(changes)
+        return DirectoryEntrySnapshot(**values)
+
+    def as_dict(self):
+        return dict(
+            sid=self.sid,
+            name=self.name,
+            entry_type=self.entry_type,
+            sid_left=self.sid_left,
+            sid_right=self.sid_right,
+            sid_child=self.sid_child,
+            color=self.color,
+            namelength=self.namelength,
+        )
+
+    def __repr__(self):
+        return ('DirectoryEntrySnapshot(sid=%r, name=%r, entry_type=%r, '
+                'sid_left=%r, sid_right=%r, sid_child=%r)' %
+                (self.sid, self.name, self.entry_type, self.sid_left,
+                 self.sid_right, self.sid_child))
+
+
+def _directory_entry_snapshot(entry, sid=None):
+    """Coerce an entry-like object to a DirectoryEntrySnapshot."""
+    if isinstance(entry, DirectoryEntrySnapshot):
+        return entry
+
+    if isinstance(entry, dict):
+        def value(*names):
+            for name in names:
+                if name in entry:
+                    return entry[name]
+            raise KeyError(names[0])
+        if sid is None:
+            sid = value('sid')
+        return DirectoryEntrySnapshot(
+            sid=sid,
+            name=value('name'),
+            entry_type=value('entry_type', 'type'),
+            sid_left=value('sid_left', 'left'),
+            sid_right=value('sid_right', 'right'),
+            sid_child=value('sid_child', 'child'),
+            color=entry.get('color', 1),
+            namelength=entry.get('namelength'),
+        )
+
+    if isinstance(entry, (tuple, list)):
+        if sid is None:
+            sid = entry[0]
+        return DirectoryEntrySnapshot(
+            sid=sid,
+            name=entry[1],
+            entry_type=entry[2],
+            sid_left=entry[3] if len(entry) > 3 else NOSTREAM,
+            sid_right=entry[4] if len(entry) > 4 else NOSTREAM,
+            sid_child=entry[5] if len(entry) > 5 else NOSTREAM,
+            color=entry[6] if len(entry) > 6 else 1,
+            namelength=entry[7] if len(entry) > 7 else None,
+        )
+
+    if sid is None:
+        sid = entry.sid
+    return DirectoryEntrySnapshot(
+        sid=sid,
+        name=entry.name,
+        entry_type=entry.entry_type,
+        sid_left=entry.sid_left,
+        sid_right=entry.sid_right,
+        sid_child=entry.sid_child,
+        color=getattr(entry, 'color', 1),
+        namelength=getattr(entry, 'namelength', None),
+    )
+
+
+def _read_directory_entry_snapshots(ole):
+    """Read every directory entry without changing any parsed tree state."""
+    fp = ole.directory_fp
+    if fp is None:
+        raise OleFileError('OLE directory is not loaded')
+
+    old_position = fp.tell()
+    try:
+        fp.seek(0)
+        data = fp.read(fp.size)
+    finally:
+        fp.seek(old_position)
+
+    count = len(data) // OleDirectoryEntry.DIRENTRY_SIZE
+    entries = []
+    for sid in range(count):
+        start = sid * OleDirectoryEntry.DIRENTRY_SIZE
+        raw = data[start:start + OleDirectoryEntry.DIRENTRY_SIZE]
+        if len(raw) != OleDirectoryEntry.DIRENTRY_SIZE:
+            break
+        fields = struct.unpack(OleDirectoryEntry.STRUCT_DIRENTRY, raw)
+        name_raw = fields[0]
+        namelength = fields[1]
+        if namelength > 64:
+            namelength = 64
+        if namelength >= 2:
+            name = ole._decode_utf16_str(name_raw[:namelength - 2])
+        else:
+            name = u''
+        entries.append(DirectoryEntrySnapshot(
+            sid=sid,
+            name=name,
+            entry_type=fields[2],
+            color=fields[3],
+            sid_left=fields[4],
+            sid_right=fields[5],
+            sid_child=fields[6],
+            namelength=namelength,
+        ))
+    return tuple(entries)
+
+
+class DirectoryEvidenceRelation(object):
+    """
+    One observed relationship from a storage to a child entry.
+
+    The same child can occur more than once in a damaged directory.  Each
+    occurrence keeps its own ``via`` route from the owning storage, so a
+    repeated physical SID is not silently merged with a same-named but
+    different SID.
+    """
+
+    def __init__(self, owner_sid, child_sid, child_name, entry_type, via,
+                 owner_path=None, child_path=None):
+        self.owner_sid = owner_sid
+        self.child_sid = child_sid
+        self.child_name = child_name
+        self.entry_type = entry_type
+        self.via = tuple(via)
+        self.owner_path = owner_path
+        self.child_path = child_path
+        self.ownership_ok = True
+        self.order_ok = True
+        self.name_ok = True
+        self.reasons = []
+        self.conflict_ids = []
+        self.status = DIRECTORY_EVIDENCE_PROVABLE
+
+    @property
+    def edge(self):
+        return self.via[-1]
+
+    @property
+    def source_sid(self):
+        return self.edge[0]
+
+    @property
+    def parent_sid(self):
+        return self.owner_sid
+
+    @property
+    def parent_path(self):
+        return self.owner_path
+
+    @property
+    def link(self):
+        return self.edge[1]
+
+    @property
+    def key(self):
+        return (self.owner_sid, self.child_sid, self.via)
+
+    @property
+    def order_key(self):
+        return _directory_entry_sort_key(self.child_name)
+
+    @property
+    def path(self):
+        return self.child_path
+
+    @property
+    def provable(self):
+        return self.status == DIRECTORY_EVIDENCE_PROVABLE
+
+    def as_dict(self):
+        return dict(
+            owner_sid=self.owner_sid,
+            owner_path=self.owner_path,
+            child_sid=self.child_sid,
+            child_name=self.child_name,
+            child_path=self.child_path,
+            entry_type=self.entry_type,
+            source_sid=self.source_sid,
+            link=self.link,
+            edge=self.edge,
+            via=self.via,
+            ownership_ok=self.ownership_ok,
+            order_ok=self.order_ok,
+            name_ok=self.name_ok,
+            reasons=tuple(self.reasons),
+            conflict_ids=tuple(self.conflict_ids),
+            status=self.status,
+        )
+
+    def __repr__(self):
+        return ('DirectoryEvidenceRelation(owner_sid=%r, child_sid=%r, '
+                'child_name=%r, link=%r, status=%r)' %
+                (self.owner_sid, self.child_sid, self.child_name,
+                 self.link, self.status))
+
+
+class DirectoryEvidenceConflict(object):
+    """
+    A minimal witness for one directory-evidence contradiction.
+
+    ``edges`` contains only the directed directory links needed to exhibit the
+    contradiction.  It is intentionally smaller than the complete set of
+    relations in the affected branches.
+    """
+
+    def __init__(self, kind, message, edges=(), sids=(), owner_sids=(),
+                 names=(), relation_keys=()):
+        self.kind = kind
+        self.message = message
+        self.edges = _deduplicate_edges(edges)
+        self.sids = tuple(sids)
+        self.owner_sids = tuple(owner_sids)
+        self.names = tuple(names)
+        self.relation_keys = tuple(relation_keys)
+        self.id = None
+
+    @property
+    def witness(self):
+        return self.edges
+
+    @property
+    def minimal_witness(self):
+        return self.edges
+
+    @property
+    def minimal_edges(self):
+        return self.edges
+
+    def as_dict(self):
+        return dict(
+            id=self.id,
+            kind=self.kind,
+            message=self.message,
+            edges=self.edges,
+            witness=self.edges,
+            sids=self.sids,
+            owner_sids=self.owner_sids,
+            names=self.names,
+            relation_keys=self.relation_keys,
+        )
+
+    def __repr__(self):
+        return ('DirectoryEvidenceConflict(kind=%r, sids=%r, edges=%r)' %
+                (self.kind, self.sids, self.edges))
+
+
+class DirectoryEvidenceParent(object):
+    """Evidence for the children of the root or one ordinary storage."""
+
+    def __init__(self, owner_sid, owner_name, child_sid,
+                 entry_type=STGTY_STORAGE):
+        self.owner_sid = owner_sid
+        self.owner_name = owner_name
+        self.child_sid = child_sid
+        self.entry_type = entry_type
+        self.path = None
+        self.relations = []
+        self.conflicts = []
+        self.inorder_sids = []
+        self.status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+
+    @property
+    def owner_path(self):
+        return self.path
+
+    @property
+    def sid(self):
+        return self.owner_sid
+
+    @property
+    def name(self):
+        return self.owner_name
+
+    @property
+    def provable(self):
+        return self.status == DIRECTORY_EVIDENCE_PROVABLE
+
+    @property
+    def children(self):
+        return tuple(relation.child_sid for relation in self.relations)
+
+    @property
+    def owned_sids(self):
+        return tuple(sorted(set(self.children)))
+
+    @property
+    def provable_relations(self):
+        return tuple(relation for relation in self.relations
+                     if relation.provable)
+
+    @property
+    def uncertain_relations(self):
+        return tuple(relation for relation in self.relations
+                     if not relation.provable)
+
+    @property
+    def minimal_witnesses(self):
+        return tuple(conflict.witness for conflict in self.conflicts)
+
+    def as_dict(self):
+        return dict(
+            owner_sid=self.owner_sid,
+            owner_name=self.owner_name,
+            owner_path=self.path,
+            entry_type=self.entry_type,
+            child_sid=self.child_sid,
+            status=self.status,
+            owned_sids=self.owned_sids,
+            inorder_sids=tuple(self.inorder_sids),
+            relations=tuple(relation.as_dict()
+                            for relation in self.relations),
+            conflicts=tuple(conflict.as_dict()
+                            for conflict in self.conflicts),
+        )
+
+    def __repr__(self):
+        return ('DirectoryEvidenceParent(owner_sid=%r, owner_name=%r, '
+                'status=%r, relations=%d)' %
+                (self.owner_sid, self.owner_name, self.status,
+                 len(self.relations)))
+
+
+class DirectoryEvidence(object):
+    """Read-only report for the directory links of an OLE storage tree."""
+
+    def __init__(self, entries, parents, conflicts, unclaimed,
+                 status, root_sid):
+        self.entries = tuple(entries)
+        self.parents = tuple(parents)
+        self.conflicts = tuple(conflicts)
+        self.unclaimed = tuple(unclaimed)
+        self.status = status
+        self.root_sid = root_sid
+
+    @property
+    def provable(self):
+        return self.status == DIRECTORY_EVIDENCE_PROVABLE
+
+    @property
+    def relations(self):
+        result = []
+        for parent in self.parents:
+            result.extend(parent.relations)
+        return tuple(result)
+
+    @property
+    def provable_relations(self):
+        return tuple(relation for relation in self.relations
+                     if relation.provable)
+
+    @property
+    def uncertain_relations(self):
+        return tuple(relation for relation in self.relations
+                     if not relation.provable)
+
+    @property
+    def manual_parents(self):
+        return tuple(parent for parent in self.parents
+                     if parent.status != DIRECTORY_EVIDENCE_PROVABLE)
+
+    @property
+    def minimal_witnesses(self):
+        return tuple(conflict.witness for conflict in self.conflicts)
+
+    def parent(self, sid):
+        for parent in self.parents:
+            if parent.owner_sid == sid:
+                return parent
+        return None
+
+    get_parent = parent
+
+    def as_dict(self):
+        return dict(
+            status=self.status,
+            root_sid=self.root_sid,
+            entries=tuple(entry.as_dict() for entry in self.entries),
+            parents=tuple(parent.as_dict() for parent in self.parents),
+            conflicts=tuple(conflict.as_dict()
+                            for conflict in self.conflicts),
+            unclaimed=self.unclaimed,
+        )
+
+    to_dict = as_dict
+
+    def __getitem__(self, key):
+        return self.as_dict()[key]
+
+    def __repr__(self):
+        return ('DirectoryEvidence(status=%r, parents=%d, conflicts=%d, '
+                'unclaimed=%r)' %
+                (self.status, len(self.parents), len(self.conflicts),
+                 self.unclaimed))
+
+
+def _deduplicate_edges(edges):
+    result = []
+    seen = set()
+    for edge in edges:
+        if edge not in seen:
+            seen.add(edge)
+            result.append(edge)
+    return tuple(result)
+
+
+def _minimal_difference(first, second):
+    """Return the links that remain after removing a shared route prefix."""
+    common = 0
+    limit = min(len(first), len(second))
+    while common < limit and first[common] == second[common]:
+        common += 1
+    return _deduplicate_edges(tuple(first[common:]) +
+                              tuple(second[common:]))
+
+
+def _name_is_valid(name):
+    if not name:
+        return False
+    if len(name) > 31:
+        return False
+    forbidden_chars = (u'/', u'\\', u':', u'!', u'\x00')
+    if isinstance(name, bytes):
+        forbidden_chars = tuple(c.encode('ascii') for c in forbidden_chars)
+    for forbidden in forbidden_chars:
+        if forbidden in name:
+            return False
+    return True
+
+
+class _DirectoryEvidenceBuilder(object):
+    def __init__(self, entries):
+        self.entries = tuple(entries)
+        self.by_sid = {}
+        self.parents = []
+        self.parent_by_sid = {}
+        self.conflicts = []
+        self._relations_by_key = {}
+        self._active_entry_types = (STGTY_STORAGE, STGTY_STREAM)
+
+        for entry in self.entries:
+            if entry.sid in self.by_sid:
+                raise ValueError('duplicate directory SID %r' % entry.sid)
+            self.by_sid[entry.sid] = entry
+
+    def _add_conflict(self, conflict, parents):
+        self.conflicts.append(conflict)
+        added = set()
+        for parent in parents:
+            if parent is None or id(parent) in added:
+                continue
+            parent.conflicts.append(conflict)
+            added.add(id(parent))
+        return conflict
+
+    def _relation(self, parent, source_sid, link, child_sid, prefix,
+                  child=None):
+        edge = (source_sid, link, child_sid)
+        return DirectoryEvidenceRelation(
+            owner_sid=parent.owner_sid,
+            child_sid=child_sid,
+            child_name=None if child is None else child.name,
+            entry_type=None if child is None else child.entry_type,
+            via=tuple(prefix) + (edge,),
+        )
+
+    def _visit_children(self, parent, source_sid, link, child_sid, prefix,
+                        path_sids, seen_sids, first_relation):
+        if child_sid == NOSTREAM:
+            return
+
+        edge = (source_sid, link, child_sid)
+        child = self.by_sid.get(child_sid)
+        relation = self._relation(parent, source_sid, link, child_sid,
+                                  prefix, child)
+        parent.relations.append(relation)
+        self._relations_by_key[relation.key] = relation
+
+        if child is None:
+            relation.ownership_ok = False
+            relation.reasons.append('child SID is outside the directory')
+            self._add_conflict(DirectoryEvidenceConflict(
+                'invalid_link',
+                'child SID %r is outside the directory' % child_sid,
+                edges=(edge,),
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                relation_keys=(relation.key,),
+            ), (parent,))
+            parent.inorder_sids.append(child_sid)
+            return
+
+        if child.entry_type not in self._active_entry_types:
+            relation.ownership_ok = False
+            relation.reasons.append(
+                'child is not an ordinary stream or storage')
+            self._add_conflict(DirectoryEvidenceConflict(
+                'invalid_link',
+                'SID %r has entry type %r and cannot be a child here' %
+                (child_sid, child.entry_type),
+                edges=(edge,),
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                names=(child.name,),
+                relation_keys=(relation.key,),
+            ), (parent,))
+            parent.inorder_sids.append(child_sid)
+            return
+
+        if not _name_is_valid(child.name):
+            relation.name_ok = False
+            relation.reasons.append('child name does not satisfy CFB rules')
+            self._add_conflict(DirectoryEvidenceConflict(
+                'invalid_name',
+                'SID %r has an invalid directory name %r' %
+                (child_sid, child.name),
+                edges=(edge,),
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                names=(child.name,),
+                relation_keys=(relation.key,),
+            ), (parent,))
+
+        first = first_relation.get(child_sid)
+        if child_sid in path_sids:
+            first.ownership_ok = False
+            first.reasons.append('child SID repeats on this route')
+            relation.ownership_ok = False
+            relation.reasons.append('child SID repeats on this route')
+            witness = _deduplicate_edges(first.via + relation.via)
+            cycle_witness = _minimal_difference(first.via, relation.via)
+            self._add_conflict(DirectoryEvidenceConflict(
+                'duplicate_ownership',
+                'SID %r is attributed twice under storage SID %r' %
+                (child_sid, parent.owner_sid),
+                edges=witness,
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                names=(child.name,),
+                relation_keys=(first.key, relation.key),
+            ), (parent,))
+            self._add_conflict(DirectoryEvidenceConflict(
+                'cycle',
+                'directory sibling links contain a cycle through SID %r' %
+                child_sid,
+                edges=cycle_witness,
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                relation_keys=(first.key, relation.key),
+            ), (parent,))
+            parent.inorder_sids.append(child_sid)
+            return
+
+        if child_sid in seen_sids:
+            first.ownership_ok = False
+            first.reasons.append(
+                'same physical directory entry is reached twice')
+            relation.ownership_ok = False
+            relation.reasons.append(
+                'same physical directory entry is reached twice')
+            witness = _deduplicate_edges(first.via + relation.via)
+            self._add_conflict(DirectoryEvidenceConflict(
+                'duplicate_ownership',
+                'SID %r is attributed twice under storage SID %r' %
+                (child_sid, parent.owner_sid),
+                edges=witness,
+                sids=(child_sid,),
+                owner_sids=(parent.owner_sid,),
+                names=(child.name,),
+                relation_keys=(first.key, relation.key),
+            ), (parent,))
+            parent.inorder_sids.append(child_sid)
+            return
+
+        seen_sids.add(child_sid)
+        first_relation[child_sid] = relation
+        path_sids.add(child_sid)
+
+        self._visit_children(parent, child_sid, 'left', child.sid_left,
+                             relation.via, path_sids, seen_sids,
+                             first_relation)
+        parent.inorder_sids.append(child_sid)
+        self._visit_children(parent, child_sid, 'right', child.sid_right,
+                             relation.via, path_sids, seen_sids,
+                             first_relation)
+        path_sids.remove(child_sid)
+
+    def _check_names(self, parent):
+        by_name = {}
+        for relation in parent.relations:
+            if relation.child_name is None:
+                continue
+            key = relation.child_name.upper()
+            by_name.setdefault(key, []).append(relation)
+
+        for name_key, relations in sorted(by_name.items()):
+            first_by_sid = {}
+            for relation in relations:
+                first_by_sid.setdefault(relation.child_sid, relation)
+            sids = sorted(first_by_sid)
+            for pos, first_sid in enumerate(sids):
+                for second_sid in sids[pos + 1:]:
+                    first = first_by_sid[first_sid]
+                    second = first_by_sid[second_sid]
+                    if first_sid == second_sid:
+                        continue
+                    first.name_ok = False
+                    second.name_ok = False
+                    first.reasons.append(
+                        'name collides with a different SID')
+                    second.reasons.append(
+                        'name collides with a different SID')
+                    self._add_conflict(DirectoryEvidenceConflict(
+                        'duplicate_name',
+                        'distinct SIDs %r and %r share name %r' %
+                        (first_sid, second_sid, first.child_name),
+                        edges=_deduplicate_edges(first.via + second.via),
+                        sids=(first_sid, second_sid),
+                        owner_sids=(parent.owner_sid,),
+                        names=(first.child_name, second.child_name),
+                        relation_keys=(first.key, second.key),
+                    ), (parent,))
+
+    def _check_order(self, parent):
+        unique = []
+        seen = set()
+        first_by_sid = {}
+        for relation in parent.relations:
+            first_by_sid.setdefault(relation.child_sid, relation)
+        for child_sid in parent.inorder_sids:
+            relation = first_by_sid.get(child_sid)
+            if relation.child_name is None or relation.child_sid in seen:
+                continue
+            seen.add(relation.child_sid)
+            unique.append(relation)
+        for previous, current in zip(unique, unique[1:]):
+            if previous.order_key > current.order_key:
+                previous.order_ok = False
+                current.order_ok = False
+                previous.reasons.append(
+                    'sibling order puts a larger name before a smaller one')
+                current.reasons.append(
+                    'sibling order puts a larger name before a smaller one')
+                self._add_conflict(DirectoryEvidenceConflict(
+                    'order',
+                    'siblings %r (SID %r) and %r (SID %r) are out of order' %
+                    (previous.child_name, previous.child_sid,
+                     current.child_name, current.child_sid),
+                    edges=_deduplicate_edges(previous.via + current.via),
+                    sids=(previous.child_sid, current.child_sid),
+                    owner_sids=(parent.owner_sid,),
+                    names=(previous.child_name, current.child_name),
+                    relation_keys=(previous.key, current.key),
+                ), (parent,))
+
+    def _check_cross_parent_ownership(self):
+        owners = {}
+        for parent in self.parents:
+            for relation in parent.relations:
+                owners.setdefault(relation.child_sid, []).append(
+                    (parent, relation))
+
+        for child_sid, occurrences in sorted(owners.items()):
+            by_parent = {}
+            for parent, relation in occurrences:
+                by_parent.setdefault(parent.owner_sid, (parent, relation))
+            parent_sids = sorted(by_parent)
+            if len(parent_sids) < 2:
+                continue
+            for pos, first_sid in enumerate(parent_sids):
+                for second_sid in parent_sids[pos + 1:]:
+                    first_parent, first = by_parent[first_sid]
+                    second_parent, second = by_parent[second_sid]
+                    first.ownership_ok = False
+                    second.ownership_ok = False
+                    first.reasons.append(
+                        'same SID is also owned by storage %r' % second_sid)
+                    second.reasons.append(
+                        'same SID is also owned by storage %r' % first_sid)
+                    self._add_conflict(DirectoryEvidenceConflict(
+                        'duplicate_ownership',
+                        'SID %r is owned by storage SIDs %r and %r' %
+                        (child_sid, first_sid, second_sid),
+                        edges=_deduplicate_edges(first.via + second.via),
+                        sids=(child_sid,),
+                        owner_sids=(first_sid, second_sid),
+                        names=(first.child_name, second.child_name),
+                        relation_keys=(first.key, second.key),
+                    ), (first_parent, second_parent))
+
+    def _assign_paths(self):
+        root = self.parent_by_sid.get(0)
+        if root is not None:
+            root.path = ()
+        queue = [root] if root is not None else []
+        visited = set()
+        while queue:
+            parent = queue.pop(0)
+            if parent.owner_sid in visited:
+                continue
+            visited.add(parent.owner_sid)
+            for relation in parent.relations:
+                child = self.parent_by_sid.get(relation.child_sid)
+                if child is None or child.path is not None:
+                    continue
+                if relation.child_name is None:
+                    continue
+                if parent.path is None:
+                    continue
+                child.path = tuple(parent.path) + (relation.child_name,)
+                queue.append(child)
+
+        for parent in self.parents:
+            for relation in parent.relations:
+                relation.owner_path = parent.path
+                if parent.path is None or relation.child_name is None:
+                    relation.child_path = None
+                else:
+                    relation.child_path = (tuple(parent.path) +
+                                           (relation.child_name,))
+
+    def _finalize(self, root_sid):
+        for index, conflict in enumerate(self.conflicts):
+            conflict.id = index
+            for key in conflict.relation_keys:
+                relation = self._relations_by_key.get(key)
+                if relation is not None and index not in relation.conflict_ids:
+                    relation.conflict_ids.append(index)
+
+        for parent in self.parents:
+            for relation in parent.relations:
+                if (not relation.ownership_ok or not relation.order_ok or
+                        not relation.name_ok or relation.conflict_ids):
+                    relation.reasons.append('relation needs manual review')
+                    relation.status = \
+                        DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+                else:
+                    relation.status = DIRECTORY_EVIDENCE_PROVABLE
+            if parent.owner_sid != 0 and parent.path is None:
+                parent.status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+                continue
+            if parent.conflicts:
+                parent.status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+                continue
+            if parent.uncertain_relations:
+                parent.status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+            else:
+                parent.status = DIRECTORY_EVIDENCE_PROVABLE
+
+        claimed = set()
+        for parent in self.parents:
+            claimed.update(parent.children)
+        unclaimed = tuple(sorted(
+            entry.sid for entry in self.entries
+            if entry.sid != root_sid and
+            entry.entry_type in self._active_entry_types and
+            entry.sid not in claimed))
+
+        if not self.parents:
+            status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+        elif (self.conflicts or unclaimed or
+              any(parent.status != DIRECTORY_EVIDENCE_PROVABLE
+                  for parent in self.parents)):
+            status = DIRECTORY_EVIDENCE_NEEDS_CONFIRMATION
+        else:
+            status = DIRECTORY_EVIDENCE_PROVABLE
+        return status, unclaimed
+
+    def build(self):
+        root_entry = self.by_sid.get(0)
+        root_sid = 0
+        if root_entry is None or root_entry.entry_type != STGTY_ROOT:
+            self._add_conflict(DirectoryEvidenceConflict(
+                'missing_root',
+                'directory entry SID 0 is not an OLE root entry',
+                sids=(0,),
+            ), ())
+        for entry in self.entries:
+            if entry.entry_type == STGTY_ROOT and entry.sid != 0:
+                self._add_conflict(DirectoryEvidenceConflict(
+                    'invalid_link',
+                    'SID %r is a second root entry' % entry.sid,
+                    sids=(entry.sid,),
+                    names=(entry.name,),
+                ), ())
+
+        parent_entries = []
+        if root_entry is not None and root_entry.entry_type == STGTY_ROOT:
+            parent_entries.append(root_entry)
+        parent_entries.extend(
+            entry for entry in self.entries
+            if entry.entry_type == STGTY_STORAGE)
+        parent_entries.sort(key=lambda entry: entry.sid)
+
+        for entry in parent_entries:
+            parent = DirectoryEvidenceParent(
+                owner_sid=entry.sid,
+                owner_name=entry.name,
+                child_sid=entry.sid_child,
+                entry_type=entry.entry_type,
+            )
+            self.parents.append(parent)
+            self.parent_by_sid[entry.sid] = parent
+            self._visit_children(
+                parent, entry.sid, 'child', entry.sid_child, (),
+                set(), set(), {})
+
+        for parent in self.parents:
+            self._check_names(parent)
+            self._check_order(parent)
+
+        self._check_cross_parent_ownership()
+        self._assign_paths()
+        status, unclaimed = self._finalize(root_sid)
+        return DirectoryEvidence(
+            entries=self.entries,
+            parents=self.parents,
+            conflicts=self.conflicts,
+            unclaimed=unclaimed,
+            status=status,
+            root_sid=root_sid,
+        )
+
+
+def check_directory_evidence(source):
+    """
+    Return a read-only evidence report for OLE directory child relationships.
+
+    :param source: an open :class:`OleFileIO` instance, or an iterable of
+        :class:`DirectoryEntrySnapshot` / ``OleDirectoryEntry`` / mapping /
+        tuple records.  Records provide ``sid``, ``name``, ``entry_type``,
+        ``sid_left``, ``sid_right`` and ``sid_child``.
+    :returns: :class:`DirectoryEvidence`
+
+    The function never writes to the archive and never calls
+    ``append_kids``.  In particular, damaged links remain visible exactly as
+    observed, and no ``kids`` list or ``used`` flag is modified.
+    """
+    if hasattr(source, 'directory_fp') and hasattr(source, 'root'):
+        entries = _read_directory_entry_snapshots(source)
+    else:
+        entries = []
+        for entry in source:
+            entries.append(_directory_entry_snapshot(entry))
+    return _DirectoryEvidenceBuilder(entries).build()
+
+
 #--- OleFileIO ----------------------------------------------------------------
 
 class OleFileIO:
@@ -1916,6 +2856,23 @@ class OleFileIO:
         files = []
         self._list(files, [], self.root, streams, storages)
         return files
+
+    def check_directory_evidence(self):
+        """
+        Return a read-only evidence report for directory child relationships.
+
+        Unlike the normal ``kids`` construction, this check keeps every
+        observed child pointer unchanged.  It is intended for repaired or
+        damaged files where the same physical directory entry may appear in
+        more than one branch.
+
+        :returns: :class:`DirectoryEvidence`
+        """
+        return check_directory_evidence(self)
+
+    def directory_evidence(self):
+        """Alias for :meth:`check_directory_evidence`."""
+        return self.check_directory_evidence()
 
     def _find(self, filename):
         """
