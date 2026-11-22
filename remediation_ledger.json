@@ -1,0 +1,50 @@
+{
+  "policy": {
+    "grace_workdays": 10,
+    "discovery_date": "2026-11-09",
+    "audit_date": "2026-11-23",
+    "holidays": []
+  },
+  "branches": [
+    {
+      "name": "release/payment",
+      "findings": [
+        "63e1b8ad9e948f948bc19035801e8529c4c94b13",
+        "d6b66ddd9ea7dbe760114bfe9a97352a5e139134",
+        "34c2246140bc39b1fce81d9be2124f713a06bdaf"
+      ],
+      "downtime": [
+        {"date": "2026-11-12", "evidence": "INC-0901 支付网关发布冻结(已证实停机)"},
+        {"date": "2026-11-13", "evidence": "INC-0901 支付网关发布冻结(已证实停机)"}
+      ]
+    },
+    {
+      "name": "release/merchant",
+      "findings": [
+        "d6b66ddd9ea7dbe760114bfe9a97352a5e139134",
+        "2785b2a1c217669b3bd8fbcb4516006e61181237",
+        "513e0a36963ae1e8431c041b744679ee578b7c44"
+      ],
+      "downtime": [
+        {"date": "2026-11-13", "evidence": "INC-0917 商户服务停机(已证实停机)"}
+      ]
+    },
+    {
+      "name": "release/settlement",
+      "findings": [
+        "daefe0b4345a654580dcad25c7c11ff4c944a8c0",
+        "f0778f3e140a61d5bbbed5430773e52af2f5fba4",
+        "27c6929aef41ae2bcadac15ca6abcaff72cda9cd",
+        "4ada9713ec27066b2ffe0b7bd9c9c8d635dc4ab2",
+        "1348b145fa1a555461c1b790a2f66614781091e9",
+        "be4fc4886bd949b369d5e092eb87494f12e57e5b",
+        "9279619d0c9a9529b0b223e3b809f4df24b8ba8b",
+        "11200d1bf5e1eb358b5d823c443347d97e982a85"
+      ],
+      "downtime": []
+    }
+  ],
+  "merges": [
+    {"source": "release/merchant", "target": "release/payment", "date": "2026-11-16"}
+  ]
+}
