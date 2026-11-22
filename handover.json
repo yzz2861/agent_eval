@@ -1,0 +1,5098 @@
+{
+  "generated_at": "2026-11-22T18:22:02.059109+00:00",
+  "read_only": true,
+  "policy": {
+    "approval_cap": 2,
+    "approval_roster_present": false,
+    "selection_rule": "CUs whose DW_AT_name + DW_AT_comp_dir identity is confirmed independently in BOTH the .debug_sup and .gnu_debugaltlink packages, then capped at the approved number",
+    "path_trust": "A candidate found at a conventional path is never accepted on path alone; it must satisfy the declaration bytes (CRC32 or build ID, or a derivable .debug_sup digest)."
+  },
+  "materials": [
+    {
+      "role": "object",
+      "path": "test/testfiles_for_unittests/debuglink",
+      "sha1": "02c7f921036839dd3acd101a3de948526eecd315",
+      "build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+      "has_debug_info": false,
+      "declaration": null,
+      "verification": {
+        "kind": "gnu_debuglink",
+        "declared_filename": "debuglink.debug",
+        "declared_crc32": "0x29b7c5f1",
+        "candidates": [
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/debuglink.debug",
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/debuglink.debug"
+        ],
+        "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/debuglink.debug",
+        "status": "confirmed",
+        "method": "CRC32 over the whole debug file",
+        "actual_crc32": "0x29b7c5f1",
+        "crc32_matches": true,
+        "object_build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+        "debug_build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+        "build_id_matches": true,
+        "binding": "crc32+build-id"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 270,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "debuglink.c",
+            "comp_dir": "/home/gabriele/Projects",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/home/gabriele/Projects/debuglink.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        }
+      ]
+    },
+    {
+      "role": "debug-file",
+      "path": "test/testfiles_for_unittests/debuglink.debug",
+      "sha1": "9e10d22165d696a473c95069deec2846b4f60867",
+      "build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "none",
+        "status": "not-linked",
+        "reason": "no separate-debug declaration in this file"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 270,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "debuglink.c",
+            "comp_dir": "/home/gabriele/Projects",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/home/gabriele/Projects/debuglink.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        }
+      ]
+    },
+    {
+      "role": "supplementary",
+      "path": "test/testfiles_for_unittests/test_debugsup.common",
+      "sha1": "6f6e3c8283fce2b2ef52e9e262def3d21a77a717",
+      "build_id": null,
+      "has_debug_info": true,
+      "verification": {
+        "kind": "debug_sup",
+        "declared_version": 5,
+        "declared_is_supplementary": 1,
+        "declared_filename": null,
+        "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+        "candidates": [],
+        "resolved_path": null,
+        "status": "supplementary",
+        "method": "DWARF5 .debug_sup filename + checksum bytes",
+        "reason": "this file declares itself as a supplementary object; it has no outbound link to resolve"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 906,
+          "tag": "DW_TAG_partial_unit",
+          "identity": {
+            "name": null,
+            "comp_dir": null,
+            "name_form": null,
+            "comp_dir_form": null,
+            "source": "supplementary",
+            "inline": false,
+            "key": null
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        },
+        {
+          "offset": "0x38e",
+          "version": 5,
+          "unit_length": 21,
+          "tag": "DW_TAG_partial_unit",
+          "identity": {
+            "name": null,
+            "comp_dir": null,
+            "name_form": null,
+            "comp_dir_form": null,
+            "source": "supplementary",
+            "inline": false,
+            "key": null
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        }
+      ]
+    },
+    {
+      "role": "debug-primary",
+      "path": "test/testfiles_for_unittests/test_debugsup1.debug",
+      "sha1": "e6e52d902ecbb97899cd78ec2aa25f931f06c7d2",
+      "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "debug_sup",
+        "declared_version": 5,
+        "declared_is_supplementary": 0,
+        "declared_filename": "test_debugsup.common",
+        "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+        "candidates": [
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_debugsup.common"
+        ],
+        "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+        "status": "unconfirmed",
+        "method": "DWARF5 .debug_sup filename + checksum bytes",
+        "candidate_sha1": "6f6e3c8283fce2b2ef52e9e262def3d21a77a717",
+        "candidate_build_id": null,
+        "candidate_self_declared_supplementary": true,
+        "candidate_declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+        "token_matches_candidate": true,
+        "sha1_matches_file": false,
+        "md5_matches_file": false,
+        "build_id_matches": false,
+        "reason": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 36,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x28",
+          "version": 5,
+          "unit_length": 611,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_ref_sup4": 14,
+            "DW_FORM_strp_sup": 42
+          },
+          "external_refs_total": 56,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 853,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 31,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x1f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x80",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 856,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x89",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 877,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x92",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 866,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x9b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 855,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xa4",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 615,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Word",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xb5",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1128,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_namesz",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xc0",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1119,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_descsz",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xcb",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 643,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_type",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xd7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 815,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Nhdr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 905,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xee",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 806,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xf8",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1098,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 288,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_data",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 309,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x135",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x11a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 678,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x124",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1108,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x12f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1029,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_port",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x13a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 790,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 729,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_zero",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 812,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x32c",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x15c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 51,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in6",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x168",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1086,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x174",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1019,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_port",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x180",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 715,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_flowinfo",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x18b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 780,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x197",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 601,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_scope_id",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1be",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 885,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1c7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 791,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1d1",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 799,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "s_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1dd",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 895,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_port_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ed",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 85,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr8",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1f6",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 39,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr16",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ff",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 0,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr32",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x20d",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x218",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x223",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x22a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 781,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in6_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x234",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1038,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__in6_u",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x247",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 826,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "nhdr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 638,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "name",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 221,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0xdd",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x25f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 581,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "desc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x272",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x279",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 650,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__abi_tag",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x28f",
+          "version": 5,
+          "unit_length": 56,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_ref_sup4": 2,
+            "DW_FORM_strp_sup": 2
+          },
+          "external_refs_total": 4,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x2cb",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x2ee",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "debug-primary",
+      "path": "test/testfiles_for_unittests/test_debugsup2.debug",
+      "sha1": "e6e52d902ecbb97899cd78ec2aa25f931f06c7d2",
+      "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "debug_sup",
+        "declared_version": 5,
+        "declared_is_supplementary": 0,
+        "declared_filename": "test_debugsup.common",
+        "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+        "candidates": [
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_debugsup.common"
+        ],
+        "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+        "status": "unconfirmed",
+        "method": "DWARF5 .debug_sup filename + checksum bytes",
+        "candidate_sha1": "6f6e3c8283fce2b2ef52e9e262def3d21a77a717",
+        "candidate_build_id": null,
+        "candidate_self_declared_supplementary": true,
+        "candidate_declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+        "token_matches_candidate": true,
+        "sha1_matches_file": false,
+        "md5_matches_file": false,
+        "build_id_matches": false,
+        "reason": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 36,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x28",
+          "version": 5,
+          "unit_length": 611,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_ref_sup4": 14,
+            "DW_FORM_strp_sup": 42
+          },
+          "external_refs_total": 56,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 853,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 31,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x1f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x80",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 856,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x89",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 877,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x92",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 866,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x9b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 855,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xa4",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 615,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Word",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xb5",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1128,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_namesz",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xc0",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1119,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_descsz",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xcb",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 643,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_type",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xd7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 815,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Nhdr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 905,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xee",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 806,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xf8",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1098,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 288,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_data",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 309,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x135",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x11a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 678,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x124",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1108,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x12f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1029,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_port",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x13a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 790,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 729,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_zero",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 812,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x32c",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x15c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 51,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in6",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x168",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1086,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_family",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x174",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1019,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_port",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x180",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 715,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_flowinfo",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x18b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 780,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x197",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 601,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_scope_id",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1be",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 885,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1c7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 791,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1d1",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 799,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "s_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1dd",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 895,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_port_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ed",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 85,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr8",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1f6",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 39,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr16",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ff",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 0,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr32",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x20d",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x218",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x223",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x22a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 781,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in6_addr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x234",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1038,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__in6_u",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x247",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 826,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "nhdr",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 638,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "name",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 221,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0xdd",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x25f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 581,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "desc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x272",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x279",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 650,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__abi_tag",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x28f",
+          "version": 5,
+          "unit_length": 56,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_ref_sup4": 2,
+            "DW_FORM_strp_sup": 2
+          },
+          "external_refs_total": 4,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x2cb",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "offset": "0x2ee",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "debug-file",
+      "path": "test/testfiles_for_unittests/test_gnudebugaltlink.common",
+      "sha1": "ea015874d2b6cf646ca93ecc8bad8803fc55057d",
+      "build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "none",
+        "status": "not-linked",
+        "reason": "no separate-debug declaration in this file"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 906,
+          "tag": "DW_TAG_partial_unit",
+          "identity": {
+            "name": null,
+            "comp_dir": null,
+            "name_form": null,
+            "comp_dir_form": null,
+            "source": "supplementary",
+            "inline": false,
+            "key": null
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        },
+        {
+          "offset": "0x38e",
+          "version": 5,
+          "unit_length": 21,
+          "tag": "DW_TAG_partial_unit",
+          "identity": {
+            "name": null,
+            "comp_dir": null,
+            "name_form": null,
+            "comp_dir_form": null,
+            "source": "supplementary",
+            "inline": false,
+            "key": null
+          },
+          "identity_confirmed": false,
+          "external_ref_counts": {},
+          "external_refs_total": 0,
+          "unresolved_refs": 0,
+          "references": []
+        }
+      ]
+    },
+    {
+      "role": "debug-primary",
+      "path": "test/testfiles_for_unittests/test_gnudebugaltlink1.debug",
+      "sha1": "391843215673037cb283308f444b3e4151defba0",
+      "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "gnu_debugaltlink",
+        "declared_filename": "test_gnudebugaltlink.common",
+        "declared_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+        "candidates": [
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_gnudebugaltlink.common"
+        ],
+        "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+        "status": "confirmed",
+        "method": "20-byte build ID in .gnu_debugaltlink",
+        "candidate_sha1": "ea015874d2b6cf646ca93ecc8bad8803fc55057d",
+        "candidate_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+        "build_id_matches": true,
+        "binding": "build-id"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 36,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x28",
+          "version": 5,
+          "unit_length": 611,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_ref_alt": 14,
+            "DW_FORM_GNU_strp_alt": 42
+          },
+          "external_refs_total": 56,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 853,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 31,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x1f",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x80",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 856,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "int32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x89",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 877,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint8_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x92",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 866,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint16_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x9b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 855,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xa4",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 615,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Word",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xb5",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1128,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_namesz",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xc0",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1119,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_descsz",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xcb",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 643,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_type",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xd7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 815,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Nhdr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 905,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xee",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 806,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xf8",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1098,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 288,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_data",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 309,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x135",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x11a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 678,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x124",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1108,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x12f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1029,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_port",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x13a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 790,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 729,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_zero",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 812,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x32c",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x15c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 51,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in6",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x168",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1086,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x174",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1019,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_port",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x180",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 715,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_flowinfo",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x18b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 780,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x197",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 601,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_scope_id",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1be",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 885,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1c7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 791,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1d1",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 799,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "s_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1dd",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 895,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_port_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ed",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 85,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr8",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1f6",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 39,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr16",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ff",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 0,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr32",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x20d",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x218",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x223",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x22a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 781,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in6_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x234",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1038,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__in6_u",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x247",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 826,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "nhdr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 638,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "name",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 221,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0xdd",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x25f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 581,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "desc",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x272",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x279",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 650,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__abi_tag",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x28f",
+          "version": 5,
+          "unit_length": 56,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_ref_alt": 2,
+            "DW_FORM_GNU_strp_alt": 2
+          },
+          "external_refs_total": 4,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x2cb",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x2ee",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "debug-primary",
+      "path": "test/testfiles_for_unittests/test_gnudebugaltlink2.debug",
+      "sha1": "391843215673037cb283308f444b3e4151defba0",
+      "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+      "has_debug_info": true,
+      "verification": {
+        "kind": "gnu_debugaltlink",
+        "declared_filename": "test_gnudebugaltlink.common",
+        "declared_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+        "candidates": [
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+          "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_gnudebugaltlink.common"
+        ],
+        "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+        "status": "confirmed",
+        "method": "20-byte build ID in .gnu_debugaltlink",
+        "candidate_sha1": "ea015874d2b6cf646ca93ecc8bad8803fc55057d",
+        "candidate_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+        "build_id_matches": true,
+        "binding": "build-id"
+      },
+      "cus": [
+        {
+          "offset": "0x0",
+          "version": 5,
+          "unit_length": 36,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x28",
+          "version": 5,
+          "unit_length": 611,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_ref_alt": 14,
+            "DW_FORM_GNU_strp_alt": 42
+          },
+          "external_refs_total": 56,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 853,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x74",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 31,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x1f",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x80",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 856,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "int32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x89",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 877,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint8_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x92",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 866,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint16_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x9b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 855,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "uint32_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xa4",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 615,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Word",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xb5",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1128,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_namesz",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xc0",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1119,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_descsz",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xcb",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 643,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "n_type",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xd7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 815,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "Elf64_Nhdr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 905,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xe2",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xee",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 806,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0xf8",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1098,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 288,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sa_data",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x103",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 309,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x135",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x11a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 678,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x124",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1108,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x12f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1029,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_port",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x13a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 790,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 729,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin_zero",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x145",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 812,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0x32c",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x15c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 51,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sockaddr_in6",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x168",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1086,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_family",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x174",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1019,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_port",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x180",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 715,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_flowinfo",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x18b",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 780,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x197",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 601,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "sin6_scope_id",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1be",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 885,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1c7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 791,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1d1",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 799,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "s_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1dd",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 895,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in_port_t",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ed",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 85,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr8",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1f6",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 39,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr16",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x1ff",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 0,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__u6_addr32",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x20d",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x218",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x223",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x22a",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 781,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "in6_addr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x234",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1038,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__in6_u",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x247",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 826,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "nhdr",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 638,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "name",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x252",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 221,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_array_type",
+              "target_offset": "0xdd",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x25f",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 581,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "desc",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x272",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 38,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x26",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x279",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 650,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__abi_tag",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x28f",
+          "version": 5,
+          "unit_length": 56,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_ref_alt": 2,
+            "DW_FORM_GNU_strp_alt": 2
+          },
+          "external_refs_total": 4,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_GNU_ref_alt",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x2cb",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        },
+        {
+          "offset": "0x2ee",
+          "version": 5,
+          "unit_length": 31,
+          "tag": "DW_TAG_compile_unit",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_GNU_strp_alt",
+            "comp_dir_form": "DW_FORM_GNU_strp_alt",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "identity_confirmed": true,
+          "external_ref_counts": {
+            "DW_FORM_GNU_strp_alt": 3
+          },
+          "external_refs_total": 3,
+          "unresolved_refs": 0,
+          "references": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "confirmed"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_GNU_strp_alt",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "confirmed"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "duplicates": [
+    {
+      "sha1": "391843215673037cb283308f444b3e4151defba0",
+      "paths": [
+        "test/testfiles_for_unittests/test_gnudebugaltlink1.debug",
+        "test/testfiles_for_unittests/test_gnudebugaltlink2.debug"
+      ],
+      "distinct_identities": 1,
+      "note": "byte-identical copies; they must not be counted as independent approval evidence"
+    },
+    {
+      "sha1": "e6e52d902ecbb97899cd78ec2aa25f931f06c7d2",
+      "paths": [
+        "test/testfiles_for_unittests/test_debugsup1.debug",
+        "test/testfiles_for_unittests/test_debugsup2.debug"
+      ],
+      "distinct_identities": 1,
+      "note": "byte-identical copies; they must not be counted as independent approval evidence"
+    }
+  ],
+  "cross_family": {
+    "debug_sup_primary_build_ids": [
+      "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095"
+    ],
+    "gnu_debugaltlink_primary_build_ids": [
+      "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095"
+    ],
+    "debug_sup_common": "test/testfiles_for_unittests/test_debugsup.common",
+    "gnu_debugaltlink_common": "test/testfiles_for_unittests/test_gnudebugaltlink.common",
+    "debug_sup_common_debug_info_sha1": "5c981ea6927ed8c359fc12982fed3331fba86902",
+    "gnu_debugaltlink_common_debug_info_sha1": "5c981ea6927ed8c359fc12982fed3331fba86902",
+    "shared_original_cu_identities": [
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S",
+      "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+      "/usr/src/debug/glibc/csu/init.c"
+    ],
+    "shared_original_cu_count": 5,
+    "intersection_original_cu_identities": [
+      "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+      "/usr/src/debug/glibc/csu/init.c"
+    ],
+    "intersection_original_cu_count": 2
+  },
+  "path_trust_probes": [
+    {
+      "declaration": "gnu_debuglink",
+      "expected": "0x29b7c5f1",
+      "alternatives": [
+        {
+          "path": "test/testfiles_for_unittests/dwarf_v5_forms.debug",
+          "crc32": "0xd4ccd3a1",
+          "would_be_accepted": false,
+          "reject_reason": "crc32 mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_debugsup1.debug",
+          "crc32": "0xda169ce2",
+          "would_be_accepted": false,
+          "reject_reason": "crc32 mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_debugsup2.debug",
+          "crc32": "0xda169ce2",
+          "would_be_accepted": false,
+          "reject_reason": "crc32 mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_gnudebugaltlink1.debug",
+          "crc32": "0x3018a030",
+          "would_be_accepted": false,
+          "reject_reason": "crc32 mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_gnudebugaltlink2.debug",
+          "crc32": "0x3018a030",
+          "would_be_accepted": false,
+          "reject_reason": "crc32 mismatch"
+        }
+      ]
+    },
+    {
+      "declaration": "gnu_debugaltlink",
+      "expected": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+      "alternatives": [
+        {
+          "path": "test/testfiles_for_unittests/debuglink.debug",
+          "build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+          "would_be_accepted": false,
+          "reject_reason": "build-id mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/dwarf_v5_forms.debug",
+          "build_id": "63c4f5b1ddcef78724d26ceaec7cee75f1972f43",
+          "would_be_accepted": false,
+          "reject_reason": "build-id mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_debugsup.common",
+          "build_id": null,
+          "would_be_accepted": false,
+          "reject_reason": "no build-id"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_debugsup1.debug",
+          "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+          "would_be_accepted": false,
+          "reject_reason": "build-id mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_debugsup2.debug",
+          "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+          "would_be_accepted": false,
+          "reject_reason": "build-id mismatch"
+        },
+        {
+          "path": "test/testfiles_for_unittests/test_gnudebugaltlink1.debug",
+          "build_id": "f9f2b6d3d5f991f22c7ac24344cdbe5738be4095",
+          "would_be_accepted": false,
+          "reject_reason": "build-id mismatch"
+        }
+      ]
+    }
+  ],
+  "families": {
+    "debug_sup": {
+      "files": [
+        "test/testfiles_for_unittests/test_debugsup.common",
+        "test/testfiles_for_unittests/test_debugsup1.debug",
+        "test/testfiles_for_unittests/test_debugsup2.debug"
+      ],
+      "confirmed_original_cus": [
+        "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+        "/usr/src/debug/glibc/csu/init.c"
+      ],
+      "link_verifications": [
+        {
+          "kind": "debug_sup",
+          "declared_version": 5,
+          "declared_is_supplementary": 1,
+          "declared_filename": null,
+          "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+          "candidates": [],
+          "resolved_path": null,
+          "status": "supplementary",
+          "method": "DWARF5 .debug_sup filename + checksum bytes",
+          "reason": "this file declares itself as a supplementary object; it has no outbound link to resolve"
+        },
+        {
+          "kind": "debug_sup",
+          "declared_version": 5,
+          "declared_is_supplementary": 0,
+          "declared_filename": "test_debugsup.common",
+          "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+          "candidates": [
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_debugsup.common"
+          ],
+          "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+          "status": "unconfirmed",
+          "method": "DWARF5 .debug_sup filename + checksum bytes",
+          "candidate_sha1": "6f6e3c8283fce2b2ef52e9e262def3d21a77a717",
+          "candidate_build_id": null,
+          "candidate_self_declared_supplementary": true,
+          "candidate_declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+          "token_matches_candidate": true,
+          "sha1_matches_file": false,
+          "md5_matches_file": false,
+          "build_id_matches": false,
+          "reason": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence"
+        },
+        {
+          "kind": "debug_sup",
+          "declared_version": 5,
+          "declared_is_supplementary": 0,
+          "declared_filename": "test_debugsup.common",
+          "declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+          "candidates": [
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_debugsup.common"
+          ],
+          "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_debugsup.common",
+          "status": "unconfirmed",
+          "method": "DWARF5 .debug_sup filename + checksum bytes",
+          "candidate_sha1": "6f6e3c8283fce2b2ef52e9e262def3d21a77a717",
+          "candidate_build_id": null,
+          "candidate_self_declared_supplementary": true,
+          "candidate_declared_checksum": "1425c80eec347bb214ad120cec5a6ace8fe9e53b73",
+          "token_matches_candidate": true,
+          "sha1_matches_file": false,
+          "md5_matches_file": false,
+          "build_id_matches": false,
+          "reason": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence"
+        }
+      ]
+    },
+    "gnu_debugaltlink": {
+      "files": [
+        "test/testfiles_for_unittests/test_gnudebugaltlink1.debug",
+        "test/testfiles_for_unittests/test_gnudebugaltlink2.debug"
+      ],
+      "confirmed_original_cus": [
+        "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S",
+        "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S",
+        "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S",
+        "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+        "/usr/src/debug/glibc/csu/init.c"
+      ],
+      "link_verifications": [
+        {
+          "kind": "gnu_debugaltlink",
+          "declared_filename": "test_gnudebugaltlink.common",
+          "declared_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+          "candidates": [
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_gnudebugaltlink.common"
+          ],
+          "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+          "status": "confirmed",
+          "method": "20-byte build ID in .gnu_debugaltlink",
+          "candidate_sha1": "ea015874d2b6cf646ca93ecc8bad8803fc55057d",
+          "candidate_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+          "build_id_matches": true,
+          "binding": "build-id"
+        },
+        {
+          "kind": "gnu_debugaltlink",
+          "declared_filename": "test_gnudebugaltlink.common",
+          "declared_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+          "candidates": [
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/test_gnudebugaltlink.common"
+          ],
+          "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/test_gnudebugaltlink.common",
+          "status": "confirmed",
+          "method": "20-byte build ID in .gnu_debugaltlink",
+          "candidate_sha1": "ea015874d2b6cf646ca93ecc8bad8803fc55057d",
+          "candidate_build_id": "d1852aca42cb92038ef6a252ff3fe800f04598b3",
+          "build_id_matches": true,
+          "binding": "build-id"
+        }
+      ]
+    },
+    "gnu_debuglink": {
+      "files": [
+        "test/testfiles_for_unittests/debuglink"
+      ],
+      "link_verifications": [
+        {
+          "kind": "gnu_debuglink",
+          "declared_filename": "debuglink.debug",
+          "declared_crc32": "0x29b7c5f1",
+          "candidates": [
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/debuglink.debug",
+            "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/.debug/debuglink.debug"
+          ],
+          "resolved_path": "/Users/bill/领域专项项目/state/ds-approved-20261122/agent_eval/workspaces/ds20261121-agent-eval-py100-083/test/testfiles_for_unittests/debuglink.debug",
+          "status": "confirmed",
+          "method": "CRC32 over the whole debug file",
+          "actual_crc32": "0x29b7c5f1",
+          "crc32_matches": true,
+          "object_build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+          "debug_build_id": "f5d41d8cbc24e069c7e7a9f52cd8ab24a8f19900",
+          "build_id_matches": true,
+          "binding": "crc32+build-id"
+        }
+      ]
+    }
+  },
+  "handover": {
+    "approved_cap": 2,
+    "approved_units": [
+      "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+      "/usr/src/debug/glibc/csu/init.c"
+    ],
+    "approved_count": 2,
+    "other_confirmed_not_handed_over": [
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S",
+      "/home/gabriele/Projects/debuglink.c"
+    ],
+    "confirmed_union": [
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S",
+      "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c",
+      "/usr/src/debug/glibc/csu/init.c"
+    ],
+    "confirmed_union_size": 5,
+    "capped_out_units": [
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S",
+      "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+    ],
+    "additional_units_from_union": 0,
+    "notes": [
+      "两套 dwz 包包含同一组五个原始编译单元，只是两种链接编码，不是两次独立构建。",
+      ".debug_sup 包只能独立确认两个内联身份串；补充文件摘要不可复算，其余三个 CU 身份及全部补充引用仍属未确认。",
+      ".gnu_debugaltlink 包通过补充文件 build-id 可确认全部五个 CU；交接主证据取这一套，批准上限仍为两份。",
+      "debuglink/debuglink.debug 自身已由 CRC32+build-id 完整确认，但它是独立材料；批准名册未到时不计入本次两份名额。",
+      "拼接两套包或按文件名重复计数都不会产生新的审批权。"
+    ]
+  },
+  "unconfirmed_references": [
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup1.debug",
+      "link_status": "unconfirmed",
+      "total_unconfirmed_references": 69,
+      "by_cu": [
+        {
+          "cu_offset": "0x0",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x28",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 42,
+            "DW_FORM_ref_sup4": 14
+          },
+          "samples": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x28f",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 2,
+            "DW_FORM_ref_sup4": 2
+          },
+          "samples": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x2cb",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x2ee",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup2.debug",
+      "link_status": "unconfirmed",
+      "total_unconfirmed_references": 69,
+      "by_cu": [
+        {
+          "cu_offset": "0x0",
+          "identity": {
+            "name": "../sysdeps/x86_64/start.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/start.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 146,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/start.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x0",
+              "die_offset": "0xc",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x28",
+          "identity": {
+            "name": "../sysdeps/x86/abi-note.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/../sysdeps/x86/abi-note.c"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 42,
+            "DW_FORM_ref_sup4": 14
+          },
+          "samples": [
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x34",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x46",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x4b",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 12,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0xc",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 875,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint8_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x50",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 17,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x11",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 864,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__uint16_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x5c",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 24,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x18",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28",
+              "die_offset": "0x68",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 843,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "__int32_t",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x28f",
+          "identity": {
+            "name": "init.c",
+            "comp_dir": "/usr/src/debug/glibc/csu",
+            "name_form": "DW_FORM_line_strp",
+            "comp_dir_form": "DW_FORM_line_strp",
+            "source": "inline",
+            "inline": true,
+            "key": "/usr/src/debug/glibc/csu/init.c"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 2,
+            "DW_FORM_ref_sup4": 2
+          },
+          "samples": [
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x29b",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 296,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU C11 12.1.0 -march=x86-64 -mtune=generic -g -O2 -std=gnu11 -fgnu89-inline -fn",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2ad",
+              "attribute": "DW_AT_import",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 922,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_partial_unit",
+              "target_offset": "0x39a",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2b2",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 586,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "_IO_stdin_used",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x28f",
+              "die_offset": "0x2c5",
+              "attribute": "DW_AT_type",
+              "form": "DW_FORM_ref_sup4",
+              "raw_value": 927,
+              "target": "supplementary",
+              "resolved": true,
+              "target_tag": "DW_TAG_base_type",
+              "target_offset": "0x39f",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x2cb",
+          "identity": {
+            "name": "../sysdeps/x86_64/crti.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crti.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 96,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crti.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2cb",
+              "die_offset": "0x2d7",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        },
+        {
+          "cu_offset": "0x2ee",
+          "identity": {
+            "name": "../sysdeps/x86_64/crtn.S",
+            "comp_dir": "/build/glibc/src/glibc/csu",
+            "name_form": "DW_FORM_strp_sup",
+            "comp_dir_form": "DW_FORM_strp_sup",
+            "source": "supplementary",
+            "inline": false,
+            "key": "/build/glibc/src/glibc/csu/../sysdeps/x86_64/crtn.S"
+          },
+          "counts": {
+            "DW_FORM_strp_sup": 3
+          },
+          "samples": [
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_name",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 121,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "../sysdeps/x86_64/crtn.S",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_comp_dir",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 1046,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "/build/glibc/src/glibc/csu",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            },
+            {
+              "cu_offset": "0x2ee",
+              "die_offset": "0x2fa",
+              "attribute": "DW_AT_producer",
+              "form": "DW_FORM_strp_sup",
+              "raw_value": 73,
+              "target": "supplementary",
+              "resolved": true,
+              "resolved_preview": "GNU AS 2.38",
+              "confirmation": "unconfirmed",
+              "confirmation_reason": "supplementary file is not bound to the declaration"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "missing_materials": [
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup1.debug",
+      "link_kind": "debug_sup",
+      "status": "unconfirmed",
+      "missing": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence",
+      "declared_filename": "test_debugsup.common"
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup2.debug",
+      "link_kind": "debug_sup",
+      "status": "unconfirmed",
+      "missing": "the declared checksum is not derivable from the delivered supplementary file and the file carries no build ID; equality with the candidate's own .debug_sup token is not independent evidence",
+      "declared_filename": "test_debugsup.common"
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup.common",
+      "link_kind": "supplementary-identity",
+      "status": "unconfirmed",
+      "missing": "no .note.gnu.build-id and no producer digest manifest for the supplementary file; the delivered bytes cannot reproduce the declared .debug_sup checksum",
+      "declared_filename": null
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup1",
+      "link_kind": "object-side",
+      "status": "missing",
+      "missing": "stripped/original ELF object that declares this debug file was not delivered, so the debug material cannot be bound to a delivered build artifact",
+      "declared_filename": null
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_debugsup2",
+      "link_kind": "object-side",
+      "status": "missing",
+      "missing": "stripped/original ELF object that declares this debug file was not delivered, so the debug material cannot be bound to a delivered build artifact",
+      "declared_filename": null
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_gnudebugaltlink1",
+      "link_kind": "object-side",
+      "status": "missing",
+      "missing": "stripped/original ELF object that declares this debug file was not delivered, so the debug material cannot be bound to a delivered build artifact",
+      "declared_filename": null
+    },
+    {
+      "path": "test/testfiles_for_unittests/test_gnudebugaltlink2",
+      "link_kind": "object-side",
+      "status": "missing",
+      "missing": "stripped/original ELF object that declares this debug file was not delivered, so the debug material cannot be bound to a delivered build artifact",
+      "declared_filename": null
+    },
+    {
+      "path": null,
+      "link_kind": "approval-roster",
+      "status": "missing",
+      "missing": "the signed approval roster naming the two approved CUs is not part of the delivered material; the selection below is the conservative intersection of independently confirmed identities",
+      "declared_filename": null
+    }
+  ]
+}
