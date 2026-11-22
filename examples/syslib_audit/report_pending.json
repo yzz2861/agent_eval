@@ -1,0 +1,415 @@
+{
+  "schema": "elf-syslib-audit/v1",
+  "environment": {
+    "schema": "elf-syslib-env/v1",
+    "id": "hw-atlas-fw-2026.11",
+    "images": [
+      {
+        "id": "hw-atlas",
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "loader": null,
+        "search_paths": [
+          "/opt/fleet/hw-atlas/lib"
+        ]
+      },
+      {
+        "id": "hw-borealis",
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "loader": null,
+        "search_paths": [
+          "/opt/fleet/hw-borealis/lib"
+        ]
+      }
+    ],
+    "target_images": [
+      "hw-atlas"
+    ],
+    "search_paths": [
+      "/opt/fleet/hw-atlas/lib",
+      "/opt/fleet/lib"
+    ],
+    "preferred": {},
+    "providers": [
+      {
+        "id": "libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6",
+        "soname": "libc.so.6",
+        "provider": "glibc",
+        "provider_version": "2.31",
+        "path": "/opt/fleet/lib/libc.so.6",
+        "images": [
+          "hw-atlas",
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 20,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "fleet-glibc-2.31-attestation",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "GLIBC_2.2.5",
+          "GLIBC_2.4"
+        ]
+      },
+      {
+        "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+        "soname": "libc.so.6",
+        "provider": "glibc",
+        "provider_version": "2.35",
+        "path": "/opt/fleet/lib/libc.so.6",
+        "images": [
+          "hw-atlas",
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 10,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "fleet-glibc-2.35-attestation",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "GLIBC_2.2.5",
+          "GLIBC_2.4"
+        ]
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "examples/syslib_audit/sample_versioned.so.elf",
+      "sha256": "44374a8db0f8ac4009aab49ae7f7632310e506cd994c6d2bae38a1b6163c66d6",
+      "identity": {
+        "elf_class": 64,
+        "endianness": "little",
+        "machine": "EM_X86_64",
+        "os_abi": "ELFOSABI_SYSV",
+        "e_type": "ET_DYN"
+      },
+      "soname": "lib_versioned.so.1",
+      "needed": [
+        "libz.so.1",
+        "libc.so.6"
+      ],
+      "rpath": [],
+      "runpath": [],
+      "defined_versions": [
+        "lib_versioned.so.1",
+        "VER_1.0",
+        "VER_1.1",
+        "VER_1.2"
+      ],
+      "status": "pending_evidence",
+      "signed_off": false,
+      "signoff": false,
+      "needs_evidence": true,
+      "unresolved_dependencies": [
+        "libz.so.1"
+      ],
+      "image_specific_dependencies": [],
+      "dependencies": [
+        {
+          "soname": "libz.so.1",
+          "required_symbol_versions": [
+            "ZLIB_1.2.3.5"
+          ],
+          "required_symbols": [
+            {
+              "name": "gzoffset",
+              "version": "ZLIB_1.2.3.5",
+              "hidden": false
+            }
+          ],
+          "status": "pending_evidence",
+          "signed_off": false,
+          "signoff": false,
+          "needs_evidence": true,
+          "external": true,
+          "evidence_missing": true,
+          "evidence_status": "missing",
+          "candidate_count": 0,
+          "eligible_candidate_count": 0,
+          "image_specific": false,
+          "only_on_hardware_images": [],
+          "candidate_hardware_images": [],
+          "target_images": [
+            "hw-atlas"
+          ],
+          "selected": null,
+          "selected_by_image": {
+            "hw-atlas": null
+          },
+          "unresolved_images": [
+            "hw-atlas"
+          ],
+          "candidates": [],
+          "reasons": [
+            "no evidence for external library 'libz.so.1'; library path was not opened"
+          ],
+          "notes": []
+        },
+        {
+          "soname": "libc.so.6",
+          "required_symbol_versions": [
+            "GLIBC_2.4",
+            "GLIBC_2.2.5"
+          ],
+          "required_symbols": [
+            {
+              "name": "puts",
+              "version": "GLIBC_2.2.5",
+              "hidden": false
+            },
+            {
+              "name": "__stack_chk_fail",
+              "version": "GLIBC_2.4",
+              "hidden": false
+            },
+            {
+              "name": "__cxa_finalize",
+              "version": "GLIBC_2.2.5",
+              "hidden": false
+            }
+          ],
+          "status": "signed_off",
+          "signed_off": true,
+          "signoff": true,
+          "needs_evidence": false,
+          "external": false,
+          "evidence_missing": false,
+          "evidence_status": "complete",
+          "candidate_count": 2,
+          "eligible_candidate_count": 2,
+          "image_specific": false,
+          "only_on_hardware_images": [],
+          "candidate_hardware_images": [
+            "hw-atlas",
+            "hw-borealis"
+          ],
+          "target_images": [
+            "hw-atlas"
+          ],
+          "selected": {
+            "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+            "soname": "libc.so.6",
+            "provider": "glibc",
+            "provider_version": "2.35",
+            "path": "/opt/fleet/lib/libc.so.6",
+            "images": [
+              "hw-atlas",
+              "hw-borealis"
+            ],
+            "arch": "EM_X86_64",
+            "elf_class": 64,
+            "endianness": "little",
+            "os_abi": null,
+            "priority": 10,
+            "preferred": false,
+            "origin": "environment",
+            "verified": true,
+            "evidence": {
+              "source": "fleet-glibc-2.35-attestation",
+              "verified": true
+            },
+            "exported_symbol_versions": [
+              "GLIBC_2.2.5",
+              "GLIBC_2.4"
+            ],
+            "exported_symbols": null,
+            "selected_for_images": [
+              "hw-atlas"
+            ],
+            "selected": true,
+            "evaluations": {
+              "hw-atlas": {
+                "eligible": true,
+                "available_on_image": true,
+                "missing_symbol_versions": [],
+                "missing_symbols": [],
+                "notes": [
+                  "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                ],
+                "reasons": []
+              }
+            }
+          },
+          "selected_by_image": {
+            "hw-atlas": {
+              "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.35",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.35-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-atlas"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-atlas": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          },
+          "unresolved_images": [],
+          "candidates": [
+            {
+              "id": "libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.31",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 20,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.31-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [],
+              "selected": false,
+              "evaluations": {
+                "hw-atlas": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            },
+            {
+              "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.35",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.35-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-atlas"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-atlas": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          ],
+          "reasons": [],
+          "notes": [
+            "candidate libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used",
+            "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+          ]
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "artifact_count": 1,
+    "signed_off_artifacts": 0,
+    "pending_evidence_artifacts": 1,
+    "dependency_count": 2,
+    "image_specific_dependencies": [],
+    "unresolved_dependencies": [
+      {
+        "artifact": "examples/syslib_audit/sample_versioned.so.elf",
+        "soname": "libz.so.1",
+        "images": "hw-atlas"
+      }
+    ]
+  },
+  "status": "pending_evidence",
+  "signed_off": false,
+  "signoff": false,
+  "needs_evidence": true
+}

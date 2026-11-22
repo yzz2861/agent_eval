@@ -31,6 +31,11 @@ use it without installing, by locally adjusting `PYTHONPATH`.
 from your own code. For a detailed usage guide and links to examples,
 please consult the [user's guide](doc/user-guide.md).
 
+For offline firmware dependency sign-off, including `DT_NEEDED`, GNU symbol
+versions, hardware-image scoping, and caller-supplied loader declarations,
+see [doc/syslib-audit.md](doc/syslib-audit.md) and the
+[example](examples/syslib_audit/README.md).
+
 ## Contributing
 
 See the [Hacking Guide](doc/hacking-guide.md).

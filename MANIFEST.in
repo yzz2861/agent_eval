@@ -1,11 +1,12 @@
 recursive-include elftools *.py
 recursive-include scripts *.py
-recursive-include examples *.py *.elf *.out
+recursive-include examples *.py *.elf *.out *.json *.md
 recursive-include test *
 global-exclude *.py[cod]
 global-exclude __pycache__
 global-exclude .mypy_cache
 include README.md
+recursive-include doc *.md
 include LICENSE
 include CHANGES
 include tox.ini

@@ -1,0 +1,633 @@
+{
+  "schema": "elf-syslib-audit/v1",
+  "environment": {
+    "schema": "elf-syslib-env/v1",
+    "id": "hw-borealis-fw-2026.11",
+    "images": [
+      {
+        "id": "hw-atlas",
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "loader": null,
+        "search_paths": [
+          "/opt/fleet/hw-atlas/lib"
+        ]
+      },
+      {
+        "id": "hw-borealis",
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "loader": null,
+        "search_paths": [
+          "/opt/fleet/hw-borealis/lib"
+        ]
+      }
+    ],
+    "target_images": [
+      "hw-borealis"
+    ],
+    "search_paths": [
+      "/opt/fleet/hw-borealis/lib",
+      "/opt/fleet/lib"
+    ],
+    "preferred": {},
+    "providers": [
+      {
+        "id": "libz.so.1::zlib::1.2.11::/opt/fleet/hw-borealis/lib/libz.so.1",
+        "soname": "libz.so.1",
+        "provider": "zlib",
+        "provider_version": "1.2.11",
+        "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+        "images": [
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 20,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "hw-borealis-system-manifest",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "ZLIB_1.2.3.5"
+        ]
+      },
+      {
+        "id": "libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1",
+        "soname": "libz.so.1",
+        "provider": "zlib",
+        "provider_version": "1.2.13",
+        "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+        "images": [
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 10,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "hw-borealis-system-manifest",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "ZLIB_1.2.3.5"
+        ]
+      },
+      {
+        "id": "libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6",
+        "soname": "libc.so.6",
+        "provider": "glibc",
+        "provider_version": "2.31",
+        "path": "/opt/fleet/lib/libc.so.6",
+        "images": [
+          "hw-atlas",
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 20,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "fleet-glibc-2.31-attestation",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "GLIBC_2.2.5",
+          "GLIBC_2.4"
+        ]
+      },
+      {
+        "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+        "soname": "libc.so.6",
+        "provider": "glibc",
+        "provider_version": "2.35",
+        "path": "/opt/fleet/lib/libc.so.6",
+        "images": [
+          "hw-atlas",
+          "hw-borealis"
+        ],
+        "arch": "EM_X86_64",
+        "elf_class": 64,
+        "endianness": "little",
+        "os_abi": null,
+        "priority": 10,
+        "preferred": false,
+        "origin": "environment",
+        "verified": true,
+        "evidence": {
+          "source": "fleet-glibc-2.35-attestation",
+          "verified": true
+        },
+        "exported_symbol_versions": [
+          "GLIBC_2.2.5",
+          "GLIBC_2.4"
+        ]
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "examples/syslib_audit/sample_versioned.so.elf",
+      "sha256": "44374a8db0f8ac4009aab49ae7f7632310e506cd994c6d2bae38a1b6163c66d6",
+      "identity": {
+        "elf_class": 64,
+        "endianness": "little",
+        "machine": "EM_X86_64",
+        "os_abi": "ELFOSABI_SYSV",
+        "e_type": "ET_DYN"
+      },
+      "soname": "lib_versioned.so.1",
+      "needed": [
+        "libz.so.1",
+        "libc.so.6"
+      ],
+      "rpath": [],
+      "runpath": [],
+      "defined_versions": [
+        "lib_versioned.so.1",
+        "VER_1.0",
+        "VER_1.1",
+        "VER_1.2"
+      ],
+      "status": "signed_off",
+      "signed_off": true,
+      "signoff": true,
+      "needs_evidence": false,
+      "unresolved_dependencies": [],
+      "image_specific_dependencies": [
+        "libz.so.1"
+      ],
+      "dependencies": [
+        {
+          "soname": "libz.so.1",
+          "required_symbol_versions": [
+            "ZLIB_1.2.3.5"
+          ],
+          "required_symbols": [
+            {
+              "name": "gzoffset",
+              "version": "ZLIB_1.2.3.5",
+              "hidden": false
+            }
+          ],
+          "status": "signed_off",
+          "signed_off": true,
+          "signoff": true,
+          "needs_evidence": false,
+          "external": false,
+          "evidence_missing": false,
+          "evidence_status": "complete",
+          "candidate_count": 2,
+          "eligible_candidate_count": 2,
+          "image_specific": true,
+          "only_on_hardware_images": [
+            "hw-borealis"
+          ],
+          "candidate_hardware_images": [
+            "hw-borealis"
+          ],
+          "target_images": [
+            "hw-borealis"
+          ],
+          "selected": {
+            "id": "libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1",
+            "soname": "libz.so.1",
+            "provider": "zlib",
+            "provider_version": "1.2.13",
+            "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+            "images": [
+              "hw-borealis"
+            ],
+            "arch": "EM_X86_64",
+            "elf_class": 64,
+            "endianness": "little",
+            "os_abi": null,
+            "priority": 10,
+            "preferred": false,
+            "origin": "environment",
+            "verified": true,
+            "evidence": {
+              "source": "hw-borealis-system-manifest",
+              "verified": true
+            },
+            "exported_symbol_versions": [
+              "ZLIB_1.2.3.5"
+            ],
+            "exported_symbols": null,
+            "selected_for_images": [
+              "hw-borealis"
+            ],
+            "selected": true,
+            "evaluations": {
+              "hw-borealis": {
+                "eligible": true,
+                "available_on_image": true,
+                "missing_symbol_versions": [],
+                "missing_symbols": [],
+                "notes": [
+                  "candidate libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used"
+                ],
+                "reasons": []
+              }
+            }
+          },
+          "selected_by_image": {
+            "hw-borealis": {
+              "id": "libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1",
+              "soname": "libz.so.1",
+              "provider": "zlib",
+              "provider_version": "1.2.13",
+              "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+              "images": [
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "hw-borealis-system-manifest",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "ZLIB_1.2.3.5"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-borealis"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          },
+          "unresolved_images": [],
+          "candidates": [
+            {
+              "id": "libz.so.1::zlib::1.2.11::/opt/fleet/hw-borealis/lib/libz.so.1",
+              "soname": "libz.so.1",
+              "provider": "zlib",
+              "provider_version": "1.2.11",
+              "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+              "images": [
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 20,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "hw-borealis-system-manifest",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "ZLIB_1.2.3.5"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [],
+              "selected": false,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libz.so.1::zlib::1.2.11::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            },
+            {
+              "id": "libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1",
+              "soname": "libz.so.1",
+              "provider": "zlib",
+              "provider_version": "1.2.13",
+              "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+              "images": [
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "hw-borealis-system-manifest",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "ZLIB_1.2.3.5"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-borealis"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          ],
+          "reasons": [],
+          "notes": [
+            "candidate libz.so.1::zlib::1.2.11::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used",
+            "candidate libz.so.1::zlib::1.2.13::/opt/fleet/hw-borealis/lib/libz.so.1 does not declare individual symbol evidence; version-node evidence was used"
+          ]
+        },
+        {
+          "soname": "libc.so.6",
+          "required_symbol_versions": [
+            "GLIBC_2.4",
+            "GLIBC_2.2.5"
+          ],
+          "required_symbols": [
+            {
+              "name": "puts",
+              "version": "GLIBC_2.2.5",
+              "hidden": false
+            },
+            {
+              "name": "__stack_chk_fail",
+              "version": "GLIBC_2.4",
+              "hidden": false
+            },
+            {
+              "name": "__cxa_finalize",
+              "version": "GLIBC_2.2.5",
+              "hidden": false
+            }
+          ],
+          "status": "signed_off",
+          "signed_off": true,
+          "signoff": true,
+          "needs_evidence": false,
+          "external": false,
+          "evidence_missing": false,
+          "evidence_status": "complete",
+          "candidate_count": 2,
+          "eligible_candidate_count": 2,
+          "image_specific": false,
+          "only_on_hardware_images": [],
+          "candidate_hardware_images": [
+            "hw-atlas",
+            "hw-borealis"
+          ],
+          "target_images": [
+            "hw-borealis"
+          ],
+          "selected": {
+            "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+            "soname": "libc.so.6",
+            "provider": "glibc",
+            "provider_version": "2.35",
+            "path": "/opt/fleet/lib/libc.so.6",
+            "images": [
+              "hw-atlas",
+              "hw-borealis"
+            ],
+            "arch": "EM_X86_64",
+            "elf_class": 64,
+            "endianness": "little",
+            "os_abi": null,
+            "priority": 10,
+            "preferred": false,
+            "origin": "environment",
+            "verified": true,
+            "evidence": {
+              "source": "fleet-glibc-2.35-attestation",
+              "verified": true
+            },
+            "exported_symbol_versions": [
+              "GLIBC_2.2.5",
+              "GLIBC_2.4"
+            ],
+            "exported_symbols": null,
+            "selected_for_images": [
+              "hw-borealis"
+            ],
+            "selected": true,
+            "evaluations": {
+              "hw-borealis": {
+                "eligible": true,
+                "available_on_image": true,
+                "missing_symbol_versions": [],
+                "missing_symbols": [],
+                "notes": [
+                  "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                ],
+                "reasons": []
+              }
+            }
+          },
+          "selected_by_image": {
+            "hw-borealis": {
+              "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.35",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.35-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-borealis"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          },
+          "unresolved_images": [],
+          "candidates": [
+            {
+              "id": "libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.31",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 20,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.31-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [],
+              "selected": false,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            },
+            {
+              "id": "libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6",
+              "soname": "libc.so.6",
+              "provider": "glibc",
+              "provider_version": "2.35",
+              "path": "/opt/fleet/lib/libc.so.6",
+              "images": [
+                "hw-atlas",
+                "hw-borealis"
+              ],
+              "arch": "EM_X86_64",
+              "elf_class": 64,
+              "endianness": "little",
+              "os_abi": null,
+              "priority": 10,
+              "preferred": false,
+              "origin": "environment",
+              "verified": true,
+              "evidence": {
+                "source": "fleet-glibc-2.35-attestation",
+                "verified": true
+              },
+              "exported_symbol_versions": [
+                "GLIBC_2.2.5",
+                "GLIBC_2.4"
+              ],
+              "exported_symbols": null,
+              "selected_for_images": [
+                "hw-borealis"
+              ],
+              "selected": true,
+              "evaluations": {
+                "hw-borealis": {
+                  "eligible": true,
+                  "available_on_image": true,
+                  "missing_symbol_versions": [],
+                  "missing_symbols": [],
+                  "notes": [
+                    "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+                  ],
+                  "reasons": []
+                }
+              }
+            }
+          ],
+          "reasons": [],
+          "notes": [
+            "candidate libc.so.6::glibc::2.31::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used",
+            "candidate libc.so.6::glibc::2.35::/opt/fleet/lib/libc.so.6 does not declare individual symbol evidence; version-node evidence was used"
+          ]
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "artifact_count": 1,
+    "signed_off_artifacts": 1,
+    "pending_evidence_artifacts": 0,
+    "dependency_count": 2,
+    "image_specific_dependencies": [
+      {
+        "artifact": "examples/syslib_audit/sample_versioned.so.elf",
+        "soname": "libz.so.1",
+        "images": "hw-borealis"
+      }
+    ],
+    "unresolved_dependencies": []
+  },
+  "status": "signed_off",
+  "signed_off": true,
+  "signoff": true,
+  "needs_evidence": false
+}

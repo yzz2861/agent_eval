@@ -62,6 +62,7 @@ packages = [
 ]
 script-files = [
     "scripts/readelf.py",
+    "scripts/syslib_audit.py",
 ]
 platforms = [
     'Cross Platform',

@@ -1,0 +1,119 @@
+{
+  "schema": "elf-syslib-env/v1",
+  "id": "hw-borealis-fw-2026.11",
+  "hardware_images": [
+    {
+      "id": "hw-atlas",
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "search_paths": [
+        "/opt/fleet/hw-atlas/lib"
+      ]
+    },
+    {
+      "id": "hw-borealis",
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "search_paths": [
+        "/opt/fleet/hw-borealis/lib"
+      ]
+    }
+  ],
+  "target_images": [
+    "hw-borealis"
+  ],
+  "loader": {
+    "search_paths": [
+      "/opt/fleet/hw-borealis/lib",
+      "/opt/fleet/lib"
+    ]
+  },
+  "providers": [
+    {
+      "soname": "libz.so.1",
+      "provider": "zlib",
+      "version": "1.2.11",
+      "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+      "images": [
+        "hw-borealis"
+      ],
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "symbol_versions": [
+        "ZLIB_1.2.3.5"
+      ],
+      "evidence": {
+        "source": "hw-borealis-system-manifest",
+        "verified": true
+      },
+      "priority": 20
+    },
+    {
+      "soname": "libz.so.1",
+      "provider": "zlib",
+      "version": "1.2.13",
+      "path": "/opt/fleet/hw-borealis/lib/libz.so.1",
+      "images": [
+        "hw-borealis"
+      ],
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "symbol_versions": [
+        "ZLIB_1.2.3.5"
+      ],
+      "evidence": {
+        "source": "hw-borealis-system-manifest",
+        "verified": true
+      },
+      "priority": 10
+    },
+    {
+      "soname": "libc.so.6",
+      "provider": "glibc",
+      "version": "2.31",
+      "path": "/opt/fleet/lib/libc.so.6",
+      "images": [
+        "hw-atlas",
+        "hw-borealis"
+      ],
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "symbol_versions": [
+        "GLIBC_2.2.5",
+        "GLIBC_2.4"
+      ],
+      "evidence": {
+        "source": "fleet-glibc-2.31-attestation",
+        "verified": true
+      },
+      "priority": 20
+    },
+    {
+      "soname": "libc.so.6",
+      "provider": "glibc",
+      "version": "2.35",
+      "path": "/opt/fleet/lib/libc.so.6",
+      "images": [
+        "hw-atlas",
+        "hw-borealis"
+      ],
+      "arch": "x86_64",
+      "elf_class": 64,
+      "endianness": "little",
+      "symbol_versions": [
+        "GLIBC_2.2.5",
+        "GLIBC_2.4"
+      ],
+      "evidence": {
+        "source": "fleet-glibc-2.35-attestation",
+        "verified": true
+      },
+      "priority": 10
+    }
+  ]
+}
