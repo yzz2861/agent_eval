@@ -25,12 +25,13 @@
 """
 
 import argparse
+import json
 import logging
 import sys
 
 from securesystemslib._gpg import functions as gpg_interface
 
-from in_toto import __version__, verifylib
+from in_toto import __version__, acceptance, verifylib
 from in_toto.common_args import (
     GPG_HOME_ARGS,
     GPG_HOME_KWARGS,
@@ -186,6 +187,53 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
         ),
     )
 
+    parser.add_argument(
+        "--forbid-artifact",
+        dest="forbid_artifacts",
+        nargs="+",
+        metavar="<pattern>",
+        help=(
+            "enable the optional artifact absence completeness check for"
+            " the passed glob pattern(s), for example *.debug. An empty"
+            " product table only passes if a signed enumeration declaration"
+            " in the link metadata proves that the checked scope was"
+            " enumerated."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-scope",
+        dest="artifact_scope",
+        nargs="+",
+        metavar="<path>",
+        default=["."],
+        help=(
+            "path(s) or prefix(es) that must be covered by the signed"
+            " enumeration boundary. Defaults to the current directory."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-direction",
+        dest="artifact_direction",
+        choices=("products", "materials", "both"),
+        default="products",
+        help=("artifact table(s) to check for forbidden artifacts."),
+    )
+    parser.add_argument(
+        "--require-confirmed-artifacts",
+        dest="require_confirmed_artifacts",
+        action="store_true",
+        help=(
+            "treat allowed_omission as a failure; only a signed, complete"
+            " enumeration (confirmed_none) passes."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-report",
+        dest="artifact_report",
+        metavar="<path>",
+        help="write the artifact acceptance audit report as JSON to <path>.",
+    )
+
     verbosity_args = parser.add_mutually_exclusive_group(required=False)
     verbosity_args.add_argument(*VERBOSE_ARGS, **VERBOSE_KWARGS)
     verbosity_args.add_argument(*QUIET_ARGS, **QUIET_KWARGS)
@@ -217,6 +265,23 @@ def main():
             " '--verification-keys path [path ...]' and/or '--gpg id [id ...]'."
         )
 
+    artifact_absence_check = None
+    acceptance_report_callback = None
+    if args.forbid_artifacts:
+        artifact_absence_check = acceptance.ArtifactAbsenceCheck(
+            patterns=args.forbid_artifacts,
+            scope=args.artifact_scope,
+            direction=args.artifact_direction,
+            allow_omission=not args.require_confirmed_artifacts,
+        )
+
+        def acceptance_report_callback(report):
+            print(report.format_text())
+            if args.artifact_report:
+                with open(args.artifact_report, "w", encoding="utf8") as fp:
+                    json.dump(report.to_dict(), fp, indent=2, sort_keys=True)
+                    fp.write("\n")
+
     try:
         LOG.info("Loading layout...")
         layout = Metadata.load(args.layout)
@@ -238,6 +303,8 @@ def main():
             layout_key_dict,
             args.link_dir,
             inspect_timeout=args.inspect_timeout,
+            artifact_absence_check=artifact_absence_check,
+            acceptance_report_callback=acceptance_report_callback,
         )
 
     except Exception as e:  # noqa: BLE001

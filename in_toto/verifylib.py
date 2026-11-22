@@ -42,6 +42,7 @@ import in_toto.models.link
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
+from in_toto import acceptance
 from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
@@ -1489,6 +1490,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    artifact_absence_check=None,
+    acceptance_report_callback=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1547,6 +1550,23 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      artifact_absence_check (optional): An
+          ``in_toto.acceptance.ArtifactAbsenceCheck`` instance. If passed, the
+          regular verification is extended by an opt-in completeness
+          acceptance for artifact absence. Verified link metadata must carry a
+          signed enumeration declaration (``artifact_enumeration`` in
+          ``byproducts`` or ``environment``), otherwise an empty artifact table
+          is not accepted as proof that the checked scope contains no matching
+          artifact. See :mod:`in_toto.acceptance` for the declaration format
+          and the three outcomes ``confirmed_none``, ``allowed_omission`` and
+          ``evidence_missing``.
+
+      acceptance_report_callback (optional): A callable that receives the
+          ``in_toto.acceptance.AcceptanceReport`` when
+          ``artifact_absence_check`` is passed. It is called before a
+          failing report raises, which allows a caller to persist or print
+          the audit report even on failure.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1568,6 +1588,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           a REQUIRE rule does not find a required artifact.
 
       BadReturnValueError: An inspection command returns a non-zero value.
+
+      in_toto.exceptions.AcceptanceError: If ``artifact_absence_check`` is
+          passed and the resulting audit does not pass. The exception message
+          contains the full audit report.
 
     Side Effects:
       Reads link metadata files from disk.
@@ -1614,6 +1638,17 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     LOG.info("Verifying threshold constraints...")
     verify_threshold_constraints(layout, chain_link_dict)
     reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
+
+    if artifact_absence_check is not None:
+        LOG.info("Verifying artifact absence completeness...")
+        report = acceptance.audit_layout(
+            layout, chain_link_dict, artifact_absence_check
+        )
+        LOG.info("%s", report.format_text())
+        if acceptance_report_callback is not None:
+            acceptance_report_callback(report)
+        if not report.ok():
+            raise in_toto.exceptions.AcceptanceError(report.format_text())
 
     # NOTE: Processing step rules before executing inspections guarantees that
     # inspection commands don't run on compromised target files, however, this

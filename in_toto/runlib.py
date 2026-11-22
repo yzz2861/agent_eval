@@ -45,6 +45,7 @@ from securesystemslib.signer import Signer
 
 import in_toto.exceptions
 import in_toto.settings
+from in_toto import acceptance
 from in_toto.formats import _check_hex, _check_str, _check_str_list
 from in_toto.models._signer import GPGSigner
 from in_toto.models.link import (
@@ -422,6 +423,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     use_dsse=False,
     timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
     signer=None,
+    record_enumeration=False,
+    exclusion_reasons=None,
 ):
     """Performs a supply chain step or inspection generating link metadata.
 
@@ -488,6 +491,18 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
 
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
+
+    record_enumeration (optional): A boolean indicating whether the resulting
+        link should carry a signed statement about the artifact enumeration
+        boundary and exclusions used for ``material_list`` and
+        ``product_list``. This is consumed by the optional artifact absence
+        acceptance in :mod:`in_toto.acceptance`, and is off by default for
+        backward compatibility.
+
+    exclusion_reasons (optional): A dictionary mapping exclude patterns to a
+        human-readable reason. Reasons are recorded in the signed enumeration
+        declaration, so that an omission can later be distinguished from an
+        unobserved scope.
 
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
@@ -571,6 +586,23 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         lstrip_paths=lstrip_paths,
     )
 
+    if record_enumeration:
+        effective_excludes = (
+            exclude_patterns or in_toto.settings.ARTIFACT_EXCLUDE_PATTERNS
+        )
+        byproducts[acceptance.ENUMERATION_KEY] = {
+            "materials": acceptance.build_enumeration_declaration(
+                material_list,
+                effective_excludes,
+                exclusion_reasons,
+            ),
+            "products": acceptance.build_enumeration_declaration(
+                product_list,
+                effective_excludes,
+                exclusion_reasons,
+            ),
+        }
+
     LOG.info("Creating link metadata...")
     environment = {}
     if record_environment:
@@ -619,7 +651,7 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     return link_metadata
 
 
-def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
+def in_toto_record_start(  # noqa: C901, PLR0913, PLR0917, RUF100
     step_name,
     material_list,
     gpg_keyid=None,
@@ -632,6 +664,8 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     lstrip_paths=None,
     use_dsse=False,
     signer=None,
+    record_enumeration=False,
+    exclusion_reasons=None,
 ):
     """Generates preliminary link metadata.
 
@@ -682,6 +716,12 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
 
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
+
+    record_enumeration (optional): A boolean indicating whether the preliminary
+        link should carry a signed enumeration declaration for its materials.
+
+    exclusion_reasons (optional): A dictionary mapping exclude patterns to a
+        human-readable reason recorded in the signed enumeration declaration.
 
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
@@ -749,12 +789,25 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     if record_environment:
         environment["workdir"] = os.getcwd().replace("\\", "/")
 
+    byproducts = {}
+    if record_enumeration:
+        effective_excludes = (
+            exclude_patterns or in_toto.settings.ARTIFACT_EXCLUDE_PATTERNS
+        )
+        byproducts[acceptance.ENUMERATION_KEY] = {
+            "materials": acceptance.build_enumeration_declaration(
+                material_list,
+                effective_excludes,
+                exclusion_reasons,
+            ),
+        }
+
     link = in_toto.models.link.Link(
         name=step_name,
         materials=materials_dict,
         products={},
         command=[],
-        byproducts={},
+        byproducts=byproducts,
         environment=environment,
     )
 
@@ -803,6 +856,8 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     byproducts=None,
     environment=None,
     signer=None,
+    record_enumeration=False,
+    exclusion_reasons=None,
 ):
     """Finalizes preliminary link metadata generated with in_toto_record_start.
 
@@ -868,6 +923,14 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
 
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
+
+    record_enumeration (optional): A boolean indicating whether the finalized
+        link should carry a signed enumeration declaration for its products.
+        A materials declaration recorded by ``in_toto_record_start`` is
+        preserved.
+
+    exclusion_reasons (optional): A dictionary mapping exclude patterns to a
+        human-readable reason recorded in the signed enumeration declaration.
 
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
@@ -1021,6 +1084,24 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
 
     if byproducts:
         link.byproducts = byproducts
+
+    if record_enumeration:
+        effective_excludes = (
+            exclude_patterns or in_toto.settings.ARTIFACT_EXCLUDE_PATTERNS
+        )
+        if not isinstance(link.byproducts, dict):
+            link.byproducts = {}
+
+        declaration = link.byproducts.setdefault(acceptance.ENUMERATION_KEY, {})
+        if not isinstance(declaration, dict):
+            declaration = {}
+            link.byproducts[acceptance.ENUMERATION_KEY] = declaration
+
+        declaration["products"] = acceptance.build_enumeration_declaration(
+            product_list,
+            effective_excludes,
+            exclusion_reasons,
+        )
 
     if environment:
         link.environment = environment

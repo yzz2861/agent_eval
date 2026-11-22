@@ -39,6 +39,8 @@ from in_toto.common_args import (
     DSSE_KWARGS,
     EXCLUDE_ARGS,
     EXCLUDE_KWARGS,
+    EXCLUDE_REASON_ARGS,
+    EXCLUDE_REASON_KWARGS,
     GPG_ARGS,
     GPG_HOME_ARGS,
     GPG_HOME_KWARGS,
@@ -52,10 +54,13 @@ from in_toto.common_args import (
     OPTS_TITLE,
     QUIET_ARGS,
     QUIET_KWARGS,
+    RECORD_ENUMERATION_ARGS,
+    RECORD_ENUMERATION_KWARGS,
     SIGNING_KEY_ARGS,
     SIGNING_KEY_KWARGS,
     VERBOSE_ARGS,
     VERBOSE_KWARGS,
+    parse_exclude_reasons,
     parse_password_and_prompt_args,
     sort_action_groups,
     title_case_action_groups,
@@ -137,9 +142,13 @@ file to the target directory (on stop).
     parent_named_args.add_argument(*SIGNING_KEY_ARGS, **SIGNING_KEY_KWARGS)
 
     parent_parser.add_argument(*EXCLUDE_ARGS, **EXCLUDE_KWARGS)
+    parent_parser.add_argument(*EXCLUDE_REASON_ARGS, **EXCLUDE_REASON_KWARGS)
     parent_parser.add_argument(*BASE_PATH_ARGS, **BASE_PATH_KWARGS)
     parent_parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
     parent_parser.add_argument(*DSSE_ARGS, **DSSE_KWARGS)
+    parent_parser.add_argument(
+        *RECORD_ENUMERATION_ARGS, **RECORD_ENUMERATION_KWARGS
+    )
 
     verbosity_args = parent_parser.add_mutually_exclusive_group(required=False)
     verbosity_args.add_argument(*VERBOSE_ARGS, **VERBOSE_KWARGS)
@@ -270,6 +279,8 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 use_dsse=args.use_dsse,
                 signer=signer,
+                record_enumeration=args.record_enumeration,
+                exclusion_reasons=parse_exclude_reasons(args.exclude_reasons),
             )
 
         # Mutually exclusiveness is guaranteed by argparser
@@ -285,6 +296,8 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 metadata_directory=args.metadata_directory,
                 signer=signer,
+                record_enumeration=args.record_enumeration,
+                exclusion_reasons=parse_exclude_reasons(args.exclude_reasons),
             )
 
     except Exception as e:  # noqa: BLE001

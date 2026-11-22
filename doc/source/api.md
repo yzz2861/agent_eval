@@ -41,3 +41,20 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+## Artifact Absence Acceptance
+
+```{eval-rst}
+.. autoclass:: in_toto.acceptance.ArtifactAbsenceCheck
+   :members:
+
+.. autofunction:: in_toto.acceptance.audit_layout
+
+.. autofunction:: in_toto.acceptance.audit_link
+
+.. autofunction:: in_toto.acceptance.audit_metadata
+
+.. autofunction:: in_toto.acceptance.verify_artifact_absence
+
+.. autofunction:: in_toto.acceptance.format_report
+```

@@ -60,6 +60,20 @@ BASE_PATH_KWARGS = {
     ),
 }
 
+EXCLUDE_REASON_ARGS = ["--exclude-reason"]
+EXCLUDE_REASON_KWARGS = {
+    "dest": "exclude_reasons",
+    "required": False,
+    "nargs": "+",
+    "metavar": "<pattern>=<reason>",
+    "help": (
+        "explain why a pattern is excluded, formatted as PATTERN=REASON."
+        " Reasons are recorded in the signed enumeration declaration and are"
+        " required for an exclusion of a forbidden artifact class to count"
+        " as an allowed omission."
+    ),
+}
+
 LSTRIP_PATHS_ARGS = ["--lstrip-paths"]
 LSTRIP_PATHS_KWARGS = {
     "dest": "lstrip_paths",
@@ -88,6 +102,19 @@ KEY_PASSWORD_KWARGS = {
     ),
 }
 OPTS_TITLE = "Optional Arguments" if sys.version_info < (3, 10) else "Options"
+
+
+def parse_exclude_reasons(values):
+    """Parse PATTERN=REASON arguments into a dictionary."""
+    reasons = {}
+    for value in values or []:
+        pattern, separator, reason = value.partition("=")
+        if not separator or not pattern or not reason:
+            raise ValueError(
+                "exclude reasons must be formatted as PATTERN=REASON"
+            )
+        reasons[pattern] = reason
+    return reasons
 
 
 def parse_password_and_prompt_args(args):
@@ -184,6 +211,18 @@ RUN_TIMEOUT_KWARGS = {
         "integer that represents the max timeout in seconds for the "
         "   in-toto-run command."
         f"   Default is '{LINK_CMD_EXEC_TIMEOUT}' seconds."
+    ),
+}
+
+RECORD_ENUMERATION_ARGS = ["--record-enumeration"]
+RECORD_ENUMERATION_KWARGS = {
+    "dest": "record_enumeration",
+    "default": False,
+    "action": "store_true",
+    "help": (
+        "record a signed artifact enumeration declaration (boundary and"
+        " exclusions) in the link metadata. This enables the optional"
+        " artifact absence acceptance during verification."
     ),
 }
 
