@@ -96,6 +96,35 @@ represented. See
 [Analyzing SQL statements](https://sqlparse.readthedocs.io/en/latest/analyzing.html)
 for the traversal API.
 
+## Privilege precheck
+
+`sqlparse.precheck_migration()` is an offline, non-executing precheck for a
+small migration subset. It follows explicit transactions and savepoints,
+preserves stable object identity across `ALTER TABLE ... RENAME TO`, and
+reports the post-commit privilege diff plus a reason for every statement.
+
+```python
+from sqlparse.precheck import ApprovedChange, InitialObject, precheck_migration
+
+result = precheck_migration(
+    sql,
+    initial_objects=[InitialObject(
+        object_id="public.orders", schema="public", name="orders",
+        privileges={"analyst": ["SELECT"]},
+    )],
+    approved_changes=[ApprovedChange(
+        object_id="public.orders", grantee="analyst", privilege="UPDATE",
+    )],
+)
+print(result.decision)
+```
+
+The same entry point is available as `python -m sqlparse.precheck FILE
+--state STATE.json`. The strict grammar subset, transaction semantics and
+result schema are documented in `docs/source/precheck.rst`. Two deliberately
+similar migrations in `examples/privilege_precheck/` demonstrate why savepoint
+scope changes the decision from `approved` to `manual_review`.
+
 ## Command line
 
 Installing sqlparse also provides the `sqlformat` command. It reads from stdin

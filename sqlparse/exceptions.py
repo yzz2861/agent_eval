@@ -10,3 +10,11 @@
 
 class SQLParseError(Exception):
     """Base class for exceptions in this module."""
+
+
+class PrecheckError(SQLParseError):
+    """Base class for errors raised by the privilege precheck."""
+
+
+class PrecheckInputError(PrecheckError):
+    """Raised when initial objects or approved changes are malformed."""

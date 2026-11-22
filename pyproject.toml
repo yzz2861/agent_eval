@@ -37,6 +37,7 @@ Tracker = "https://github.com/andialbrecht/sqlparse/issues"
 
 [project.scripts]
 sqlformat = "sqlparse.__main__:main"
+sqlparse-precheck = "sqlparse.precheck:main"
 
 [project.optional-dependencies]
 dev = [

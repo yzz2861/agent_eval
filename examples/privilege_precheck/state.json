@@ -1,0 +1,21 @@
+{
+  "initial_objects": [
+    {
+      "object_id": "public.orders",
+      "schema": "public",
+      "name": "orders",
+      "kind": "table",
+      "privileges": {
+        "analyst": ["SELECT"]
+      }
+    }
+  ],
+  "approved_changes": [
+    {
+      "object_id": "public.orders",
+      "grantee": "analyst",
+      "privilege": "UPDATE",
+      "action": "grant"
+    }
+  ]
+}

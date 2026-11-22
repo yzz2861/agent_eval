@@ -9,12 +9,36 @@
 
 # Setup namespace
 from collections.abc import Generator
+from importlib import import_module
 from typing import IO, Any
 
 from sqlparse import cli, engine, filters, formatter, sql, tokens
 
 __version__ = "0.6.1"
-__all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
+__all__ = [
+    "ApprovedChange",
+    "InitialObject",
+    "PrecheckResult",
+    "cli",
+    "engine",
+    "filters",
+    "formatter",
+    "precheck",
+    "precheck_migration",
+    "sql",
+    "tokens",
+]
+
+_PRECHECK_EXPORTS = frozenset({
+    "ApprovedChange", "InitialObject", "PrecheckResult", "precheck",
+    "precheck_migration",
+})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _PRECHECK_EXPORTS:
+        return getattr(import_module("sqlparse.precheck"), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def parse(

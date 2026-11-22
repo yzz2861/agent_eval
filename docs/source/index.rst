@@ -32,6 +32,7 @@ Contents
    intro
    api
    analyzing
+   precheck
    ui
    extending
    changes
