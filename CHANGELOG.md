@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Partial input evaluation for integers, bit fields, enums, flags, arrays and conditional fields, reporting provable value ranges, possible branches and collection suggestions. See `dissect.cstruct.partial`.
+
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
 
 ### Changed

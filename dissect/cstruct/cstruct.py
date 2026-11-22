@@ -439,6 +439,38 @@ class cstruct:
         """
         return self.resolve(name).read(stream)
 
+    def read_partial(
+        self,
+        name: type[BaseType] | str,
+        data: Any,
+        unknown: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Evaluate a structure against partially known input.
+
+        This is a convenience wrapper around the partial read evaluator
+        that resolves name against this cstruct instance.
+
+        Args:
+            name: Type name or type to read.
+            data: The collected bytes, a partial byte buffer or a file-like object.
+            unknown: Unknown byte offsets, bits, mask or field names.
+            **kwargs: Additional arguments for the partial read evaluator.
+
+        Returns:
+            A PartialResult for the partially known structure.
+        """
+        from dissect.cstruct.partial import read_partial
+
+        return read_partial(name, data, unknown, cs=self, **kwargs)
+
+    partial_read = read_partial
+    parse_partial = read_partial
+    evaluate_partial = read_partial
+    partial_eval = read_partial
+    analyze_partial = read_partial
+    partial = read_partial
+
     def resolve(self, name: type[BaseType] | str) -> type[BaseType]:
         """Resolve a type name to get the actual type object.
 

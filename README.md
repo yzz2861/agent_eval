@@ -163,6 +163,31 @@ Each structure is registered in a cstruct instance, which can be passed with the
 > runtime-evaluated-base-classes = ["dissect.cstruct.declarative.Struct", "dissect.cstruct.declarative.Union"]
 > ```
 
+### Partial input evaluation
+
+When only some input bytes or bits were collected, a structure can be evaluated against that partial input instead
+of failing on the missing bytes:
+
+```python
+from dissect.cstruct import cstruct
+
+cs = cstruct().load("enum State : uint16 { IDLE = 0, RUN = 0x100, FAULT = 0x200 };")
+cs.load("struct record { uint8 version; State state; uint16 flags; };")
+
+data = bytes([1, 0, 0x02, 0x34, 0x12])
+result = cs.record.read_partial(data, unknown_bytes=[1])
+
+assert result.fields["state"].range == (0x0200, 0x02FF)
+assert "FAULT" in result.fields["state"].possible_branches
+assert "RUN" in result.fields["state"].excluded_branches
+print(result.fields["state"].excluded_branches[0].reason)
+```
+
+Unknown input can be described as byte offsets, absolute bit positions, per-byte bit masks, a compact bit mask, or
+field names. Integer and enum fields report a provable range and the branches that cannot be excluded; flags report
+the individual members that are still possible. Conditional (dynamic length) arrays report their possible lengths.
+When no bits are unknown, the partial result is exact and compares equal to a regular parsed structure.
+
 ### Type parsing
 Aside from loading structure definitions, any of the supported types can be used individually for parsing data. For example, the following is all supported:
 

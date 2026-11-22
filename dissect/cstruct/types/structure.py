@@ -508,6 +508,42 @@ class Structure(BaseType, metaclass=StructureMetaType):
 
     __dynamic_sizes__: dict[str, int]
 
+    @classmethod
+    def read_partial(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        """Evaluate this structure against partially known input.
+
+        Args:
+            data: The collected bytes, a partial byte buffer or a file-like object.
+            unknown: Unknown byte offsets, bits, mask or field names.
+            **kwargs: Additional arguments for the partial read evaluator.
+
+        Returns:
+            A PartialResult for this structure.
+        """
+        from dissect.cstruct.partial import read_partial
+
+        return read_partial(cls, data, unknown, **kwargs)
+
+    @classmethod
+    def partial_read(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        return cls.read_partial(data, unknown, **kwargs)
+
+    @classmethod
+    def parse_partial(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        return cls.read_partial(data, unknown, **kwargs)
+
+    @classmethod
+    def evaluate_partial(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        return cls.read_partial(data, unknown, **kwargs)
+
+    @classmethod
+    def analyze_partial(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        return cls.read_partial(data, unknown, **kwargs)
+
+    @classmethod
+    def partial(cls, data: Any, unknown: Any = None, **kwargs: Any) -> Any:
+        return cls.read_partial(data, unknown, **kwargs)
+
     def __len__(self) -> int:
         return len(self.dumps())
 
