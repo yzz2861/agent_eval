@@ -14,6 +14,7 @@
 
 __version__ = "0.0.33"
 
+from .exceptions import NestedMultipartError, ScopeError
 from .multipart import (
     BaseParser,
     FormParser,
@@ -23,13 +24,57 @@ from .multipart import (
     create_form_parser,
     parse_form,
 )
+from .nested import (
+    ApprovalPolicy,
+    ApprovalScope,
+    Declaration,
+    NestedFormParser,
+    NestedMultipartParser,
+    NestedReceipt,
+    NestedScope,
+    PartDeclaration,
+    PartPath,
+    PartReceipt,
+    Receipt,
+    ReceiveDecision,
+    ReceivePolicy,
+    ReceiveReceipt,
+    ReceiveScope,
+    ScopeDeclaration,
+    ScopeMatch,
+    create_nested_form_parser,
+    parse_nested_form,
+    parse_nested_multipart,
+)
 
 __all__ = (
+    "ApprovalPolicy",
+    "ApprovalScope",
     "BaseParser",
+    "Declaration",
     "FormParser",
     "MultipartParser",
+    "NestedMultipartError",
+    "NestedFormParser",
+    "NestedMultipartParser",
+    "NestedScope",
+    "NestedReceipt",
     "OctetStreamParser",
+    "PartDeclaration",
+    "PartPath",
+    "PartReceipt",
     "QuerystringParser",
+    "Receipt",
+    "ReceiveDecision",
+    "ReceivePolicy",
+    "ReceiveScope",
+    "ReceiveReceipt",
+    "ScopeDeclaration",
+    "ScopeError",
+    "ScopeMatch",
+    "create_nested_form_parser",
     "create_form_parser",
+    "parse_nested_form",
+    "parse_nested_multipart",
     "parse_form",
 )

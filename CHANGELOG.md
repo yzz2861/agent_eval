@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* Add an opt-in nested receiving mode with path-addressed approval scopes and streaming receipts. Parent scopes do not authorize children; child scopes can only tighten effective type limits.
+
 ## 0.0.33 (2026-10-31)
 
 * Drop Python 3.10 support [#329](https://github.com/Kludex/python-multipart/pull/329).

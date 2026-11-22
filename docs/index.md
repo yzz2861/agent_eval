@@ -191,6 +191,22 @@ Part hash: 0b64696c0f7ddb9e3435341720988d5455b3b0f0724688f98ec8e6019af3d931
 ```
 
 
+## Nested MIME packages
+
+If a form contains parts that are themselves MIME packages, use the opt-in
+[`NestedMultipartParser`][python_multipart.nested.NestedMultipartParser] (or
+[`parse_nested_form`][python_multipart.nested.parse_nested_form]).  Parts are
+identified by structural paths such as `0/1`, and approval
+[`ApprovalScope`][python_multipart.nested.ApprovalScope] objects are attached to
+those paths.
+
+A parent scope only approves the parent part.  It never fills in a declaration
+for a child, so two same-named children can be approved separately by path and
+by a package-local correlation identifier.  Child scopes can restrict
+`allowed_types` and `allowed_nested_types`, but cannot widen the parent limits.
+Receipts are emitted only after a part subtree is structurally complete;
+unterminated subtrees are reported as `pending`.
+
 ## Historical note
 
 This package used to be accessed via `import multipart`. This still works for

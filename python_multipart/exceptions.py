@@ -32,3 +32,17 @@ class DecodeError(ParseError):
 
 class FileError(FormParserError, OSError):
     """Exception class for problems with the File class."""
+
+
+class NestedMultipartError(FormParserError):
+    """Raised when the opt-in nested receiving mode cannot honour its policy.
+
+    The parser normally records a rejected receipt instead of raising, so that
+    one malformed child cannot abort the rest of the upload.  This exception is
+    reserved for policies configured with hard failure handling, and for
+    structurally impossible nested packages.
+    """
+
+
+class ScopeError(NestedMultipartError):
+    """Raised for an invalid approval scope or declaration."""

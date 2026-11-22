@@ -50,6 +50,15 @@ Report these as public issues if you think they are bugs.
 - With `UPLOAD_KEEP_FILENAME=True`, an upload replaces any existing file with the same name. Give each user or
   request its own `UPLOAD_DIR`, or leave this option off.
 
+## Nested receiving mode
+
+The opt-in nested mode treats approval scopes as trusted configuration.  A
+scope only approves the part at its own structural path; a parent approval does
+not authorize a child.  `require_declaration` defaults to true, and
+`allowed_nested_types` plus `max_depth` bound recursive parsing.  Receipts
+report what the parser saw; they do not validate the content of an accepted
+part.
+
 ## Reporting
 
 Report vulnerabilities privately through a
