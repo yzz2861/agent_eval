@@ -110,3 +110,19 @@ class FileScanner(object):
         Read an integer from the stream, using current endianness
         """
         return read_int(self.stream, size, signed=signed, endianness=self.endianness)
+
+
+def scan_unknown_blocks(stream, hash_algorithm="sha256"):
+    """
+    Read-only forensics entry point, sitting alongside the normal block
+    reader. It does not decode or modify the stream; it returns a
+    ForensicsReport describing every unknown block, its owning section,
+    its declared length, the byte range that could actually be read, and
+    a digest of the recovered payload.
+
+    :param stream: a binary, seekable file-like object.
+    :param hash_algorithm: a hashlib algorithm name (default "sha256").
+    """
+    from pcapng.forensics import ForensicsScanner
+
+    return ForensicsScanner(stream, hash_algorithm=hash_algorithm).scan()
