@@ -3,7 +3,7 @@ from __future__ import absolute_import, print_function
 import os
 import sys
 
-from macholib import macho_dump, macho_standalone
+from macholib import macho_crypt, macho_dump, macho_standalone
 from macholib.util import is_platform_file
 
 gCommand = None
@@ -46,6 +46,7 @@ def print_usage(fp):
     print("  python -mmacholib [help|--help]", file=fp)
     print("  python -mmacholib dump FILE ...", file=fp)
     print("  python -mmacholib find DIR ...", file=fp)
+    print("  python -mmacholib crypt [--json] FILE ...", file=fp)
     print("  python -mmacholib standalone DIR ...", file=fp)
 
 
@@ -62,6 +63,16 @@ def main():
 
     elif gCommand == "find":
         walk_tree(lambda fp, path: print(path, file=fp), sys.argv[2:])
+
+    elif gCommand in (
+        "crypt",
+        "encryption",
+        "encryption-info",
+        "encrypt-info",
+        "crypt-audit",
+        "audit",
+    ):
+        sys.exit(macho_crypt.main(sys.argv[2:]))
 
     elif gCommand == "standalone":
         for dn in sys.argv[2:]:

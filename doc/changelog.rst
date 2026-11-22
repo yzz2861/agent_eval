@@ -1,6 +1,17 @@
 Release history
 ===============
 
+Unreleased
+----------
+
+* Add ``python -mmacholib crypt`` (and ``macho_crypt``), a read-only
+  audit that compares encryption load commands, segment declarations
+  and the ranges really present in thin and fat Mach-O files.  The
+  report distinguishes fully visible, declaration-only and
+  contradictory findings without decrypting anything.
+* Tolerate section data outside a truncated Mach-O window while
+  loading headers, so partially saved slices can still be audited.
+
 macholib 1.16.4
 ---------------
 

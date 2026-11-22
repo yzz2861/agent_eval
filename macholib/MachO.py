@@ -314,8 +314,11 @@ class MachOHeader(object):
                             low_offset = min(low_offset, seg.offset)
                         if not_zerofill:
                             c = fh.tell()
-                            fh.seek(seg.offset)
-                            sd = fh.read(seg.size)
+                            try:
+                                fh.seek(seg.offset)
+                                sd = fh.read(seg.size)
+                            except IOError:
+                                sd = b""
                             seg.add_section_data(sd)
                             fh.seek(c)
                         segs.append(seg)
