@@ -56,6 +56,37 @@ Simple file type checking
     if __name__ == '__main__':
         main()
 
+Layered container inspection
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For nested archives, ``inspect_layers`` performs a strictly read-only,
+layer-by-layer investigation. The engine never opens a container itself: a
+caller-supplied ``ContainerAdapter`` exposes the local reading strategy, and
+every layer is reported with the signature bytes actually read plus its
+declared type. A member that an upper layer claims but cannot back with read
+evidence is reported as ``pending`` instead of being guessed from its name;
+members sharing a name stay distinguishable by their own reference, path and
+signature evidence, including truncated members flagged by the adapter.
+
+.. code-block:: python
+
+    from filetype.layers import ContainerAdapter, Entry, inspect_layers
+
+
+    class LocalAdapter(ContainerAdapter):
+        def children(self, entry):
+            ...  # return Entry members declared inside entry
+
+        def read_signature(self, entry):
+            ...  # return the header bytes, or None when no evidence exists
+
+    for record in inspect_layers(LocalAdapter()):
+        print(record.path, record.status, record.mime,
+              record.declared_mime, len(record.signature))
+
+See ``examples/layered_archive.py`` for a runnable example with two ordinary
+zip archives carrying an attachment under the same declared name.
+
 Supported types
 ---------------
 
