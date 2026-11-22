@@ -24,6 +24,14 @@ In SignXML, use :class:`signxml.xades.XAdESSigner` and :class:`signxml.xades.XAd
 signatures, respectively. See `XAdES Signatures <#xades-signatures>`_ for examples.
 """
 
+from .disclosure import (
+    DisclosureEvidence,
+    XAdESClaim,
+    XAdESClaimReport,
+    XAdESDisclosureChecker,
+    XAdESDisclosureReport,
+    XAdESDisclosureStatus,
+)
 from .xades import (
     XAdESDataObjectFormat,
     XAdESSignatureConfiguration,

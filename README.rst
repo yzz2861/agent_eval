@@ -297,6 +297,33 @@ SignXML supports signing and verifying documents using `XAdES <https://en.wikipe
         if isinstance(verify_result, XAdESVerifyResult):
             verify_result.signed_properties  # use this to access parsed XAdES properties
 
+Selective disclosure review
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+When an XAdES archive is handed to an external reviewer to check a single compliance claim while the rest of the
+signed properties stay internal, :class:`signxml.xades.XAdESDisclosureChecker` provides a read-only disclosure check.
+For each requested claim it enumerates the pre-existing evidence required to recompute the claim, recomputes every
+piece actually disclosed, and leaves anything that cannot be independently recomputed in a pending-review state
+instead of failing. A claim is only reported as verified when both the subordinate proof embedded in
+``xades:SignedProperties`` and the original signing environment (the ``SignedProperties`` reference digest and the
+``ds:SignatureValue``) recompute. All certificates come from local fixtures; no network access is performed and the
+input signature is never modified.
+
+.. code-block:: python
+
+    from signxml.xades import XAdESClaim, XAdESDisclosureChecker, XAdESDisclosureStatus
+
+    report = XAdESDisclosureChecker().check_disclosure(
+        signed_doc,
+        claims=(XAdESClaim.SIGNING_CERTIFICATE, XAdESClaim.SIGNATURE_POLICY),
+        trusted_signing_certificate=certificate,
+        signature_policy_documents={"MyPolicyIdentifier": policy_document_bytes},
+    )
+    for claim_report in report.claim_reports:
+        print(claim_report.claim, claim_report.status)  # verified, pending_review, or failed
+        for evidence in claim_report.evidence:
+            print(evidence.identifier, evidence.available, evidence.recomputed)
+    report.pending_claims  # claims that remain to be reviewed because evidence was withheld
+
 Authors
 -------
 * `Andrey Kislyuk <https://github.com/kislyuk>`_ and SignXML contributors.

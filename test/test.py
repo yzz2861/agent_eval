@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import copy
 import hashlib
 import itertools
 import os
@@ -48,7 +49,13 @@ from signxml import (
 )
 from signxml.util import ds_tag
 from signxml.xades import (
+    DisclosureEvidence,
+    XAdESClaim,
+    XAdESClaimReport,
     XAdESDataObjectFormat,
+    XAdESDisclosureChecker,
+    XAdESDisclosureReport,
+    XAdESDisclosureStatus,
     XAdESSignatureConfiguration,
     XAdESSignaturePolicy,
     XAdESSigner,
@@ -1937,6 +1944,256 @@ class TestXAdES(unittest.TestCase, LoadExampleKeys):
                     break
             else:
                 XAdESVerifier().verify(doc, **kwargs)
+
+
+class TestXAdESDisclosureCheck(unittest.TestCase, LoadExampleKeys):
+    policy_identifier = "urn:signxml:test:local-signature-policy"
+    policy_document = b"<SignaturePolicy>Local fixture signature policy document</SignaturePolicy>"
+
+    def _build_signed_document(self, *, ecdsa=False, with_policy=True, with_roles=True):
+        if ecdsa:
+            cert_text, key_text = self.load_example_ecdsa_keys()
+        else:
+            cert_text, key_text = self.load_example_keys()
+        certificate = x509.load_pem_x509_certificate(cert_text)
+        with open(os.path.join(os.path.dirname(__file__), "example.xml"), "rb") as fh:
+            document = etree.parse(fh)
+        signer_kwargs = {}
+        if with_policy:
+            policy_digest = hashlib.sha256(self.policy_document).digest()
+            signer_kwargs["signature_policy"] = XAdESSignaturePolicy(
+                Identifier=self.policy_identifier,
+                Description="Local fixture policy",
+                DigestMethod=DigestAlgorithm.SHA256,
+                DigestValue=b64encode(policy_digest).decode(),
+            )
+        if with_roles:
+            signer_kwargs["claimed_roles"] = ["signer"]
+        signed_document = XAdESSigner(
+            signature_algorithm=SignatureMethod.ECDSA_SHA256 if ecdsa else SignatureMethod.RSA_SHA256,
+            **signer_kwargs,
+        ).sign(document, key=key_text, cert=cert_text)
+        return signed_document, certificate
+
+    def _checker(self):
+        return XAdESDisclosureChecker()
+
+    def test_full_disclosure_recomputes_every_claim(self):
+        signed_document, certificate = self._build_signed_document()
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            trusted_signing_certificate=certificate,
+            signature_policy_documents={self.policy_identifier: self.policy_document},
+        )
+        self.assertIsInstance(report, XAdESDisclosureReport)
+        self.assertEqual(
+            set(report.verified_claims),
+            {
+                XAdESClaim.SIGNING_TIME,
+                XAdESClaim.SIGNING_CERTIFICATE,
+                XAdESClaim.SIGNATURE_POLICY,
+                XAdESClaim.SIGNER_ROLE,
+                XAdESClaim.DATA_OBJECT_FORMAT,
+            },
+        )
+        self.assertEqual(report.pending_claims, ())
+        for claim_report in report.claim_reports:
+            self.assertIsInstance(claim_report, XAdESClaimReport)
+            self.assertTrue(all(isinstance(item, DisclosureEvidence) for item in claim_report.evidence))
+            self.assertTrue(all(item.available and item.recomputed for item in claim_report.evidence))
+        evidence_identifiers = {item.identifier for item in report.required_evidence}
+        self.assertIn(XAdESDisclosureChecker.EVIDENCE_SIGNATURE_VALUE, evidence_identifiers)
+        self.assertIn(XAdESDisclosureChecker.EVIDENCE_SIGNED_PROPERTIES_REFERENCE, evidence_identifiers)
+        self.assertIn(XAdESDisclosureChecker.EVIDENCE_SIGNING_CERTIFICATE, evidence_identifiers)
+        self.assertIn(XAdESDisclosureChecker.EVIDENCE_SIGNATURE_POLICY_DOCUMENT, evidence_identifiers)
+
+    def test_withheld_policy_document_leaves_only_policy_claim_pending(self):
+        signed_document, certificate = self._build_signed_document()
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            trusted_signing_certificate=certificate,
+        )
+        self.assertEqual(report.pending_claims, (XAdESClaim.SIGNATURE_POLICY,))
+        policy_report = report.report_for(XAdESClaim.SIGNATURE_POLICY)
+        withheld = [
+            item
+            for item in policy_report.evidence
+            if item.identifier == XAdESDisclosureChecker.EVIDENCE_SIGNATURE_POLICY_DOCUMENT
+        ]
+        self.assertEqual(len(withheld), 1)
+        self.assertFalse(withheld[0].available)
+        self.assertFalse(withheld[0].recomputed)
+        self.assertEqual(
+            set(report.verified_claims),
+            {
+                XAdESClaim.SIGNING_TIME,
+                XAdESClaim.SIGNING_CERTIFICATE,
+                XAdESClaim.SIGNER_ROLE,
+                XAdESClaim.DATA_OBJECT_FORMAT,
+            },
+        )
+
+    def test_removing_one_claims_evidence_keeps_other_claim_independently_verifiable(self):
+        signed_document, certificate = self._build_signed_document()
+        policy_documents = {self.policy_identifier: self.policy_document}
+        shared_claims = (XAdESClaim.SIGNING_CERTIFICATE, XAdESClaim.SIGNATURE_POLICY)
+
+        baseline = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            claims=shared_claims,
+            trusted_signing_certificate=certificate,
+            signature_policy_documents=policy_documents,
+        )
+        self.assertEqual(set(baseline.verified_claims), set(shared_claims))
+
+        # Withdraw the signature policy document shared review material: the policy claim can no longer be
+        # recomputed, but the signing certificate claim remains independently verifiable.
+        policy_only_report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            claims=shared_claims,
+            trusted_signing_certificate=certificate,
+        )
+        self.assertEqual(policy_only_report.pending_claims, (XAdESClaim.SIGNATURE_POLICY,))
+        self.assertEqual(policy_only_report.verified_claims, (XAdESClaim.SIGNING_CERTIFICATE,))
+        self.assertEqual(
+            policy_only_report.report_for(XAdESClaim.SIGNING_CERTIFICATE).status,
+            XAdESDisclosureStatus.VERIFIED,
+        )
+
+        # Remove the embedded signing certificate while supplying the trust anchor from a local fixture: the
+        # signing certificate subordinate proof is recomputed from the anchor, and the policy claim is unaffected.
+        redacted = copy.deepcopy(signed_document)
+        x509_data = redacted.find(".//ds:KeyInfo/ds:X509Data", namespaces=namespaces)
+        x509_data.getparent().remove(x509_data)
+        cert_only_report = self._checker().check_disclosure(
+            etree.tostring(redacted),
+            claims=shared_claims,
+            trusted_signing_certificate=certificate,
+            signature_policy_documents=policy_documents,
+        )
+        # The local trust anchor substitutes for the embedded certificate (subordinate proof still preserved),
+        # so both claims remain independently verifiable without any embedded ds:X509Certificate.
+        self.assertEqual(set(cert_only_report.verified_claims), set(shared_claims))
+        self.assertEqual(cert_only_report.pending_claims, ())
+        self.assertEqual(
+            cert_only_report.report_for(XAdESClaim.SIGNATURE_POLICY).status,
+            XAdESDisclosureStatus.VERIFIED,
+        )
+
+    def test_withheld_trust_anchor_leaves_every_claim_pending_review(self):
+        signed_document, _certificate = self._build_signed_document()
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            signature_policy_documents={self.policy_identifier: self.policy_document},
+        )
+        self.assertEqual(len(report.claim_reports), len(XAdESDisclosureChecker.ALL_CLAIMS))
+        self.assertEqual(report.verified_claims, ())
+        self.assertEqual(set(report.pending_claims), set(XAdESDisclosureChecker.ALL_CLAIMS))
+        for claim_report in report.claim_reports:
+            signature_evidence = next(
+                item
+                for item in claim_report.evidence
+                if item.identifier == XAdESDisclosureChecker.EVIDENCE_SIGNATURE_VALUE
+            )
+            self.assertFalse(signature_evidence.available)
+            self.assertFalse(signature_evidence.recomputed)
+
+    def test_wrong_policy_document_fails_policy_claim_but_not_others(self):
+        signed_document, certificate = self._build_signed_document()
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            trusted_signing_certificate=certificate,
+            signature_policy_documents={self.policy_identifier: b"<SignaturePolicy>tampered</SignaturePolicy>"},
+        )
+        self.assertEqual(report.report_for(XAdESClaim.SIGNATURE_POLICY).status, XAdESDisclosureStatus.FAILED)
+        failed_evidence = [
+            item
+            for item in report.report_for(XAdESClaim.SIGNATURE_POLICY).evidence
+            if item.identifier == XAdESDisclosureChecker.EVIDENCE_SIGNATURE_POLICY_DOCUMENT
+        ][0]
+        self.assertTrue(failed_evidence.available)
+        self.assertFalse(failed_evidence.recomputed)
+        self.assertNotIn(XAdESClaim.SIGNATURE_POLICY, report.verified_claims)
+        self.assertIn(XAdESClaim.SIGNING_TIME, report.verified_claims)
+        self.assertIn(XAdESClaim.SIGNING_CERTIFICATE, report.verified_claims)
+
+    def test_tampered_signed_properties_fails_envelope_recomputation(self):
+        signed_document, certificate = self._build_signed_document()
+        tampered = copy.deepcopy(signed_document)
+        signing_time = tampered.find(".//xades:SigningTime", namespaces=namespaces)
+        signing_time.text = "1999-01-01T00:00:00+00:00"
+        report = self._checker().check_disclosure(
+            etree.tostring(tampered),
+            claims=(XAdESClaim.SIGNING_TIME, XAdESClaim.SIGNING_CERTIFICATE),
+            trusted_signing_certificate=certificate,
+        )
+        for claim_report in report.claim_reports:
+            self.assertEqual(claim_report.status, XAdESDisclosureStatus.FAILED)
+            reference_evidence = next(
+                item
+                for item in claim_report.evidence
+                if item.identifier == XAdESDisclosureChecker.EVIDENCE_SIGNED_PROPERTIES_REFERENCE
+            )
+            self.assertTrue(reference_evidence.available)
+            self.assertFalse(reference_evidence.recomputed)
+
+    def test_check_is_read_only(self):
+        signed_document, certificate = self._build_signed_document()
+        serialized_before = etree.tostring(signed_document)
+        self._checker().check_disclosure(
+            signed_document,
+            trusted_signing_certificate=certificate,
+            signature_policy_documents={self.policy_identifier: self.policy_document},
+        )
+        self.assertEqual(etree.tostring(signed_document), serialized_before)
+
+    def test_untrusted_signing_certificate_fails_signature_value_recomputation(self):
+        signed_document, _certificate = self._build_signed_document()
+        other_certificate_text, _other_key = self.load_example_ecdsa_keys()
+        other_certificate = x509.load_pem_x509_certificate(other_certificate_text)
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            claims=(XAdESClaim.SIGNING_TIME,),
+            trusted_signing_certificate=other_certificate,
+        )
+        self.assertEqual(report.report_for(XAdESClaim.SIGNING_TIME).status, XAdESDisclosureStatus.FAILED)
+
+    def test_ecdsa_signature_value_is_recomputed_from_local_fixture(self):
+        signed_document, certificate = self._build_signed_document(ecdsa=True, with_policy=False, with_roles=False)
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            claims=(XAdESClaim.SIGNING_TIME, XAdESClaim.SIGNING_CERTIFICATE),
+            trusted_signing_certificate=certificate,
+        )
+        self.assertEqual(
+            set(report.verified_claims),
+            {
+                XAdESClaim.SIGNING_TIME,
+                XAdESClaim.SIGNING_CERTIFICATE,
+            },
+        )
+
+    def test_invalid_claim_identifier_is_rejected(self):
+        signed_document, certificate = self._build_signed_document()
+        with self.assertRaises(InvalidInput):
+            self._checker().check_disclosure(
+                etree.tostring(signed_document),
+                claims=("not_a_real_claim",),
+                trusted_signing_certificate=certificate,
+            )
+
+    def test_missing_optional_claims_stay_pending_review(self):
+        signed_document, certificate = self._build_signed_document(with_policy=False, with_roles=False)
+        report = self._checker().check_disclosure(
+            etree.tostring(signed_document),
+            claims=(XAdESClaim.SIGNATURE_POLICY, XAdESClaim.SIGNER_ROLE, XAdESClaim.SIGNING_TIME),
+            trusted_signing_certificate=certificate,
+        )
+        self.assertEqual(
+            set(report.pending_claims),
+            {XAdESClaim.SIGNATURE_POLICY, XAdESClaim.SIGNER_ROLE},
+        )
+        self.assertEqual(report.verified_claims, (XAdESClaim.SIGNING_TIME,))
 
 
 if __name__ == "__main__":
