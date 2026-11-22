@@ -1,5 +1,15 @@
 # changelog
 
+## Unreleased
+
+ - Added core.Asn1Value.original_dump() / .original_bytes to retain the
+   exact loaded BER/DER bytes even after dump(force=True)
+ - Added cms.signing_material() and cms_forensics for a per-signer forensic
+   inventory of signed regions, decoded semantics and outer archival changes,
+   with independent verification status for each CMS signing layer
+ - Added cms_audit as a compatibility import for the forensic inventory
+
+
 ## 1.5.1
 
  - Handle RSASSA-PSS in `keys.PrivateKeyInfo.bit_size` and

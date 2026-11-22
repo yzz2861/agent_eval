@@ -1006,3 +1006,62 @@ CMSAttribute._oid_specs = {
     'encrypt_key_pref': SMIMEEncryptionKeyPreferences,
     'smime_capabilities': SetOfSMIMECapabilites,
 }
+
+
+# Public entry points for the forensic signing-material inventory. The
+# implementation lives in cms_forensics to keep the ASN.1 structure definitions
+# independent of byte-region bookkeeping.
+
+def signing_material(value, verify=True):
+    """
+    Builds a forensic inventory of CMS signing material.
+
+    :param value:
+        A byte string, cms.ContentInfo or cms.SignedData
+
+    :param verify:
+        If True, attempt independent signature verification with the optional
+        cryptography package. Missing keys or backends are reported as
+        unavailable, never as a valid signature.
+
+    :return:
+        A cms_forensics.SigningMaterialInventory
+    """
+
+    from .cms_forensics import inventory
+    return inventory(value, verify=verify)
+
+
+def signing_material_inventory(value, verify=True):
+    return signing_material(value, verify=verify)
+
+
+def inventory_signing_material(value, verify=True):
+    return signing_material(value, verify=verify)
+
+
+def signature_material(value, verify=True):
+    return signing_material(value, verify=verify)
+
+
+def forensic_inventory(value, verify=True):
+    return signing_material(value, verify=verify)
+
+
+inventory = signing_material
+
+
+def _signing_material_method(self, verify=True):
+    return signing_material(self, verify=verify)
+
+
+def _signing_material_inventory_method(self, verify=True):
+    return signing_material(self, verify=verify)
+
+
+for _cls in (ContentInfo, SignedData):
+    _cls.signing_material = _signing_material_method
+    _cls.signing_material_inventory = _signing_material_inventory_method
+    _cls.signature_material = _signing_material_method
+    _cls.forensic_inventory = _signing_material_method
+    _cls.inventory = _signing_material_method

@@ -7,6 +7,7 @@ links to the source for the various pre-defined type classes.
 
  - [Universal Types with BER/DER Decoder and DER Encoder](universal_types.md)
  - [PEM Decoder and Encoder](pem.md)
+ - [CMS Signing-Material Inventory](cms_forensics.md)
 
 ## Reference
 

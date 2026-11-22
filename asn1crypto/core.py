@@ -209,6 +209,16 @@ class Asn1Value(object):
     # The BER/DER trailer bytes
     _trailer = b''
 
+    # Immutable snapshot of the encoding this value was loaded from. These are
+    # never rewritten by dump(), including dump(force=True), so forensic
+    # consumers can always distinguish the bytes on disk from a DER view.
+    _original_header = None
+    _original_contents = None
+    _original_trailer = None
+    _original_method = None
+    _original_indefinite = False
+    _original_input = None
+
     # The native python representation of the value - this is not used by
     # some classes since they utilize _bytes or _unicode
     _native = None
@@ -237,6 +247,7 @@ class Asn1Value(object):
             spec = cls
 
         value, _ = _parse_build(encoded_data, spec=spec, spec_params=kwargs, strict=strict)
+        value._original_input = encoded_data
         return value
 
     def __init__(self, explicit=None, implicit=None, no_explicit=False, tag_type=None, class_=None, tag=None,
@@ -606,6 +617,12 @@ class Asn1Value(object):
 
         self.contents = other.contents
         self._native = copy_func(other._native)
+        self._original_header = other._original_header
+        self._original_contents = other._original_contents
+        self._original_trailer = other._original_trailer
+        self._original_method = other._original_method
+        self._original_indefinite = other._original_indefinite
+        self._original_input = other._original_input
 
     def debug(self, nest_level=1):
         """
@@ -661,6 +678,55 @@ class Asn1Value(object):
             self._trailer = b''
 
         return self._header + contents + self._trailer
+
+    def original_dump(self):
+        """
+        Returns the exact BER/DER bytes this value was loaded from.
+
+        Unlike .dump(), this is not affected by .dump(force=True), mutation of
+        child values, or canonicalization of indefinite-length encodings.
+
+        :return:
+            A byte string of the original encoding, or the current encoding
+            for values that were constructed rather than loaded
+        """
+
+        if self._original_header is None:
+            return self.dump()
+
+        return self._original_header + self._original_contents + self._original_trailer
+
+    @property
+    def original_input(self):
+        """
+        :return:
+            The complete byte string passed to .load(), including any trailing
+            bytes that were not part of the parsed value
+        """
+
+        if self._original_input is None:
+            return self.original_dump()
+        return self._original_input
+
+    @property
+    def original_bytes(self):
+        """
+        :return:
+            A byte string of the exact bytes this value was loaded from
+        """
+
+        return self.original_dump()
+
+    def dump_original(self):
+        return self.original_dump()
+
+    @property
+    def raw_bytes(self):
+        return self.original_dump()
+
+    @property
+    def raw(self):
+        return self.original_dump()
 
 
 class ValueMap():
@@ -5653,6 +5719,18 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
     if not header_set:
         value._header = header
         value._trailer = trailer or b''
+
+    # Keep an immutable copy of the parsed encoding. Later calls to dump() or
+    # dump(force=True) are allowed to rewrite the working representation, but
+    # they must not destroy the bytes that were actually on disk.
+    value._original_header = value._header
+    if isinstance(value, (Sequence, SequenceOf)):
+        value._original_contents = value._contents
+    else:
+        value._original_contents = value.contents
+    value._original_trailer = value._trailer
+    value._original_method = value.method
+    value._original_indefinite = bool(getattr(value, '_indefinite', False))
 
     # Destroy any default value that our contents have overwritten
     value._native = None
