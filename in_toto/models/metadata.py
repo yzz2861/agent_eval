@@ -43,6 +43,7 @@ from in_toto.models._signer import GPGSigner
 from in_toto.models.common import Signable, ValidationMixin
 from in_toto.models.layout import Layout
 from in_toto.models.link import Link
+from in_toto.models.revocation import ReplacementProof, Revocation
 
 ENVELOPE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
 
@@ -212,6 +213,10 @@ class Envelope(SSlibEnvelope, Metadata):
             return Link.read(data)
         if _type == "layout":
             return Layout.read(data)
+        if _type == "revocation":
+            return Revocation.read(data)
+        if _type == "replacement_proof":
+            return ReplacementProof.read(data)
 
         raise InvalidMetadata
 
@@ -281,6 +286,12 @@ class Metablock(Metadata, ValidationMixin):
 
         elif signed_type == "layout":
             signed = Layout.read(signed_data)
+
+        elif signed_type == "revocation":
+            signed = Revocation.read(signed_data)
+
+        elif signed_type == "replacement_proof":
+            signed = ReplacementProof.read(signed_data)
 
         else:
             raise securesystemslib.exceptions.FormatError(
@@ -418,12 +429,15 @@ class Metablock(Metadata, ValidationMixin):
 
     def _validate_signed(self):
         """Private method to check if the 'signed' attribute contains a valid
-        Layout or Link object."""
+        Layout, Link, Revocation or ReplacementProof object."""
 
-        if not isinstance(self.signed, (Layout, Link)):
+        if not isinstance(
+            self.signed, (Layout, Link, Revocation, ReplacementProof)
+        ):
             raise securesystemslib.exceptions.FormatError(
                 "The Metblock's 'signed'"
-                " property has has to be of type 'Link' or 'Layout'."
+                " property has has to be of type 'Link', 'Layout',"
+                " 'Revocation' or 'ReplacementProof'."
             )
 
         # If the signed object is a Link or Layout object validate it.

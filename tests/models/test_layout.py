@@ -363,5 +363,28 @@ class TestLayoutValidator(unittest.TestCase):
             tmp_step.validate()
 
 
+class TestLayoutRevocationFields(unittest.TestCase):
+    """Optional revocation authorization and release binding fields."""
+
+    def setUp(self):
+        self.layout = Layout()
+        self.layout.expires = "2016-11-18T16:44:55Z"
+
+    def test_defaults_are_backwards_compatible(self):
+        self.assertEqual(self.layout.revocation_keys, {})
+        self.assertEqual(self.layout.release_id, "")
+        self.layout.validate()
+
+    def test_wrong_release_id(self):
+        self.layout.release_id = 42
+        with self.assertRaises(securesystemslib.exceptions.FormatError):
+            self.layout._validate_release_id()
+
+    def test_wrong_revocation_keys(self):
+        self.layout.revocation_keys = {"deadbeef": "not-a-key-dict"}
+        with self.assertRaises(securesystemslib.exceptions.FormatError):
+            self.layout._validate_revocation_keys()
+
+
 if __name__ == "__main__":
     unittest.main()

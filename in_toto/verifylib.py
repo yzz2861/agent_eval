@@ -39,6 +39,7 @@ from securesystemslib._gpg.exceptions import KeyExpirationError
 import in_toto.formats
 import in_toto.models.layout
 import in_toto.models.link
+import in_toto.revocationlib
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
@@ -1489,6 +1490,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    revocation_dir_path=None,
+    acceptance_record_path=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1507,8 +1510,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
         https://github.com/in-toto/docs/blob/master/in-toto-spec.md#431-steps
     8.  Verify threshold artifact constraints
     9.  Process step product and material rules
-    10. Execute inspection commands and generate inspection links
-    11. Process inspection product and material rules
+    10. Optionally apply layout-authorized artifact revocations and offline
+        replacement proofs (only if revocation_dir_path is passed)
+    11. Execute inspection commands and generate inspection links
+    12. Process inspection product and material rules
 
     Note: in-toto's verification workflow directly uses the key for verifying
     signatures. It does not communicate with external sources of information for
@@ -1547,6 +1552,17 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      revocation_dir_path (optional): A path to a directory containing optional
+          layout-authorized revocation statements (*.revoke) and offline
+          replacement proofs (*.replace). If not passed, no revocation
+          checks are performed and verification behaves as before.
+
+      acceptance_record_path (optional): A directory path to which three
+          equally named acceptance record files are written, listing the
+          revoked originals, the accepted replacements and the still pending
+          approvals side by side. Only takes effect together with
+          revocation_dir_path.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1568,6 +1584,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           a REQUIRE rule does not find a required artifact.
 
       BadReturnValueError: An inspection command returns a non-zero value.
+
+      RevocationError: A revoked artifact version is still in use without an
+          acceptable replacement proof, or revocation/replacement metadata is
+          malformed, expired, wrongly signed, or bound to a different release.
 
     Side Effects:
       Reads link metadata files from disk.
@@ -1614,6 +1634,28 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     LOG.info("Verifying threshold constraints...")
     verify_threshold_constraints(layout, chain_link_dict)
     reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
+
+    # Optional, layout-authorized revocation workflow. This is fully offline
+    # and only runs when a directory with revocation metadata is passed. It
+    # removes revoked artifact versions (matched by exact path and hashes, so
+    # un-revoked same-path versions are preserved), accepting only replacement
+    # proofs that are signed with an authorized key and bound to the same
+    # release order as the layout.
+    if revocation_dir_path is not None:
+        LOG.info("Verifying artifact revocations...")
+        revocations = in_toto.revocationlib.load_revocations(
+            revocation_dir_path, layout
+        )
+        replacement_proofs = in_toto.revocationlib.load_replacement_proofs(
+            revocation_dir_path, layout
+        )
+        acceptance_report = in_toto.revocationlib.apply_revocations(
+            chain_link_dict, layout, revocations, replacement_proofs
+        )
+        if acceptance_record_path is not None:
+            in_toto.revocationlib.write_acceptance_records(
+                acceptance_report, acceptance_record_path
+            )
 
     # NOTE: Processing step rules before executing inspections guarantees that
     # inspection commands don't run on compromised target files, however, this

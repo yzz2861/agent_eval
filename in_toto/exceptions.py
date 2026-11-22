@@ -41,3 +41,8 @@ class PrefixError(Error):
 
 class InvalidMetadata(Error):  # noqa: N818
     """Indicates that the metadata is not valid."""
+
+
+class RevocationError(Error):
+    """Indicates that a revocation or replacement proof could not be
+    verified or that a revoked artifact version is still in use."""

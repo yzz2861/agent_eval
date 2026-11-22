@@ -186,6 +186,35 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
         ),
     )
 
+    parser.add_argument(
+        "--revocation-dir",
+        dest="revocation_dir",
+        type=str,
+        metavar="<path>",
+        help=(
+            "optional path to a directory with layout-authorized revocation"
+            " statements ('*.revoke') and offline replacement proofs"
+            " ('*.replace'). Revoked artifact versions are then removed from"
+            " verification, and only replacement proofs signed by a key listed"
+            " in the layout's 'revocation_keys' and bound to the same release"
+            " order are accepted as offline evidence."
+        ),
+    )
+
+    parser.add_argument(
+        "--acceptance-record-dir",
+        dest="acceptance_record_dir",
+        type=str,
+        metavar="<path>",
+        help=(
+            "optional directory in which three equally named acceptance"
+            " record files (under 'revoked/', 'replaced/' and 'pending/') are"
+            " written, listing the revoked originals, accepted replacements"
+            " and still pending approvals side by side. Only used together"
+            " with '--revocation-dir'."
+        ),
+    )
+
     verbosity_args = parser.add_mutually_exclusive_group(required=False)
     verbosity_args.add_argument(*VERBOSE_ARGS, **VERBOSE_KWARGS)
     verbosity_args.add_argument(*QUIET_ARGS, **QUIET_KWARGS)
@@ -238,6 +267,8 @@ def main():
             layout_key_dict,
             args.link_dir,
             inspect_timeout=args.inspect_timeout,
+            revocation_dir_path=args.revocation_dir,
+            acceptance_record_path=args.acceptance_record_dir,
         )
 
     except Exception as e:  # noqa: BLE001

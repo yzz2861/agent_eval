@@ -85,6 +85,16 @@ class Layout(Signable):
 
       readme: A human readable description of the software supply chain.
 
+      revocation_keys: A dictionary of public keys authorized to sign
+          revocation statements and replacement proofs, with keyids as dict
+          keys and keys as values. Optional and backwards compatible: a layout
+          without the field does not authorize any revocation.
+
+      release_id: An optional identifier of the release order this layout is
+          bound to. Revocations and replacement proofs carrying a release
+          identifier must match it, which prevents replaying evidence from a
+          different release.
+
     """
 
     # pylint: disable=too-many-instance-attributes
@@ -94,6 +104,8 @@ class Layout(Signable):
     keys = attr.ib()
     expires = attr.ib()
     readme = attr.ib()
+    revocation_keys = attr.ib()
+    release_id = attr.ib()
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -102,6 +114,8 @@ class Layout(Signable):
         self.inspect = kwargs.get("inspect", [])
         self.keys = kwargs.get("keys", {})
         self.readme = kwargs.get("readme", "")
+        self.revocation_keys = kwargs.get("revocation_keys", {})
+        self.release_id = kwargs.get("release_id", "")
 
         # Assign a default expiration (one month) if not expiration date is passed
         # TODO: Is one month a sensible default? In any case, we need a valid
@@ -423,6 +437,14 @@ class Layout(Signable):
             raise securesystemslib.exceptions.FormatError(
                 f"Invalid readme '{self.readme}', value must be a string."
             )
+
+    def _validate_release_id(self):
+        """Private method to check that the release id is a string."""
+        _check_str(self.release_id)
+
+    def _validate_revocation_keys(self):
+        """Private method to ensure that the revocation keys are right."""
+        _check_public_keys(self.revocation_keys)
 
     def _validate_keys(self):
         """Private method to ensure that the keys contained are right."""
