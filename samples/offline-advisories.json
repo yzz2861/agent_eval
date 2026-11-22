@@ -1,0 +1,63 @@
+{
+  "schema": "pip-audit-offline-review/v1",
+  "generated_at": "2026-11-20T00:00:00Z",
+  "note": "Offline, frozen advisory snapshot used instead of live OSV/PyPI queries.",
+  "advisories": [
+    {
+      "id": "PYSEC-2024-WHEEL",
+      "package": "wheel",
+      "version": "0.45.0",
+      "aliases": ["CVE-2024-0001"],
+      "fix_versions": ["0.45.1"],
+      "description": "Wheel record extraction mishandles filenames during build."
+    },
+    {
+      "id": "PYSEC-2025-SETUPTOOLS",
+      "package": "setuptools",
+      "version": "80.0.0",
+      "aliases": [],
+      "fix_versions": ["80.1.0"],
+      "description": "Setuptools package index lookup can be redirected on build hosts."
+    },
+    {
+      "id": "PYSEC-2024-REQUESTS",
+      "package": "requests",
+      "version": "2.32.2",
+      "aliases": ["CVE-2024-35195", "GHSA-requests-cert"],
+      "fix_versions": ["2.32.4"],
+      "description": "Certificate verification bypass when verify=False is combined with a session."
+    },
+    {
+      "id": "PYSEC-2024-URLLIB3",
+      "package": "urllib3",
+      "version": "2.2.1",
+      "aliases": ["GHSA-urllib3-cookie", "CVE-2024-37891"],
+      "fix_versions": ["2.2.2"],
+      "description": "Proxy-Authorization header leaked on cross-origin redirects."
+    },
+    {
+      "id": "PYSEC-2025-COLORAMA",
+      "package": "colorama",
+      "version": "0.4.6",
+      "aliases": [],
+      "fix_versions": ["0.4.7"],
+      "description": "ANSI escape injection on platforms that interpret color codes."
+    },
+    {
+      "id": "PYSEC-2025-JINJA2",
+      "package": "jinja2",
+      "version": "3.1.4",
+      "aliases": ["CVE-2025-10001"],
+      "fix_versions": ["3.1.5"],
+      "description": "Sandbox escape via crafted template attribute access."
+    },
+    {
+      "id": "PYSEC-2025-PYWIN32",
+      "package": "pywin32",
+      "version": "306",
+      "aliases": [],
+      "fix_versions": ["307"],
+      "description": "Insecure service path handling on Windows build agents."
+    }
+  ]
+}

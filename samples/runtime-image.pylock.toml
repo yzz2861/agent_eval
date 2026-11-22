@@ -1,0 +1,68 @@
+lock-version = '1.0'
+environments = ["sys_platform == 'linux'"]
+requires-python = '>=3.12'
+created-by = 'mousebender'
+
+# Runtime-image stage: everything below ships inside the running container.
+# Runtime findings must survive package-name-level merges with build-host
+# exemptions.
+
+[[packages]]
+name = 'requests'
+version = '2.32.2'
+requires-python = '>=3.8'
+dependency-groups = ['runtime']
+wheels = [
+    { name = 'requests-2.32.2-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/requests-2.32.2-py3-none-any.whl', size = 130000, hashes = { sha256 = '3333333333333333333333333333333333333333333333333333333333333333' } },
+]
+
+[[packages]]
+name = 'urllib3'
+version = '2.2.1'
+requires-python = '>=3.8'
+dependency-groups = ['runtime']
+wheels = [
+    { name = 'urllib3-2.2.1-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/urllib3-2.2.1-py3-none-any.whl', size = 120000, hashes = { sha256 = '5555555555555555555555555555555555555555555555555555555555555555' } },
+]
+
+# Runtime-only tool with a clean version; must report no finding.
+[[packages]]
+name = 'certifi'
+version = '2025.1.31'
+requires-python = '>=3.8'
+dependency-groups = ['runtime']
+wheels = [
+    { name = 'certifi-2025.1.31-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/certifi-2025.1.31-py3-none-any.whl', size = 160000, hashes = { sha256 = '6666666666666666666666666666666666666666666666666666666666666666' } },
+]
+
+# Marker-gated runtime package that does not match the linux image marker.
+# The offline advisory still exists, but stage review must mark it
+# not-selected instead of raising a runtime warning.
+[[packages]]
+name = 'colorama'
+version = '0.4.6'
+requires-python = '>=3.8'
+dependency-groups = ['runtime']
+marker = "sys_platform == 'win32'"
+wheels = [
+    { name = 'colorama-0.4.6-py2.py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/colorama-0.4.6-py2.py3-none-any.whl', size = 18000, hashes = { sha256 = '7777777777777777777777777777777777777777777777777777777777777777' } },
+]
+
+# A package pinned to a source tree without a version: pip-audit marks it
+# skipped, and the stage review keeps that evidence.
+[[packages]]
+name = 'internal-utils'
+dependency-groups = ['runtime']
+vcs = 'git'
+repository-url = 'https://example.invalid/internal-utils.git'
+
+# A role the caller did not register in the exemption file. Its finding
+# must be retained verbatim ("role not registered -> keep").
+[[packages]]
+name = 'jinja2'
+version = '3.1.4'
+requires-python = '>=3.7'
+dependency-groups = ['runtime']
+wheels = [
+    { name = 'Jinja2-3.1.4-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/Jinja2-3.1.4-py3-none-any.whl', size = 140000, hashes = { sha256 = '8888888888888888888888888888888888888888888888888888888888888888' } },
+]

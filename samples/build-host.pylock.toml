@@ -1,0 +1,48 @@
+lock-version = '1.0'
+environments = ["sys_platform == 'linux'"]
+requires-python = '>=3.12'
+created-by = 'mousebender'
+
+# Build-host stage: tooling used only while producing the runtime image.
+# Packages here never ship inside the running container.
+
+[[packages]]
+name = 'wheel'
+version = '0.45.0'
+requires-python = '>=3.8'
+dependency-groups = ['build']
+wheels = [
+    { name = 'wheel-0.45.0-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/wheel-0.45.0-py3-none-any.whl', size = 60000, hashes = { sha256 = '1111111111111111111111111111111111111111111111111111111111111111' } },
+]
+
+[[packages]]
+name = 'setuptools'
+version = '80.0.0'
+requires-python = '>=3.9'
+dependency-groups = ['build']
+wheels = [
+    { name = 'setuptools-80.0.0-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/setuptools-80.0.0-py3-none-any.whl', size = 800000, hashes = { sha256 = '2222222222222222222222222222222222222222222222222222222222222222' } },
+]
+
+# Same name+version also appears in the runtime image. The build-time
+# exemption must not cancel the runtime finding for this archive.
+[[packages]]
+name = 'requests'
+version = '2.32.2'
+requires-python = '>=3.8'
+dependency-groups = ['build']
+wheels = [
+    { name = 'requests-2.32.2-py3-none-any.whl', url = 'https://files.pythonhosted.org/packages/requests-2.32.2-py3-none-any.whl', size = 130000, hashes = { sha256 = '3333333333333333333333333333333333333333333333333333333333333333' } },
+]
+
+# Marker-gated build helper: only selected on win32, never on the linux
+# build hosts that the platform actually runs.
+[[packages]]
+name = 'pywin32'
+version = '306'
+requires-python = '>=3.8'
+dependency-groups = ['build']
+marker = "sys_platform == 'win32'"
+wheels = [
+    { name = 'pywin32-306-cp312-cp312-win_amd64.whl', url = 'https://files.pythonhosted.org/packages/pywin32-306-cp312-cp312-win_amd64.whl', size = 9000000, hashes = { sha256 = '4444444444444444444444444444444444444444444444444444444444444444' } },
+]

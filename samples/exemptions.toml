@@ -1,0 +1,51 @@
+# Caller-supplied remediation notices, merged by package name.
+#
+# An exemption only applies when BOTH the package (name + version) and the
+# deployment role match. An exemption granted on the build-host role must
+# never cancel a runtime-image finding for the same archive.
+#
+# Roles that do not appear in `registered_roles` are unknown to the caller;
+# any entry targeting them is retained rather than applied.
+
+registered_roles = ["build-host", "runtime-image"]
+
+[[exemptions]]
+package = "wheel"
+version = "0.45.0"
+role = "build-host"
+advisory = "PYSEC-2024-WHEEL"
+reason = "build-only tooling, never shipped in the runtime image"
+
+[[exemptions]]
+package = "setuptools"
+version = "80.0.0"
+role = "build-host"
+advisory = "PYSEC-2025-SETUPTOOLS"
+reason = "build-only tooling, never shipped in the runtime image"
+
+# This is the trap case: the notice merged requests at package-name level
+# and filed the exemption under the build-host role. The same archive ships
+# in the runtime image, where the finding must remain open.
+[[exemptions]]
+package = "requests"
+version = "2.32.2"
+role = "build-host"
+advisory = "PYSEC-2024-REQUESTS"
+reason = "remediation notice merged by package name; build role only"
+
+# An exemption that names a role the caller never registered. It must be
+# kept verbatim and never applied to any stage automatically.
+[[exemptions]]
+package = "jinja2"
+version = "3.1.4"
+role = "legacy-ci"
+advisory = "PYSEC-2025-JINJA2"
+reason = "drafted against a decommissioned role"
+
+# A correctly-scoped runtime exemption, used to prove the positive path.
+[[exemptions]]
+package = "urllib3"
+version = "2.2.1"
+role = "runtime-image"
+advisory = "GHSA-urllib3-cookie"
+reason = "mitigated by upstream proxy header stripping"
