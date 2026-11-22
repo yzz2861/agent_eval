@@ -42,6 +42,68 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Scoped event views
+------------------
+`Evtx.ScopedView` adds a role-bound browsing layer for sharing only part of an
+EVTX log without losing provenance.  A scope controls three independent
+policies:
+
+* `RecordVisibility` selects the inclusive record-number and/or timestamp range.
+* `FieldVisibility` allows, denies, or redacts element and attribute paths.
+* `AggregateVisibility` permits count/group/summary queries over visible records.
+
+```python
+from Evtx.ScopedView import ScopedArchive
+
+with ScopedArchive("Security.evtx") as archive:
+    scope = archive.scope(
+        record_start=100,
+        record_end=199,
+        role="operator",
+        fields=["System/EventID", "EventData/Data[@Name=\"SubjectUserName\"]"],
+        redact_fields=["System/Computer"],
+        aggregates=["count", "count_by"],
+        min_group_size=2,
+    )
+    view = archive.browse(scope)
+
+    page = view.records(limit=25)
+    print(page.count, page.total)            # this page and the visible total
+    print(page[0].get("System/EventID"))
+    print(page[0].xml)                       # redacted XML
+
+    while page.next_cursor:
+        page = view.records(cursor=page.next_cursor, limit=25)
+```
+
+Cursors are opaque and authenticated against the archive, scope, and role.
+Changing any part of the scope, or using a cursor from another role, raises
+`CursorScopeMismatch` rather than revealing whether the hidden range contains
+records.  `view.count`, `view.count_by`, and `view.summary` only count records
+that are visible to that view.
+
+Pages and snapshots carry HMAC-signed receipts.  A receipt from an old scope
+can still be verified after the scope changes:
+
+```python
+old_page = view.records(limit=10)
+old_snapshot = view.snapshot()
+
+narrower = archive.browse(archive.scope(record_start=150, record_end=199))
+assert narrower.verify_output(old_page)
+assert narrower.verify_output(old_snapshot)
+print(narrower.reconcile(old_page))          # matched / changed / not_visible
+
+try:
+    narrower.records(cursor=old_page.next_cursor)
+except Exception as exc:
+    assert type(exc).__name__ == "CursorScopeMismatch"
+```
+
+Investigators can map a slice back to the original file with
+`view.provenance()` and `record.origin`; operator views expose only ordinals and
+visible counts.  The command-line entry point is `evtx_scoped_view`.
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:

@@ -17,6 +17,13 @@
 __all__ = [
     "Evtx",
     "BinaryParser",
+    "EventBrowser",
+    "EventView",
     "Nodes",
+    "Scope",
+    "ScopedEventView",
+    "ScopedView",
+    "ScopedViews",
     "Views",
+    "scoped",
 ]

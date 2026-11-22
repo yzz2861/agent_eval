@@ -513,3 +513,13 @@ class Record(Block):
         import lxml.etree
 
         return lxml.etree.fromstring((e_views.XML_HEADER + self.xml()).encode("utf-8"))
+
+
+def __getattr__(name):
+    """Lazily expose scoped-view symbols from the main parser module."""
+
+    from . import ScopedView as _scoped_view
+
+    if name in _scoped_view.__all__:
+        return getattr(_scoped_view, name)
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

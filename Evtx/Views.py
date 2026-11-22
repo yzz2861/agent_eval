@@ -21,6 +21,8 @@ import re
 import xml.sax.saxutils
 
 import Evtx.Nodes as e_nodes
+from .ScopedView import *  # noqa: F401,F403
+from .ScopedView import __all__ as _scoped_view_all  # noqa: F401
 
 XML_HEADER = '<?xml version="1.1" encoding="utf-8" standalone="yes" ?>\n'
 
@@ -220,7 +222,7 @@ def evtx_chunk_xml_view(chunk):
         yield record_str, record
 
 
-def evtx_file_xml_view(file_header):
+def evtx_file_xml_view(file_header, scope=None, record_end=None, *, role=None, **scope_kwargs):
     """
     Generate XML representations of the records in an EVTX file.
 
@@ -232,7 +234,14 @@ def evtx_file_xml_view(file_header):
 
     Yields:
       tuple[str, Evtx.Record]: the rendered XML document and the raw record.
+      When a scope or any scope options are supplied, the second item is a
+      scoped ``RecordView`` and hidden fields are redacted.
     """
+    if scope is not None or role is not None or scope_kwargs or record_end is not None:
+        for item in evtx_scoped_xml_view(file_header, scope=scope, record_end=record_end, role=role, **scope_kwargs):
+            yield item
+        return
+
     for chunk in file_header.chunks():
         for record in chunk.records():
             record_str = evtx_record_xml_view(record)
@@ -292,3 +301,25 @@ def evtx_template_readable_view(root_node, cache=None):
     for c in root_node.template().children():
         rec(c, acc)
     return "".join(acc)
+
+
+def evtx_scoped_xml_view(source, scope=None, record_end=None, *, role=None, **scope_kwargs):
+    """Yield redacted XML and record views for a signed scope.
+
+    This mirrors :func:`evtx_file_xml_view`, but each record is projected
+    through the scope field policy and only records visible to the scope are
+    yielded.
+    """
+
+    from .ScopedView import ScopedEventView
+
+    view = ScopedEventView(source, scope=scope, record_end=record_end, role=role, **scope_kwargs)
+    try:
+        for record in view.iter_records():
+            yield str(record.xml), record
+    finally:
+        view.close()
+
+
+evtx_scoped_file_xml_view = evtx_scoped_xml_view
+scoped_file_xml_view = evtx_scoped_xml_view
