@@ -1,6 +1,16 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Added optional `csp.middleware.CSPRenderReviewMiddleware`, which reviews the
+  enforced and report-only policies on the final response of each request
+  against that response's own scope and records an auditable decision on
+  `response.csp_review` (and the `csp.render_review` logger). Redirect
+  responses only leave the auditable decision behind and cannot authorize
+  subsequent requests.
+
 4.0
 ===
 

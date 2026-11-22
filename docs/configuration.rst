@@ -321,6 +321,37 @@ The policy can be changed on a per-view (or even per-request) basis. See
 the :ref:`decorator documentation <decorator-chapter>` for more details.
 
 
+Render Review
+~~~~~~~~~~~~~
+
+An optional render review can be enabled alongside the middleware by adding
+``csp.middleware.CSPRenderReviewMiddleware`` *before*
+``csp.middleware.CSPMiddleware`` in ``MIDDLEWARE``, so that it runs after the
+CSP headers have been written::
+
+    MIDDLEWARE = [
+        "csp.middleware.CSPRenderReviewMiddleware",
+        "csp.middleware.CSPMiddleware",
+        # ...
+    ]
+
+For every request, the review validates the enforced and the report-only
+policy actually carried by the *final* response against that response's own
+scope (its ``_csp_*`` attributes and the relevant settings). The resulting
+record is attached to ``response.csp_review`` and logged through the
+``csp.render_review`` logger. Each policy is reported with its ``source``
+(``settings``, ``config``, ``replace``, ``update``, ``exempt``,
+``excluded-prefix``, ``debug-exempt``, ``no-policy``, ``missing`` or
+``foreign``) and a ``scope_valid`` flag. A ``foreign`` source means the
+header on the final response does not match that response's own scope - for
+example when a CSP approval object was carried over onto a shared error page
+after an internal dispatch.
+
+Redirect responses only leave this auditable decision behind
+(``decision_only`` is ``True``). The record lives on the request/response
+pair alone, so a redirect can never authorize subsequent requests.
+
+
 .. _Content-Security-Policy: https://www.w3.org/TR/CSP/
 .. _Content-Security-Policy-L3: https://w3c.github.io/webappsec-csp/
 .. _spec: Content-Security-Policy_
