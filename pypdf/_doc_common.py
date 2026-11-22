@@ -33,6 +33,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import (
+    TYPE_CHECKING,
     Any,
     NamedTuple,
     cast,
@@ -83,6 +84,9 @@ from .generic import (
 from .generic._files import EmbeddedFile
 from .types import OutlineType, PagemodeType
 from .xmp import XmpInformation
+
+if TYPE_CHECKING:
+    from .navigation import NavigationReport
 
 
 def convert_to_int(d: bytes, size: int) -> int | tuple[Any, ...]:
@@ -1018,6 +1022,34 @@ class PdfDocCommon(ABC):
         'bookmarks').
         """
         return self._get_outline()
+
+    @property
+    def navigation_forensics(self) -> "NavigationReport":
+        """
+        Read-only report of the navigation evidence inside the document.
+
+        The report cross-checks the outline, page annotations, and named
+        destinations. External actions are recorded but never opened. The
+        result is also callable, so both ``reader.navigation_forensics`` and
+        ``reader.navigation_forensics()`` work.
+
+        Returns:
+            A :class:`~pypdf.navigation.NavigationReport`.
+
+        """
+        from .navigation import analyze_navigation  # noqa: PLC0415
+
+        return analyze_navigation(self)
+
+    def inspect_navigation(self, **kwargs: Any) -> "NavigationReport":
+        """Inspect navigation evidence with optional traversal limits."""
+        from .navigation import analyze_navigation  # noqa: PLC0415
+
+        return analyze_navigation(self, **kwargs)
+
+    def navigation_evidence(self, **kwargs: Any) -> "NavigationReport":
+        """Alias for inspect_navigation."""
+        return self.inspect_navigation(**kwargs)
 
     def _get_outline(
         self,

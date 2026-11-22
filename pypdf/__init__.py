@@ -17,6 +17,21 @@ from ._text_extraction import mult
 from ._version import __version__
 from ._writer import ObjectDeletionFlag, PdfWriter
 from .constants import ImageType
+from .navigation import (
+    DuplicateNameGroup,
+    NamedDestinationEntry,
+    NavigationChain,
+    NavigationFinding,
+    NavigationForensics,
+    NavigationHop,
+    NavigationReport,
+    Source,
+    analyze_navigation,
+    audit_navigation,
+    collect_navigation_evidence,
+    inspect_navigation,
+    navigation_forensics,
+)
 from .pagerange import PageRange, parse_filename_page_ranges
 from .papersizes import PaperSize
 
@@ -34,7 +49,14 @@ _debug_versions = (
 __all__ = [
     "Configuration",
     "DocumentInformation",
+    "DuplicateNameGroup",
     "ImageType",
+    "NamedDestinationEntry",
+    "NavigationChain",
+    "NavigationFinding",
+    "NavigationForensics",
+    "NavigationHop",
+    "NavigationReport",
     "ObjectDeletionFlag",
     "PageObject",
     "PageRange",
@@ -42,12 +64,18 @@ __all__ = [
     "PasswordType",
     "PdfReader",
     "PdfWriter",
+    "Source",
     "Transformation",
     "__version__",
     "_debug_versions",
+    "analyze_navigation",
     "apply_configuration",
+    "audit_navigation",
+    "collect_navigation_evidence",
     "get_configuration",
+    "inspect_navigation",
     "mult",
+    "navigation_forensics",
     "overwrite_configuration",
     "parse_filename_page_ranges",
 ]
