@@ -114,3 +114,6 @@ venv.bak/
 uv.lock
 
 .DS_Store
+
+# Evidence revalidation demo generated reports
+examples/evidence_revalidation/output/
