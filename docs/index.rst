@@ -31,6 +31,7 @@ You can contribute to `pypdf on GitHub <https://github.com/py-pdf/pypdf>`_.
    user/handle-attachments
    user/encryption-decryption
    user/merging-pdfs
+   user/export-guard
    user/cropping-and-transforming
    user/reading-pdf-annotations
    user/adding-pdf-annotations
@@ -67,6 +68,7 @@ You can contribute to `pypdf on GitHub <https://github.com/py-pdf/pypdf>`_.
    modules/constants
    modules/configuration
    modules/errors
+   modules/export_guard
    modules/generic
    modules/PdfDocCommon
 

@@ -81,6 +81,14 @@ from .constants import FieldDictionaryAttributes as FA
 from .constants import PageAttributes as PG
 from .constants import TrailerKeys as TK
 from .errors import LimitReachedError, PdfReadError, PyPdfError
+from .export_guard import (
+    ExportAuthorization,
+    ExportBlockReason,
+    ExportDecision,
+    ExportedPageRecord,
+    ExportGuard,
+    ExportGuardError,
+)
 from .generic import (
     PAGE_FIT,
     ArrayObject,
@@ -162,6 +170,18 @@ class PdfWriter(PdfDocCommon):
         keep_initial_header: If true, the PDF header of the cloned document is kept
             when using ``clone_from`` in non-incremental mode.
 
+        export_guard: Optional :class:`~pypdf.ExportGuard` applied to
+            :meth:`append`, :meth:`merge`, :meth:`append_pages_from_reader`
+            and :meth:`clone_document_from_reader`. When set, the caller must
+            provide an already verified ``purpose`` and every source page must
+            be covered by a registered authorization.
+
+        purpose: Already verified export purpose used when ``clone_from`` is
+            set and an export guard is active.
+
+        authorization: Optionally bind a guarded ``clone_from`` to one specific
+            authorization instead of letting the guard select one.
+
     """
 
     incremental: bool
@@ -198,6 +218,9 @@ class PdfWriter(PdfDocCommon):
         keep_initial_header: bool = False,
         incremental_clone_object_count_limit: int | None = 500_000,
         incremental_clone_object_id_limit: int | None = 1_000_000,
+        export_guard: ExportGuard | None = None,
+        purpose: str | None = None,
+        authorization: ExportAuthorization | None = None,
     ) -> None:
         self.strict = strict
         """
@@ -237,6 +260,10 @@ class PdfWriter(PdfDocCommon):
         "Tracks links in pages added to the writer for resolving later."
         self._merged_in_pages: dict[IndirectObject | None, IndirectObject | None] = {}
         "Tracks pages added to the writer and what page they turned into."
+        self._export_guard = export_guard
+        "Optional guard applied to merge/copy operations."
+        self._export_provenance: list[ExportedPageRecord] = []
+        "Source identity of pages copied through a guarded export."
 
         # Security parameters.
         self._incremental_clone_object_count_limit = (
@@ -310,7 +337,11 @@ class PdfWriter(PdfDocCommon):
         if clone_from is not None:
             if not isinstance(clone_from, PdfReader):
                 clone_from = PdfReader(clone_from)
-            self.clone_document_from_reader(clone_from)
+            self.clone_document_from_reader(
+                clone_from,
+                purpose=purpose,
+                authorization=authorization,
+            )
             self._cloned = True
             if keep_initial_header and not self.incremental:
                 self._header = clone_from.pdf_header.encode()
@@ -416,10 +447,12 @@ class PdfWriter(PdfDocCommon):
         """Store how writer is initialized by 'with'."""
         c: bool = self._cloned
         t = self.temp_fileobj
+        export_guard = self._export_guard
         self.__init__()  # type: ignore[misc]
         self._cloned = c
         self._with_as_usage = True
         self.fileobj = t  # type: ignore[assignment]
+        self._export_guard = export_guard
         return self
 
     def __exit__(
@@ -826,6 +859,10 @@ class PdfWriter(PdfDocCommon):
         self,
         reader: PdfReader,
         after_page_append: Callable[[PageObject], None] | None = None,
+        *,
+        purpose: str | None = None,
+        authorization: ExportAuthorization | None = None,
+        export_guard: ExportGuard | None = None,
     ) -> None:
         """
         Copy pages from reader to writer. Includes an optional callback
@@ -843,16 +880,163 @@ class PdfWriter(PdfDocCommon):
                 (delegates to append_pages_from_reader). The single parameter of
                 the callback is a reference to the page just appended to the
                 document.
+            purpose: Already verified export purpose. Required when the
+                writer or the call uses an :class:`~pypdf.ExportGuard`.
+            authorization: Optionally bind this export to a specific
+                authorization instead of letting the guard select one.
+            export_guard: Optional :class:`~pypdf.ExportGuard` for this call.
+                It takes precedence over the writer's guard.
 
         """
+        guard = self._resolve_export_guard(export_guard)
+        decision = None
+        if guard is not None:
+            decision = guard.check(
+                reader,
+                self._resolve_export_purpose(purpose, authorization),
+                None,
+                authorization=authorization,
+            )
         reader_num_pages = len(reader.pages)
         # Copy pages from reader to writer
         for reader_page_number in range(reader_num_pages):
             reader_page = reader.pages[reader_page_number]
             writer_page = self.add_page(reader_page)
+            if decision is not None:
+                self._record_export_page(writer_page, decision, reader_page_number)
             # Trigger callback, pass writer page as parameter
             if callable(after_page_append):
                 after_page_append(writer_page)
+
+    @property
+    def export_guard(self) -> ExportGuard | None:
+        """The default :class:`~pypdf.ExportGuard` used by this writer."""
+        return self._export_guard
+
+    @export_guard.setter
+    def export_guard(self, value: ExportGuard | None) -> None:
+        self._export_guard = value
+
+    @property
+    def export_provenance(self) -> tuple[ExportedPageRecord, ...]:
+        """Source identity of every page copied through a guarded export."""
+        return tuple(self._export_provenance)
+
+    def clear_export_provenance(self) -> None:
+        """Remove the in-memory provenance records for this writer."""
+        self._export_provenance.clear()
+
+    def _resolve_export_guard(
+        self, export_guard: ExportGuard | None
+    ) -> ExportGuard | None:
+        return export_guard if export_guard is not None else self._export_guard
+
+    @staticmethod
+    def _resolve_export_purpose(
+        purpose: str | None, authorization: ExportAuthorization | None
+    ) -> str | None:
+        if purpose is not None:
+            return purpose
+        return authorization.purpose if authorization is not None else None
+
+    def _record_export_page(
+        self,
+        page: PageObject,
+        decision: ExportDecision,
+        source_page_index: int,
+    ) -> ExportedPageRecord:
+        output_page_index = self._get_page_number_by_indirect(page.indirect_reference)
+        if output_page_index is None:  # pragma: no cover - defensive
+            assert self.flattened_pages is not None
+            output_page_index = len(self.flattened_pages) - 1
+        record = ExportedPageRecord(
+            output_page_index=output_page_index,
+            document_id=decision.document.fingerprint,
+            document_name=decision.document.name,
+            source_page_index=source_page_index,
+            authorization_id=decision.authorization.authorization_id,
+            purpose=decision.purpose,
+        )
+        self._export_provenance.append(record)
+        page._export_provenance = record  # type: ignore[attr-defined]
+        return record
+
+    @staticmethod
+    def _export_page_pairs(
+        reader: PdfReader, pages: list[Any]
+    ) -> list[tuple[Any, int]]:
+        """Map each requested page to its actual source document and index."""
+        pairs: list[tuple[Any, int]] = []
+        for page in pages:
+            if isinstance(page, PageObject):
+                source = getattr(page, "pdf", None)
+                if source is None and page.indirect_reference is not None:
+                    source = page.indirect_reference.pdf
+                if source is None:
+                    source = reader
+                page_index = PdfWriter._page_index_in_source(source, page)
+                if page_index is None:
+                    raise ExportGuardError(
+                        "Cannot determine the source page index for a PageObject "
+                        "passed to a guarded export.",
+                        reason=ExportBlockReason.PAGE_NOT_AUTHORIZED,
+                    )
+            else:
+                source = reader
+                page_index = page
+                if page_index < 0:
+                    page_index += len(source.pages)
+                if page_index < 0 or page_index >= len(source.pages):
+                    raise IndexError(
+                        f"page index {page} is outside document range of "
+                        f"{len(source.pages)} pages"
+                    )
+            pairs.append((source, page_index))
+        return pairs
+
+    @staticmethod
+    def _page_index_in_source(source: Any, page: PageObject) -> int | None:
+        try:
+            number = source._get_page_number_by_indirect(page.indirect_reference)
+            if number is not None:
+                return number
+        except Exception:
+            pass
+        for index, candidate in enumerate(source.pages):
+            if candidate is page:
+                return index
+            if candidate.indirect_reference == page.indirect_reference:
+                return index
+        return None
+
+    def _check_export_selection(
+        self,
+        reader: PdfReader,
+        pages: list[Any],
+        purpose: str | None,
+        authorization: ExportAuthorization | None,
+        export_guard: ExportGuard | None,
+    ) -> tuple[ExportGuard | None, list[tuple[Any, int]], dict[int, ExportDecision]]:
+        guard = self._resolve_export_guard(export_guard)
+        if guard is None:
+            return None, [], {}
+        pairs = self._export_page_pairs(reader, pages)
+        groups: dict[int, tuple[Any, list[int]]] = {}
+        for source, page_index in pairs:
+            source_id = id(source)
+            if source_id not in groups:
+                groups[source_id] = (source, [])
+            groups[source_id][1].append(page_index)
+        decisions = {
+            source_id: guard.check(
+                source,
+                self._resolve_export_purpose(purpose, authorization),
+                page_indices,
+                authorization=authorization,
+            )
+            for source_id, (source, page_indices) in groups.items()
+        }
+        return guard, pairs, decisions
 
     def _merge_content_stream_to_page(
         self,
@@ -1209,6 +1393,10 @@ class PdfWriter(PdfDocCommon):
         self,
         reader: PdfReader,
         after_page_append: Callable[[PageObject], None] | None = None,
+        *,
+        purpose: str | None = None,
+        authorization: ExportAuthorization | None = None,
+        export_guard: ExportGuard | None = None,
     ) -> None:
         """
         Create a copy (clone) of a document from a PDF file reader cloning
@@ -1223,8 +1411,23 @@ class PdfWriter(PdfDocCommon):
                 (delegates to append_pages_from_reader). The single parameter of
                 the callback is a reference to the page just appended to the
                 document.
+            purpose: Already verified export purpose. Required when the
+                writer or the call uses an :class:`~pypdf.ExportGuard`.
+            authorization: Optionally bind this export to a specific
+                authorization instead of letting the guard select one.
+            export_guard: Optional :class:`~pypdf.ExportGuard` for this call.
+                It takes precedence over the writer's guard.
 
         """
+        guard = self._resolve_export_guard(export_guard)
+        decision = None
+        if guard is not None:
+            decision = guard.check(
+                reader,
+                self._resolve_export_purpose(purpose, authorization),
+                None,
+                authorization=authorization,
+            )
         self.clone_reader_document_root(reader)
         inf = reader._info
         if self.incremental:
@@ -1244,6 +1447,11 @@ class PdfWriter(PdfDocCommon):
             self._ID = cast(ArrayObject, reader._ID).clone(self)
         except AttributeError:
             pass
+
+        if decision is not None:
+            self._export_provenance.clear()
+            for source_page_index, page in enumerate(self.pages):
+                self._record_export_page(page, decision, source_page_index)
 
         if callable(after_page_append):
             for page in cast(
@@ -2690,6 +2898,10 @@ class PdfWriter(PdfDocCommon):
         pages: PageRange | tuple[int, int] | tuple[int, int, int] | list[int] | list[PageObject] | None = None,
         import_outline: bool = True,
         excluded_fields: list[str] | tuple[str, ...] | None = None,
+        *,
+        purpose: str | None = None,
+        authorization: ExportAuthorization | None = None,
+        export_guard: ExportGuard | None = None,
     ) -> None:
         """
         Identical to the :meth:`merge()<merge>` method, but assumes you want to
@@ -2714,6 +2926,12 @@ class PdfWriter(PdfDocCommon):
             excluded_fields: Provide the list of fields/keys to be ignored
                 if ``/Annots`` is part of the list, the annotation will be ignored
                 if ``/B`` is part of the list, the articles will be ignored
+            purpose: Already verified export purpose. Required when the writer
+                or the call uses an :class:`~pypdf.ExportGuard`.
+            authorization: Optionally bind this export to a specific
+                authorization instead of letting the guard select one.
+            export_guard: Optional :class:`~pypdf.ExportGuard` for this call.
+                It takes precedence over the writer's guard.
 
         """
         if excluded_fields is None:
@@ -2731,6 +2949,9 @@ class PdfWriter(PdfDocCommon):
                 pages,
                 import_outline,
                 excluded_fields,
+                purpose=purpose,
+                authorization=authorization,
+                export_guard=export_guard,
             )
         else:  # if isinstance(outline_item, str):
             self.merge(
@@ -2740,6 +2961,9 @@ class PdfWriter(PdfDocCommon):
                 pages,
                 import_outline,
                 excluded_fields,
+                purpose=purpose,
+                authorization=authorization,
+                export_guard=export_guard,
             )
 
     def merge(
@@ -2750,6 +2974,10 @@ class PdfWriter(PdfDocCommon):
         pages: PageRangeSpec | list[PageObject] | None = None,
         import_outline: bool = True,
         excluded_fields: list[str] | tuple[str, ...] | None = (),
+        *,
+        purpose: str | None = None,
+        authorization: ExportAuthorization | None = None,
+        export_guard: ExportGuard | None = None,
     ) -> None:
         """
         Merge the pages from the given file into the output file at the
@@ -2775,6 +3003,12 @@ class PdfWriter(PdfDocCommon):
             excluded_fields: provide the list of fields/keys to be ignored
                 if ``/Annots`` is part of the list, the annotation will be ignored
                 if ``/B`` is part of the list, the articles will be ignored
+            purpose: Already verified export purpose. Required when the writer
+                or the call uses an :class:`~pypdf.ExportGuard`.
+            authorization: Optionally bind this export to a specific
+                authorization instead of letting the guard select one.
+            export_guard: Optional :class:`~pypdf.ExportGuard` for this call.
+                It takes precedence over the writer's guard.
 
         Raises:
             TypeError: The pages attribute is not configured properly
@@ -2804,8 +3038,11 @@ class PdfWriter(PdfDocCommon):
                 '"pages" must be a tuple of (start, stop[, step]) or a list'
             )
 
+        guard, source_pairs, export_decisions = self._check_export_selection(
+            reader, pages, purpose, authorization, export_guard
+        )
         srcpages = {}
-        for page in pages:
+        for page_position, page in enumerate(pages):
             if isinstance(page, PageObject):
                 pg = page
             else:
@@ -2814,15 +3051,24 @@ class PdfWriter(PdfDocCommon):
             if position is None:
                 # numbers in the exclude list identifies that the exclusion is
                 # only applicable to 1st level of cloning
-                srcpages[pg.indirect_reference.idnum] = self.add_page(
+                added_page = self.add_page(
                     pg, [*list(excluded_fields), 1, "/B", 1, "/Annots"]  # type: ignore[list-item]
                 )
+                srcpages[pg.indirect_reference.idnum] = added_page
             else:
-                srcpages[pg.indirect_reference.idnum] = self.insert_page(
+                added_page = self.insert_page(
                     pg, position, [*list(excluded_fields), 1, "/B", 1, "/Annots"]  # type: ignore[list-item]
                 )
+                srcpages[pg.indirect_reference.idnum] = added_page
                 position += 1
             srcpages[pg.indirect_reference.idnum].original_page = pg
+            if guard is not None:
+                source, source_page_index = source_pairs[page_position]
+                self._record_export_page(
+                    added_page,
+                    export_decisions[id(source)],
+                    source_page_index,
+                )
 
         reader._named_destinations = (
             reader.named_destinations

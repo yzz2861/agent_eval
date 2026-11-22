@@ -17,6 +17,17 @@ from ._text_extraction import mult
 from ._version import __version__
 from ._writer import ObjectDeletionFlag, PdfWriter
 from .constants import ImageType
+from .export_guard import (
+    DocumentIdentity,
+    ExportAuditEvent,
+    ExportAuditRecord,
+    ExportAuthorization,
+    ExportBlockReason,
+    ExportDecision,
+    ExportedPageRecord,
+    ExportGuard,
+    ExportGuardError,
+)
 from .pagerange import PageRange, parse_filename_page_ranges
 from .papersizes import PaperSize
 
@@ -33,7 +44,16 @@ _debug_versions = (
 
 __all__ = [
     "Configuration",
+    "DocumentIdentity",
     "DocumentInformation",
+    "ExportAuditEvent",
+    "ExportAuditRecord",
+    "ExportAuthorization",
+    "ExportBlockReason",
+    "ExportDecision",
+    "ExportGuard",
+    "ExportGuardError",
+    "ExportedPageRecord",
     "ImageType",
     "ObjectDeletionFlag",
     "PageObject",
