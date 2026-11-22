@@ -18,6 +18,7 @@ links to the source for the various pre-defined type classes.
  - [Online certificate status protocol (OCSP)](../asn1crypto/ocsp.py), `asn1crypto.ocsp`
  - [Certificate signing requests (CSRs)](../asn1crypto/csr.py), `asn1crypto.csr`
  - [Private key/certificate containers (PKCS#12)](../asn1crypto/pkcs12.py), `asn1crypto.pkcs12`
+ - [Read-only PKCS#12 directory reconciliation](../asn1crypto/pkcs12_directory.py), `asn1crypto.pkcs12_directory`
  - [Cryptographic message syntax (CMS, PKCS#7)](../asn1crypto/cms.py), `asn1crypto.cms`
  - [Time stamp protocol (TSP)](../asn1crypto/tsp.py), `asn1crypto.tsp`
  - [PDF signatures](../asn1crypto/pdf.py), `asn1crypto.pdf`

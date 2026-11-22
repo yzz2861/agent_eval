@@ -119,6 +119,15 @@ class Pfx(Sequence):
             self._authenticated_safe = AuthenticatedSafe.load(content.native)
         return self._authenticated_safe
 
+    def directory(self, registry=None, **kwargs):
+        from .pkcs12_directory import reconcile
+        return reconcile(self, registry, **kwargs)
+
+    certificate_directory = directory
+    reconcile_directory = directory
+    read_directory = directory
+    inventory = directory
+
 
 class AuthenticatedSafe(SequenceOf):
     _child_spec = ContentInfo
@@ -191,3 +200,20 @@ class SafeBag(Sequence):
 
 
 SafeContents._child_spec = SafeBag
+
+
+def directory(pfx, registry=None, **kwargs):
+    # Builds a read-only certificate directory report from a PKCS#12
+    # container. The report preserves container paths and placeholder state.
+    from .pkcs12_directory import reconcile
+    return reconcile(pfx, registry, **kwargs)
+
+
+reconcile = directory
+reconcile_directory = directory
+read_directory = directory
+inventory = directory
+audit = directory
+audit_directory = directory
+inspect = directory
+inspect_directory = directory
