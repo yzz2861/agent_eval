@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "manifest_id": "phase2-handover-with-proof",
+  "as_of": "2026-11-20",
+  "components": [
+    {
+      "component_id": "shared-core",
+      "owner": "team-platform",
+      "legacy_owner": "team-legacy",
+      "paths": [
+        "src/shared"
+      ],
+      "status": "active"
+    },
+    {
+      "component_id": "web-ui",
+      "owner": "team-platform",
+      "legacy_owner": "team-legacy",
+      "paths": [
+        "src/web"
+      ],
+      "status": "active"
+    },
+    {
+      "component_id": "old-console",
+      "owner": "team-legacy",
+      "legacy_owner": "team-legacy",
+      "paths": [
+        "src/console"
+      ],
+      "status": "active"
+    },
+    {
+      "component_id": "web-next-ui",
+      "owner": "team-next",
+      "files": [
+        "src/web-next/views.py"
+      ],
+      "status": "active"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "portal-old@1.8.0",
+      "owner": "team-platform",
+      "legacy_owner": "team-legacy",
+      "status": "maintenance"
+    },
+    {
+      "artifact_id": "portal-new@2.0.0",
+      "owner": "team-platform",
+      "legacy_owner": "team-legacy",
+      "status": "active"
+    },
+    {
+      "artifact_id": "console@0.9.0",
+      "owner": "team-platform",
+      "legacy_owner": "team-legacy",
+      "status": "eol"
+    }
+  ],
+  "relations": [
+    {
+      "artifact_id": "portal-old@1.8.0",
+      "component_id": "shared-core",
+      "evidence": {
+        "kind": "build-provenance",
+        "id": "build-portal-old@1.8.0-shared-core",
+        "digest": "sha256:portal-old@1.8.0-shared-core"
+      }
+    },
+    {
+      "artifact_id": "portal-old@1.8.0",
+      "component_id": "web-ui",
+      "evidence": {
+        "kind": "build-provenance",
+        "id": "build-portal-old@1.8.0-web-ui",
+        "digest": "sha256:portal-old@1.8.0-web-ui"
+      }
+    },
+    {
+      "artifact_id": "portal-new@2.0.0",
+      "component_id": "shared-core",
+      "evidence": {
+        "kind": "build-provenance",
+        "id": "build-portal-new@2.0.0-shared-core",
+        "digest": "sha256:portal-new@2.0.0-shared-core"
+      }
+    },
+    {
+      "artifact_id": "portal-new@2.0.0",
+      "component_id": "web-ui",
+      "evidence": {
+        "kind": "build-provenance",
+        "id": "build-portal-new@2.0.0-web-ui",
+        "digest": "sha256:portal-new@2.0.0-web-ui"
+      }
+    },
+    {
+      "artifact_id": "console@0.9.0",
+      "component_id": "old-console",
+      "evidence": {
+        "kind": "build-provenance",
+        "id": "build-console@0.9.0-old-console",
+        "digest": "sha256:console@0.9.0-old-console"
+      }
+    }
+  ],
+  "handovers": [
+    {
+      "component_id": "shared-core",
+      "from_owner": "team-legacy",
+      "to_owner": "team-platform",
+      "effective": "2026-11-01",
+      "proof": {
+        "kind": "change-request",
+        "id": "CHG-4242",
+        "uri": "https://changes.example.invalid/CHG-4242",
+        "digest": "sha256:handover-core"
+      }
+    },
+    {
+      "component_id": "web-ui",
+      "from_owner": "team-legacy",
+      "to_owner": "team-platform",
+      "effective": "2026-11-01",
+      "proof": {
+        "kind": "change-request",
+        "id": "CHG-4243",
+        "uri": "https://changes.example.invalid/CHG-4243",
+        "digest": "sha256:handover-ui"
+      }
+    },
+    {
+      "component_id": "old-console",
+      "from_owner": "team-legacy",
+      "to_owner": "team-platform",
+      "effective": "2026-11-01",
+      "proof": {}
+    }
+  ],
+  "options": {
+    "fuzzy_match_threshold": 0.82
+  }
+}
