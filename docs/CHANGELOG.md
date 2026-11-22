@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+* ngclient: Add offline remediation planning from hash-pinned, verified
+  metadata views. Plan install and rollback routes per device group,
+  installed version and target use without mixing snapshot and delegation
+  generations.
+
 ### Changed
 
 * Add Python 3.15 to tested versions, remove 3.10 from tested versions.

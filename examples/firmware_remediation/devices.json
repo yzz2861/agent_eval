@@ -1,0 +1,12 @@
+[
+  {
+    "device_id": "mon-01",
+    "group": "monitoring",
+    "installed_version": "1.0.0"
+  },
+  {
+    "device_id": "spare-01",
+    "group": "spare",
+    "installed_version": "1.0.0"
+  }
+]
