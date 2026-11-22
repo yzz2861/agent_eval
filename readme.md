@@ -51,6 +51,7 @@ revocation checks.
    - Caching of CRLs/OCSP responses
  - CRL and OCSP HTTP clients
  - Point-in-time validation
+ - Offline trust-root removal impact assessment with frozen certificate material, isolated trust configurations and checkable replacement paths
 
 Unsupported features:
  

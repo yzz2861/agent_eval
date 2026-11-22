@@ -1,3 +1,9 @@
+## 0.12.0.dev1
+
+ - Added offline trust-root removal impact assessment via `OfflineImpactAssessor`, which compares two trust configurations against frozen certificate material at a fixed validation moment
+ - Impact is reported per business constraint as trusted, root removed, distrusted or indeterminate, with checkable replacement paths and structured failure records
+ - Each trust configuration uses an isolated validation context and certificate registry so cached results are never reused across incompatible configurations; network fetching is always disabled
+
 # changelog
 
 ## 0.11.1

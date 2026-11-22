@@ -148,6 +148,7 @@ def test_classes():
     )
 
     from .test_certificate_validator import CertificateValidatorTests
+    from .test_impact import OfflineImpactAssessorTests
     from .test_crl_client import CRLClientTests
     from .test_ocsp_client import OCSPClientTests
     from .test_registry import RegistryTests
@@ -155,6 +156,7 @@ def test_classes():
 
     return [
         CertificateValidatorTests,
+        OfflineImpactAssessorTests,
         CRLClientTests,
         OCSPClientTests,
         RegistryTests,

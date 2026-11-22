@@ -406,3 +406,83 @@ validator = CertificateValidator(end_entity_cert, validation_context=context)
 If moment-in-time validation is being performed, the `allow_fetching` option
 can not be used. Instead, any revocation CRLs or OCSP responses should be
 provided via the `crls` or `ocsps` parameters.
+
+
+## Offline Trust-Root Removal Impact Assessment
+
+When one or more historical trust roots are scheduled for removal,
+`OfflineImpactAssessor()` determines which business usages of a frozen set of
+certificates are affected. It compares two trust configurations at a fixed
+validation moment:
+
+- `current_trust_roots`: the trust configuration before the removal
+- `post_removal_trust_roots`: the trust configuration after the removal
+
+All validation is performed offline. `allow_fetching` is hard-coded to
+`False`, so only the supplied end-entity certificates, intermediate
+certificates, CRLs and OCSP responses are ever used. Each trust configuration
+receives its own `ValidationContext` and `CertificateRegistry`, meaning the
+validation and revocation caches are never shared between the two
+configurations.
+
+```python
+from datetime import datetime
+from asn1crypto.util import timezone
+from certvalidator import (
+    BusinessConstraint,
+    OfflineImpactAssessor,
+    STATUS_ROOT_REMOVED,
+    STATUS_TRUSTED,
+)
+
+moment = datetime(2026, 6, 1, tzinfo=timezone.utc)
+tls_usage = BusinessConstraint(
+    key_usage={'digital_signature', 'key_encipherment'},
+    extended_key_usage={'server_auth'},
+    label='tls_server_auth',
+)
+
+assessor = OfflineImpactAssessor(
+    current_trust_roots=current_roots,
+    post_removal_trust_roots=post_removal_roots,
+    intermediate_certs=frozen_chain_certs,
+    moment=moment,
+)
+
+assessment = assessor.assess(end_entity_cert, [tls_usage])
+for impact in assessment.usage_impacts:
+    print(impact.label, impact.status)
+```
+
+Four outcomes are reported per business constraint:
+
+- `STATUS_TRUSTED` - a validating path exists under both configurations. When
+  the post-removal path differs, it is attached as `replacement_path`, a
+  `PathRecord` listing every certificate from the replacement trust anchor to
+  the end-entity certificate, including anchor fingerprints for independent
+  verification.
+- `STATUS_ROOT_REMOVED` - the only validating path chains to a trust root that
+  is present in the current configuration but absent from the post-removal
+  configuration. The current path and a human-readable reason identifying the
+  removed anchor are included.
+- `STATUS_DISTRUSTED` - a complete path was built but validation failed for a
+  reason unrelated to the removal, such as expiry, an invalid signature or a
+  business constraint the certificate does not satisfy.
+- `STATUS_INDETERMINATE` - the frozen material is insufficient to reach a
+  definite answer at the validation moment, e.g. a missing intermediate
+  certificate (`PathBuildingError`) or unavailable revocation information in
+  `hard-fail`/`require` mode.
+
+`assessor.removed_roots` lists the anchors that differ between the two
+configurations. `assess_all()` runs the same assessment across a batch of
+archived end-entity certificates.
+
+### Why Joint Removal Differs From Single-Root Trials
+
+Removing roots one at a time underestimates the impact of a joint removal. A
+certificate whose chain can anchor at either of two historical roots survives
+every single-root trial, because the other root still validates it. Removing
+both roots in the same change eliminates every anchor simultaneously. The test
+suite includes a small generated certificate tree demonstrating this: each
+single-root removal reports the cross-anchored certificate as trusted, while
+the joint removal reports `STATUS_ROOT_REMOVED`.

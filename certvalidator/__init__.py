@@ -6,6 +6,18 @@ from asn1crypto.x509 import Certificate
 
 from .context import ValidationContext
 from .errors import ValidationError, PathBuildingError, InvalidCertificateError
+from .impact import (
+    BusinessConstraint,
+    FailureRecord,
+    ImpactAssessment,
+    OfflineImpactAssessor,
+    PathRecord,
+    STATUS_DISTRUSTED,
+    STATUS_INDETERMINATE,
+    STATUS_ROOT_REMOVED,
+    STATUS_TRUSTED,
+    UsageImpact,
+)
 from .validate import validate_path, validate_tls_hostname, validate_usage
 from .version import __version__, __version_info__
 from ._errors import pretty_message
@@ -15,7 +27,17 @@ from ._types import type_name, str_cls, byte_cls
 __all__ = [
     '__version__',
     '__version_info__',
+    'BusinessConstraint',
+    'FailureRecord',
     'CertificateValidator',
+    'ImpactAssessment',
+    'OfflineImpactAssessor',
+    'PathRecord',
+    'STATUS_DISTRUSTED',
+    'STATUS_INDETERMINATE',
+    'STATUS_ROOT_REMOVED',
+    'STATUS_TRUSTED',
+    'UsageImpact',
     'ValidationContext',
 ]
 

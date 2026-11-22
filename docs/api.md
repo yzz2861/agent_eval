@@ -200,3 +200,61 @@
 >
 > > A list of newly-fetched asn1crypto.x509.Certificate objects that were
 > > obtained from OCSP responses and CRLs
+
+### `OfflineImpactAssessor()` class
+
+Performs an offline comparison of two trust configurations against frozen
+certificate material, reusing the regular path building and validation logic.
+Network fetching is always disabled, and each configuration uses an isolated
+`ValidationContext`, so no cached validation result is shared across
+configurations.
+
+> ##### constructor
+>
+> > ```python
+> > def __init__(self, current_trust_roots, post_removal_trust_roots,
+> >                  intermediate_certs=None, moment=None,
+> >                  revocation_mode='soft-fail', crls=None, ocsps=None,
+> >                  weak_hash_algos=None, whitelisted_certs=None)
+> > ```
+>
+> > Both trust-root parameters accept lists of DER/PEM byte strings or
+> > asn1crypto.x509.Certificate objects. `moment` must be a timezone-aware
+> > datetime and defaults to the current UTC time. `revocation_mode` accepts
+> > 'soft-fail', 'hard-fail' or 'require'.
+
+##### `.removed_roots` attribute
+
+> A list of asn1crypto.x509.Certificate objects present in
+> `current_trust_roots` but absent from `post_removal_trust_roots`, matched by
+> SHA-256 fingerprint.
+
+##### `.assess_usage()` method
+
+> > ```python
+> > def assess_usage(self, end_entity_cert, constraint)
+> > ```
+>
+> > `constraint` is a `BusinessConstraint` object. Returns a
+> > `UsageImpact` with a `status` of `STATUS_TRUSTED`,
+> > `STATUS_ROOT_REMOVED`, `STATUS_DISTRUSTED` or
+> > `STATUS_INDETERMINATE`, plus `current_path`,
+> > `replacement_path` (when available) and structured `failures`.
+
+##### `.assess()` and `.assess_all()` methods
+
+> `assess()` evaluates one end-entity certificate against multiple
+> `BusinessConstraint` objects and returns an `ImpactAssessment`.
+> `assess_all()` repeats the assessment for a batch of end-entity certificates.
+
+### Supporting classes
+
+- `BusinessConstraint(key_usage, extended_key_usage, extended_optional, label)`
+  describes one required usage of the end-entity certificate.
+- `UsageImpact` exposes `status`, `reason`, `current_path`,
+  `replacement_path`, `failures` and the `is_affected` flag.
+- `ImpactAssessment` groups the per-usage results and exposes
+  `statuses`, `affected_usages` and `is_fully_trusted`.
+- `PathRecord` is an ordered, iterable list of certificates from the trust
+  anchor to the end-entity certificate, with `subject_names` and the anchor
+  SHA-1/SHA-256 fingerprints for independent verification.
