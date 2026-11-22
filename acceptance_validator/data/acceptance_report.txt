@@ -1,0 +1,38 @@
+Offline release-gate report
+===========================
+conclusions checked: 6 | releasable: 3 | blocked: 3
+
+[RELEASE] C1 entity attributes corroborated by two units (report--c1000000-0000-4000-8000-000000000001, scope=entity-attribute)
+  cited references: 2 | distinct sources: 2 | distinct raw material: 2
+  - usable authorization and >= 2 independent observations confirmed
+
+[HOLD] C2 six references all quoting one authorized source (report--c2000000-0000-4000-8000-000000000002, scope=entity-attribute)
+  cited references: 6 | distinct sources: 1 | distinct raw material: 1
+  reused material (references preserved, counted once): MAT-SHARED x6
+  - cannot release: only 1 distinct (source, material) observation(s); need 2 independent
+  - cannot release: only 1 distinct observing source(s); need 2 independent sources
+  - cannot release: only 1 distinct raw material item(s); need 2 independent materials
+
+[HOLD] C3 relationship inference under an unapproved warrant (report--c3000000-0000-4000-8000-000000000003, scope=relationship)
+  cited references: 2 | distinct sources: 0 | distinct raw material: 0
+  - cannot release: no approved investigation authorization permits 'external-release' for scope 'relationship'
+  - cannot release: 2 of 2 cited references are not usable actual observations
+  - cannot release: only 0 distinct (source, material) observation(s); need 2 independent
+  - cannot release: only 0 distinct observing source(s); need 2 independent sources
+  - cannot release: only 0 distinct raw material item(s); need 2 independent materials
+
+[HOLD] C4 derived link released beyond the authorization scope (report--c4000000-0000-4000-8000-000000000004, scope=relationship)
+  cited references: 2 | distinct sources: 0 | distinct raw material: 0
+  - cannot release: no approved investigation authorization permits 'external-release' for scope 'relationship'
+  - cannot release: 2 of 2 cited references are not usable actual observations
+  - cannot release: only 0 distinct (source, material) observation(s); need 2 independent
+  - cannot release: only 0 distinct observing source(s); need 2 independent sources
+  - cannot release: only 0 distinct raw material item(s); need 2 independent materials
+
+[RELEASE] C5 report alpha reusing shared material (report--c5000000-0000-4000-8000-000000000005, scope=entity-attribute)
+  cited references: 2 | distinct sources: 2 | distinct raw material: 2
+  - usable authorization and >= 2 independent observations confirmed
+
+[RELEASE] C5 report beta reusing the same shared material (report--c5000000-0000-4000-8000-000000000006, scope=entity-attribute)
+  cited references: 2 | distinct sources: 2 | distinct raw material: 2
+  - usable authorization and >= 2 independent observations confirmed

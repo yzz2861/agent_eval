@@ -1,0 +1,579 @@
+{
+  "type": "bundle",
+  "id": "bundle--de03a18a-a2aa-417f-bb04-4d41315bcd83",
+  "objects": [
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--aa000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.137937Z",
+      "definition_type": "x-investigation-authorization",
+      "name": "Warrant-42",
+      "definition": {
+        "x_authorization_id": "WARRANT-42",
+        "x_permitted_purposes": [
+          "external-release"
+        ],
+        "x_scope": [
+          "entity-attribute",
+          "relationship"
+        ],
+        "x_status": "approved"
+      }
+    },
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--aa000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.138326Z",
+      "definition_type": "x-investigation-authorization",
+      "name": "Draft warrant (not approved)",
+      "definition": {
+        "x_authorization_id": "DRAFT-77",
+        "x_permitted_purposes": [
+          "external-release"
+        ],
+        "x_scope": [
+          "entity-attribute",
+          "relationship"
+        ],
+        "x_status": "pending"
+      }
+    },
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--aa000000-0000-4000-8000-000000000003",
+      "created": "2026-11-22T22:51:48.138454Z",
+      "definition_type": "x-investigation-authorization",
+      "name": "Entity-attribute only authorization",
+      "definition": {
+        "x_authorization_id": "ATTR-ONLY-9",
+        "x_permitted_purposes": [
+          "external-release"
+        ],
+        "x_scope": [
+          "entity-attribute"
+        ],
+        "x_status": "approved"
+      }
+    },
+    {
+      "type": "identity",
+      "spec_version": "2.1",
+      "id": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.138608Z",
+      "modified": "2026-11-22T22:51:48.138608Z",
+      "name": "Observer Org A",
+      "identity_class": "organization"
+    },
+    {
+      "type": "identity",
+      "spec_version": "2.1",
+      "id": "identity--0b000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.138725Z",
+      "modified": "2026-11-22T22:51:48.138725Z",
+      "name": "Observer Org B",
+      "identity_class": "organization"
+    },
+    {
+      "type": "identity",
+      "spec_version": "2.1",
+      "id": "identity--0c000000-0000-4000-8000-000000000003",
+      "created": "2026-11-22T22:51:48.138808Z",
+      "modified": "2026-11-22T22:51:48.138808Z",
+      "name": "Observer Org C",
+      "identity_class": "organization"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--541e063b-7bbf-59d9-b261-234819a7f7c1",
+      "name": "artifact-MAT-001.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c1000000-0000-4000-8000-000000000001",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.139059Z",
+      "modified": "2026-11-22T22:51:48.139059Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--541e063b-7bbf-59d9-b261-234819a7f7c1"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-001"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--73944fbb-de3a-58c1-bf15-2c9d824f0eea",
+      "name": "artifact-MAT-002.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c1000000-0000-4000-8000-000000000002",
+      "created_by_ref": "identity--0b000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.14014Z",
+      "modified": "2026-11-22T22:51:48.14014Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--73944fbb-de3a-58c1-bf15-2c9d824f0eea"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-002"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c1000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.140301Z",
+      "modified": "2026-11-22T22:51:48.140301Z",
+      "name": "C1 entity attributes corroborated by two units",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c1000000-0000-4000-8000-000000000001",
+        "observed-data--c1000000-0000-4000-8000-000000000002"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_conclusion_scope": "entity-attribute",
+      "x_review_cell": "entity-attribute"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--fc3910fe-554e-50e5-97e6-d8f8449de737",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000003",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.140611Z",
+      "modified": "2026-11-22T22:51:48.140611Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--fc3910fe-554e-50e5-97e6-d8f8449de737"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--8a5e68e0-f583-5087-941d-ec75a83f313d",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000004",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.140842Z",
+      "modified": "2026-11-22T22:51:48.140842Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--8a5e68e0-f583-5087-941d-ec75a83f313d"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--8e6c08bd-30fe-5224-aa3c-c2029ffa4237",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000005",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.141061Z",
+      "modified": "2026-11-22T22:51:48.141061Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--8e6c08bd-30fe-5224-aa3c-c2029ffa4237"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--c0710eaf-339f-55df-8d33-444d4ca8f453",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000006",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.141541Z",
+      "modified": "2026-11-22T22:51:48.141541Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--c0710eaf-339f-55df-8d33-444d4ca8f453"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--a8179024-2c34-5fc5-8634-661d6a78bee7",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000007",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.141817Z",
+      "modified": "2026-11-22T22:51:48.141817Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--a8179024-2c34-5fc5-8634-661d6a78bee7"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--fdcbe7ad-f16d-50f1-8cd6-3bfae6dc784e",
+      "name": "artifact-MAT-SHARED.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c2000000-0000-4000-8000-000000000008",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.142041Z",
+      "modified": "2026-11-22T22:51:48.142041Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--fdcbe7ad-f16d-50f1-8cd6-3bfae6dc784e"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c2000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.142192Z",
+      "modified": "2026-11-22T22:51:48.142192Z",
+      "name": "C2 six references all quoting one authorized source",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c2000000-0000-4000-8000-000000000003",
+        "observed-data--c2000000-0000-4000-8000-000000000004",
+        "observed-data--c2000000-0000-4000-8000-000000000005",
+        "observed-data--c2000000-0000-4000-8000-000000000006",
+        "observed-data--c2000000-0000-4000-8000-000000000007",
+        "observed-data--c2000000-0000-4000-8000-000000000008"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_conclusion_scope": "entity-attribute",
+      "x_review_cell": "entity-attribute"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--d11ff58b-dd30-5dd2-ba36-463713cb510f",
+      "name": "artifact-MAT-003.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c3000000-0000-4000-8000-000000000001",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.142415Z",
+      "modified": "2026-11-22T22:51:48.142415Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--d11ff58b-dd30-5dd2-ba36-463713cb510f"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000002"
+      ],
+      "x_raw_material_id": "MAT-003"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--1625c900-12fe-57b7-b747-fdd932e0e5f6",
+      "name": "artifact-MAT-004.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c3000000-0000-4000-8000-000000000002",
+      "created_by_ref": "identity--0b000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.142627Z",
+      "modified": "2026-11-22T22:51:48.142627Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--1625c900-12fe-57b7-b747-fdd932e0e5f6"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000002"
+      ],
+      "x_raw_material_id": "MAT-004"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c3000000-0000-4000-8000-000000000003",
+      "created": "2026-11-22T22:51:48.142749Z",
+      "modified": "2026-11-22T22:51:48.142749Z",
+      "name": "C3 relationship inference under an unapproved warrant",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c3000000-0000-4000-8000-000000000001",
+        "observed-data--c3000000-0000-4000-8000-000000000002"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000002"
+      ],
+      "x_conclusion_scope": "relationship",
+      "x_review_cell": "relationship"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--0e9ce901-778f-5393-96ea-6d1935d26d1f",
+      "name": "artifact-MAT-005.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c4000000-0000-4000-8000-000000000001",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.142949Z",
+      "modified": "2026-11-22T22:51:48.142949Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--0e9ce901-778f-5393-96ea-6d1935d26d1f"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000003"
+      ],
+      "x_raw_material_id": "MAT-005"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--45ea59e8-b78b-5a51-b587-d8e8f7bc3d86",
+      "name": "artifact-MAT-006.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c4000000-0000-4000-8000-000000000002",
+      "created_by_ref": "identity--0b000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.143164Z",
+      "modified": "2026-11-22T22:51:48.143164Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--45ea59e8-b78b-5a51-b587-d8e8f7bc3d86"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000003"
+      ],
+      "x_raw_material_id": "MAT-006"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c4000000-0000-4000-8000-000000000004",
+      "created": "2026-11-22T22:51:48.143326Z",
+      "modified": "2026-11-22T22:51:48.143326Z",
+      "name": "C4 derived link released beyond the authorization scope",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c4000000-0000-4000-8000-000000000001",
+        "observed-data--c4000000-0000-4000-8000-000000000002"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000003"
+      ],
+      "x_conclusion_scope": "relationship",
+      "x_review_cell": "relationship"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--64ef78d4-50fd-5abb-baaa-8c489efb2793",
+      "name": "artifact-MAT-SHARED-5.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c5000000-0000-4000-8000-000000000001",
+      "created_by_ref": "identity--0a000000-0000-4000-8000-000000000001",
+      "created": "2026-11-22T22:51:48.143533Z",
+      "modified": "2026-11-22T22:51:48.143533Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--64ef78d4-50fd-5abb-baaa-8c489efb2793"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-SHARED-5"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--934b758d-feb5-5499-93ab-6e72cb389391",
+      "name": "artifact-MAT-008.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c5000000-0000-4000-8000-000000000002",
+      "created_by_ref": "identity--0b000000-0000-4000-8000-000000000002",
+      "created": "2026-11-22T22:51:48.143811Z",
+      "modified": "2026-11-22T22:51:48.143811Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--934b758d-feb5-5499-93ab-6e72cb389391"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-008"
+    },
+    {
+      "type": "file",
+      "spec_version": "2.1",
+      "id": "file--38580504-3718-5f5b-9435-0ab58168d3e2",
+      "name": "artifact-MAT-009.bin"
+    },
+    {
+      "type": "observed-data",
+      "spec_version": "2.1",
+      "id": "observed-data--c5000000-0000-4000-8000-000000000003",
+      "created_by_ref": "identity--0c000000-0000-4000-8000-000000000003",
+      "created": "2026-11-22T22:51:48.144267Z",
+      "modified": "2026-11-22T22:51:48.144267Z",
+      "first_observed": "2026-10-01T00:00:00Z",
+      "last_observed": "2026-10-01T01:00:00Z",
+      "number_observed": 1,
+      "object_refs": [
+        "file--38580504-3718-5f5b-9435-0ab58168d3e2"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_raw_material_id": "MAT-009"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c5000000-0000-4000-8000-000000000005",
+      "created": "2026-11-22T22:51:48.144494Z",
+      "modified": "2026-11-22T22:51:48.144494Z",
+      "name": "C5 report alpha reusing shared material",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c5000000-0000-4000-8000-000000000001",
+        "observed-data--c5000000-0000-4000-8000-000000000002"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_conclusion_scope": "entity-attribute",
+      "x_review_cell": "entity-attribute"
+    },
+    {
+      "type": "report",
+      "spec_version": "2.1",
+      "id": "report--c5000000-0000-4000-8000-000000000006",
+      "created": "2026-11-22T22:51:48.144615Z",
+      "modified": "2026-11-22T22:51:48.144615Z",
+      "name": "C5 report beta reusing the same shared material",
+      "report_types": [
+        "threat-report"
+      ],
+      "published": "2026-11-05T00:00:00Z",
+      "object_refs": [
+        "observed-data--c5000000-0000-4000-8000-000000000001",
+        "observed-data--c5000000-0000-4000-8000-000000000003"
+      ],
+      "object_marking_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "x_conclusion_scope": "entity-attribute",
+      "x_review_cell": "entity-attribute"
+    }
+  ]
+}

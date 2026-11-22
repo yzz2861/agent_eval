@@ -1,0 +1,327 @@
+{
+  "summary": {
+    "total_conclusions": 6,
+    "releasable": 3,
+    "blocked": 3,
+    "required_independent_observations": 2
+  },
+  "verdicts": [
+    {
+      "conclusion_id": "report--c1000000-0000-4000-8000-000000000001",
+      "name": "C1 entity attributes corroborated by two units",
+      "scope": "entity-attribute",
+      "releasable": true,
+      "reasons": [],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000001",
+          "authorization_id": "WARRANT-42",
+          "usable": true,
+          "detail": "covers this release"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c1000000-0000-4000-8000-000000000001",
+        "observed-data--c1000000-0000-4000-8000-000000000002"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c1000000-0000-4000-8000-000000000001",
+          "eligible": true,
+          "material_id": "MAT-001",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c1000000-0000-4000-8000-000000000002",
+          "eligible": true,
+          "material_id": "MAT-002",
+          "source_id": "identity--0b000000-0000-4000-8000-000000000002",
+          "detail": "authorized actual observation"
+        }
+      ],
+      "independent_source_count": 2,
+      "independent_material_count": 2,
+      "material_reference_counts": {
+        "MAT-001": 1,
+        "MAT-002": 1
+      },
+      "required_independent_observations": 2
+    },
+    {
+      "conclusion_id": "report--c2000000-0000-4000-8000-000000000002",
+      "name": "C2 six references all quoting one authorized source",
+      "scope": "entity-attribute",
+      "releasable": false,
+      "reasons": [
+        "only 1 distinct (source, material) observation(s); need 2 independent",
+        "only 1 distinct observing source(s); need 2 independent sources",
+        "only 1 distinct raw material item(s); need 2 independent materials"
+      ],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000001",
+          "authorization_id": "WARRANT-42",
+          "usable": true,
+          "detail": "covers this release"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c2000000-0000-4000-8000-000000000003",
+        "observed-data--c2000000-0000-4000-8000-000000000004",
+        "observed-data--c2000000-0000-4000-8000-000000000005",
+        "observed-data--c2000000-0000-4000-8000-000000000006",
+        "observed-data--c2000000-0000-4000-8000-000000000007",
+        "observed-data--c2000000-0000-4000-8000-000000000008"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000003",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000004",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000005",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000006",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000007",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c2000000-0000-4000-8000-000000000008",
+          "eligible": true,
+          "material_id": "MAT-SHARED",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        }
+      ],
+      "independent_source_count": 1,
+      "independent_material_count": 1,
+      "material_reference_counts": {
+        "MAT-SHARED": 6
+      },
+      "required_independent_observations": 2
+    },
+    {
+      "conclusion_id": "report--c3000000-0000-4000-8000-000000000003",
+      "name": "C3 relationship inference under an unapproved warrant",
+      "scope": "relationship",
+      "releasable": false,
+      "reasons": [
+        "no approved investigation authorization permits 'external-release' for scope 'relationship'",
+        "2 of 2 cited references are not usable actual observations",
+        "only 0 distinct (source, material) observation(s); need 2 independent",
+        "only 0 distinct observing source(s); need 2 independent sources",
+        "only 0 distinct raw material item(s); need 2 independent materials"
+      ],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000002"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000002",
+          "authorization_id": "DRAFT-77",
+          "usable": false,
+          "detail": "status is 'pending', not 'approved'"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c3000000-0000-4000-8000-000000000001",
+        "observed-data--c3000000-0000-4000-8000-000000000002"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c3000000-0000-4000-8000-000000000001",
+          "eligible": false,
+          "material_id": "MAT-003",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "observation lacks an authorization covering this release"
+        },
+        {
+          "evidence_ref": "observed-data--c3000000-0000-4000-8000-000000000002",
+          "eligible": false,
+          "material_id": "MAT-004",
+          "source_id": "identity--0b000000-0000-4000-8000-000000000002",
+          "detail": "observation lacks an authorization covering this release"
+        }
+      ],
+      "independent_source_count": 0,
+      "independent_material_count": 0,
+      "material_reference_counts": {
+        "MAT-003": 1,
+        "MAT-004": 1
+      },
+      "required_independent_observations": 2
+    },
+    {
+      "conclusion_id": "report--c4000000-0000-4000-8000-000000000004",
+      "name": "C4 derived link released beyond the authorization scope",
+      "scope": "relationship",
+      "releasable": false,
+      "reasons": [
+        "no approved investigation authorization permits 'external-release' for scope 'relationship'",
+        "2 of 2 cited references are not usable actual observations",
+        "only 0 distinct (source, material) observation(s); need 2 independent",
+        "only 0 distinct observing source(s); need 2 independent sources",
+        "only 0 distinct raw material item(s); need 2 independent materials"
+      ],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000003"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000003",
+          "authorization_id": "ATTR-ONLY-9",
+          "usable": false,
+          "detail": "scope 'relationship' not covered by authorization scope ['entity-attribute']"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c4000000-0000-4000-8000-000000000001",
+        "observed-data--c4000000-0000-4000-8000-000000000002"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c4000000-0000-4000-8000-000000000001",
+          "eligible": false,
+          "material_id": "MAT-005",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "observation lacks an authorization covering this release"
+        },
+        {
+          "evidence_ref": "observed-data--c4000000-0000-4000-8000-000000000002",
+          "eligible": false,
+          "material_id": "MAT-006",
+          "source_id": "identity--0b000000-0000-4000-8000-000000000002",
+          "detail": "observation lacks an authorization covering this release"
+        }
+      ],
+      "independent_source_count": 0,
+      "independent_material_count": 0,
+      "material_reference_counts": {
+        "MAT-005": 1,
+        "MAT-006": 1
+      },
+      "required_independent_observations": 2
+    },
+    {
+      "conclusion_id": "report--c5000000-0000-4000-8000-000000000005",
+      "name": "C5 report alpha reusing shared material",
+      "scope": "entity-attribute",
+      "releasable": true,
+      "reasons": [],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000001",
+          "authorization_id": "WARRANT-42",
+          "usable": true,
+          "detail": "covers this release"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c5000000-0000-4000-8000-000000000001",
+        "observed-data--c5000000-0000-4000-8000-000000000002"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c5000000-0000-4000-8000-000000000001",
+          "eligible": true,
+          "material_id": "MAT-SHARED-5",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c5000000-0000-4000-8000-000000000002",
+          "eligible": true,
+          "material_id": "MAT-008",
+          "source_id": "identity--0b000000-0000-4000-8000-000000000002",
+          "detail": "authorized actual observation"
+        }
+      ],
+      "independent_source_count": 2,
+      "independent_material_count": 2,
+      "material_reference_counts": {
+        "MAT-SHARED-5": 1,
+        "MAT-008": 1
+      },
+      "required_independent_observations": 2
+    },
+    {
+      "conclusion_id": "report--c5000000-0000-4000-8000-000000000006",
+      "name": "C5 report beta reusing the same shared material",
+      "scope": "entity-attribute",
+      "releasable": true,
+      "reasons": [],
+      "authorization_refs": [
+        "marking-definition--aa000000-0000-4000-8000-000000000001"
+      ],
+      "authorization_findings": [
+        {
+          "marking_ref": "marking-definition--aa000000-0000-4000-8000-000000000001",
+          "authorization_id": "WARRANT-42",
+          "usable": true,
+          "detail": "covers this release"
+        }
+      ],
+      "evidence_refs": [
+        "observed-data--c5000000-0000-4000-8000-000000000001",
+        "observed-data--c5000000-0000-4000-8000-000000000003"
+      ],
+      "evidence_findings": [
+        {
+          "evidence_ref": "observed-data--c5000000-0000-4000-8000-000000000001",
+          "eligible": true,
+          "material_id": "MAT-SHARED-5",
+          "source_id": "identity--0a000000-0000-4000-8000-000000000001",
+          "detail": "authorized actual observation"
+        },
+        {
+          "evidence_ref": "observed-data--c5000000-0000-4000-8000-000000000003",
+          "eligible": true,
+          "material_id": "MAT-009",
+          "source_id": "identity--0c000000-0000-4000-8000-000000000003",
+          "detail": "authorized actual observation"
+        }
+      ],
+      "independent_source_count": 2,
+      "independent_material_count": 2,
+      "material_reference_counts": {
+        "MAT-SHARED-5": 1,
+        "MAT-009": 1
+      },
+      "required_independent_observations": 2
+    }
+  ]
+}
