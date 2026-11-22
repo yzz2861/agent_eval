@@ -19,3 +19,4 @@ Complete reference documentation for all pySigma modules, classes, and functions
    correlations
    matching
    exceptions
+   offline_review

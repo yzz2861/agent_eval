@@ -1,0 +1,9 @@
+name: offline-review-ecs
+transformations:
+    - id: map_fields
+      type: field_name_mapping
+      mapping:
+          ParentImage: process.parent.name
+          CommandLine: process.command_line
+          Image: process.executable
+          User: user.name

