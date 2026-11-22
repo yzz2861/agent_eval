@@ -1,0 +1,17 @@
+{
+  "delivery_batches": [
+    {
+      "batch": "DELIVERY-A",
+      "packages": [
+        {"package": "SUB-A1", "lot": "LOT-A", "quantity": 4},
+        {"package": "SUB-A0", "lot": "LOT-A", "quantity": 2}
+      ]
+    },
+    {
+      "batch": "DELIVERY-B",
+      "packages": [
+        {"package": "SUB-B1", "lot": "LOT-B", "quantity": 3}
+      ]
+    }
+  ]
+}

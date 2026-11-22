@@ -4,6 +4,7 @@
 
 * [Build & Serialize](complex_serialize.py)
 * [Deserialize](complex_deserialize.py)
+* [Batch reconciliation](batch_reconciliation.py)
 
 ## Data models
 

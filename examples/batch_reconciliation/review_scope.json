@@ -1,0 +1,6 @@
+{
+  "records": [
+    {"evidence_ref": "CERT-7", "package": "SUB-A1"},
+    {"evidence_ref": "CERT-7", "package": "SUB-B1"}
+  ]
+}

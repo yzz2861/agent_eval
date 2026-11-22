@@ -1,0 +1,6 @@
+{
+  "witnesses": [
+    {"package": "SUB-A1", "delivery_batch": "DELIVERY-A", "location": "dock-a"},
+    {"package": "SUB-B1", "delivery_batch": "DELIVERY-B", "location": "dock-b"}
+  ]
+}
