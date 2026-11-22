@@ -254,6 +254,20 @@ class Sanitizer:
             normalize_tail=not inside,
         )
 
+    def sanitize_archive(self, data, declared_encoding=None, **kwargs):
+        """
+        Strictly decode archived bytes and sanitize the result.
+
+        ``data`` must be bytes-like. The encoding declaration supplied by the
+        import source is checked against the bytes, any BOM and in-document
+        metadata before the document is passed to :meth:`sanitize`. The result
+        carries the byte range and failure position for review. See
+        :func:`html_sanitizer.archive.sanitize_archive` for all options.
+        """
+        from .archive import sanitize_archive  # noqa: PLC0415
+
+        return sanitize_archive(data, declared_encoding, sanitizer=self, **kwargs)
+
     def sanitize(self, html):  # noqa: C901 -- I know.
         """
         Clean HTML code from ugly copy-pasted CSS and empty elements

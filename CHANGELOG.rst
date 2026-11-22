@@ -5,6 +5,14 @@ Change log
 Next version
 ============
 
+- Added the strict archive entry points ``sanitize_archive``,
+  ``Sanitizer.sanitize_archive`` and ``review_archives``.  They accept bytes
+  plus an independent encoding declaration, reject undecodable or conflicting
+  BOM/MIME/XML/HTML metadata, sanitize accepted material to a Unicode string
+  and retain byte ranges, source names, digests and conflict positions for
+  review.  The existing ``sanitize(str)`` entry point is unchanged.
+- Added ``python -m html_sanitizer --archive`` and ``--archive-pair`` review
+  modes with optional JSON output.
 - Dropped support for Python < 3.10.
 - Added Python 3.14 and 3.15 to the CI matrix.
 

@@ -37,6 +37,79 @@ Usage
     >>> sanitizer.sanitize('<span style="font-weight:bold">some text</span>')
     '<strong>some text</strong>'
 
+Strict archive mode
+===================
+
+Archive imports often deliver document bytes together with an encoding
+declaration from a catalogue or another independent source.  Do not decode
+those bytes into a guessed string first.  Use ``sanitize_archive`` (or
+``Sanitizer.sanitize_archive``), which checks the declaration, strict byte
+decodability and in-document metadata before sanitizing::
+
+    >>> from html_sanitizer import sanitize_archive
+    >>> result = sanitize_archive(
+    ...     legacy_bytes,
+    ...     "gb18030",
+    ...     source="archive/1998-10.html",
+    ... )
+    >>> result.ok
+    True
+    >>> result.encoding
+    "gb18030"
+    >>> result.input_range.start, result.input_range.end
+    (0, 123)
+    >>> result.digest
+    "..."
+    >>> result.html
+    "<p>...</p>"
+
+The strict path has the following properties:
+
+- Bytes are decoded with ``errors="strict"``.  Undecodable material produces
+  a conflict with the exact byte offset and one-based line/column.
+- The independent declaration is compared with byte-order marks, MIME
+  ``Content-Type`` charsets, XML declarations and HTML ``meta charset`` /
+  ``http-equiv="Content-Type"`` metadata.  By default the canonical encoding
+  labels must agree; ``strict_labels=False`` only accepts a different label
+  when it decodes the body to exactly the same text.
+- Accepted documents are sanitized into a Unicode string (``result.html``)
+  and retain the decoded input byte range plus a SHA-256 digest, so reviewers
+  can trace exactly what was signed off.
+- Conflicts return ``status == "conflict"`` and retain ``source``,
+  ``position`` and one or more ``conflicts``.  Pass
+  ``on_conflict="raise"`` (or call ``result.raise_for_conflict()``) when an
+  ``ArchiveConflictError`` is preferred.
+- If no declaration is supplied, one unambiguous BOM or metadata encoding is
+  used.  Missing declaration plus missing metadata is a conflict.
+- ``require_metadata=True`` requires BOM or in-document evidence corroborating
+  the declaration.
+- Uncorroborated legacy bytes which are also valid UTF-8 with a different
+  reading are rejected as ``ambiguous_interpretation`` instead of silently
+  choosing one reading.
+- MIME bodies using non-identity transfer encodings or ``multipart/*`` are
+  rejected rather than decoded incorrectly.
+
+The review helpers render the same result for a page or a CLI::
+
+    >>> from html_sanitizer import review_archives
+    >>> print(review_archives([
+    ...     ("legacy.html", legacy_bytes, "gb18030"),
+    ...     ("ambiguous.html", ambiguous_bytes, "utf-8"),
+    ... ]))
+    ACCEPTED legacy.html bytes=0:123 encoding=gb18030 sha256=...
+    CONFLICT ambiguous.html 1:28 (byte 27) code=metadata_mismatch ...
+
+The command line accepts archive pairs or one encoding for several files::
+
+    python -m html_sanitizer --archive-pair gb18030 legacy.html
+    python -m html_sanitizer --archive --encoding gb18030 legacy.html
+    python -m html_sanitizer --archive --encoding gb18030 --json legacy.html
+
+Use ``--require-metadata`` to require BOM or body evidence, and
+``--allow-equivalent-labels`` to relax canonical label equality.
+
+The existing string entry point, ``Sanitizer.sanitize(str)``, is unchanged.
+
 Settings
 ========
 
