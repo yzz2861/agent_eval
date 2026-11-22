@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "id": "EVT-MERGE-1",
+      "type": "merge",
+      "sources": ["GHSA-OLD-A", "GHSA-OLD-B"],
+      "into": "GHSA-MERGED-M"
+    },
+    {
+      "id": "EVT-SPLIT-1",
+      "type": "split",
+      "from": "GHSA-MERGED-M",
+      "into": ["GHSA-SPLIT-D", "GHSA-SPLIT-E"]
+    }
+  ]
+}

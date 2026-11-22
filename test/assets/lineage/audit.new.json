@@ -1,0 +1,71 @@
+{
+  "dependencies": [
+    {
+      "name": "foo",
+      "version": "1.0.0",
+      "vulns": [
+        {
+          "id": "GHSA-SPLIT-D",
+          "fix_versions": ["1.5.0"],
+          "aliases": ["CVE-2026-0001"],
+          "description": "Split successor covered by the scoped evidence"
+        },
+        {
+          "id": "GHSA-KEEP-1",
+          "fix_versions": ["2.0.0"],
+          "aliases": [],
+          "description": "Stable advisory retained with the same name"
+        }
+      ]
+    },
+    {
+      "name": "baz",
+      "version": "2.1.0",
+      "vulns": [
+        {
+          "id": "GHSA-SPLIT-E",
+          "fix_versions": [],
+          "aliases": ["CVE-2026-0002"],
+          "description": "Split successor whose ancestral evidence lacks scope"
+        }
+      ]
+    },
+    {
+      "name": "bar",
+      "version": "0.9.0",
+      "vulns": [
+        {
+          "id": "GHSA-RENAME-1",
+          "fix_versions": ["1.0.0"],
+          "aliases": [],
+          "description": "A different description for the same identifier"
+        },
+        {
+          "id": "GHSA-DUP-1",
+          "fix_versions": [],
+          "aliases": [],
+          "description": "Shared advisory name across identifiers"
+        },
+        {
+          "id": "GHSA-DUP-2",
+          "fix_versions": [],
+          "aliases": [],
+          "description": "Shared advisory name across identifiers"
+        },
+        {
+          "id": "GHSA-NOAPP-1",
+          "fix_versions": ["3.0.0"],
+          "aliases": [],
+          "description": "Retained advisory without an approval ticket"
+        },
+        {
+          "id": "GHSA-FRESH-1",
+          "fix_versions": ["4.0.0"],
+          "aliases": [],
+          "description": "Brand new advisory with no ancestral lineage"
+        }
+      ]
+    }
+  ],
+  "fixes": []
+}
