@@ -1,0 +1,46 @@
+{
+  "version": "v1",
+  "generated_at": "2026-11-01T00:00:00+08:00",
+  "accounts": [
+    {
+      "sid": "S-1-5-21-1111111111-2222222222-3333333333-1001",
+      "username": "jdoe",
+      "domain": "CORPNA",
+      "display_name": "John Doe",
+      "registered_from": "2025-01-01T00:00:00+08:00",
+      "registered_to": null
+    },
+    {
+      "sid": "S-1-5-21-4444444444-5555555555-6666666666-1001",
+      "username": "jdoe",
+      "domain": "CORPEU",
+      "display_name": "John Doe",
+      "registered_from": "2025-01-01T00:00:00+08:00",
+      "registered_to": null
+    },
+    {
+      "sid": "S-1-5-21-1111111111-2222222222-3333333333-1002",
+      "username": "jlee",
+      "domain": "CORPNA",
+      "display_name": "Jane Lee",
+      "registered_from": "2025-06-01T00:00:00+08:00",
+      "registered_to": null
+    },
+    {
+      "sid": "S-1-5-21-7777777777-8888888888-9999999999-1003",
+      "username": "archive",
+      "domain": "CORPNA",
+      "display_name": "Archive Service",
+      "registered_from": "2020-01-01T00:00:00+08:00",
+      "registered_to": "2026-01-01T00:00:00+08:00"
+    },
+    {
+      "sid": "S-1-5-21-4444444444-5555555555-6666666666-1002",
+      "username": "jdoe-legacy",
+      "domain": "CORPEU",
+      "display_name": "John Doe (legacy)",
+      "registered_from": "2019-01-01T00:00:00+08:00",
+      "registered_to": "2024-12-31T23:59:59+08:00"
+    }
+  ]
+}
