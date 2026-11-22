@@ -1,6 +1,18 @@
 Release history
 ===============
 
+Unreleased
+----------
+
+* Add ``macholib.note_audit``: read-only auditing of ``LC_NOTE``
+  load commands in thin and fat Mach-O files.  The auditor records
+  the owning slice, the declared range and the actually readable
+  bytes of every note, checks each ``data_owner`` against a registry
+  of interpretation bases (distinguishing unknown owners from
+  registered owners whose payload cannot be proven to be genuine)
+  and flags overlapping declared ranges symmetrically so small
+  overlaps are never decided by read order.
+
 macholib 1.16.4
 ---------------
 
