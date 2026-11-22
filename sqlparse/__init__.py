@@ -14,7 +14,15 @@ from typing import IO, Any
 from sqlparse import cli, engine, filters, formatter, sql, tokens
 
 __version__ = "0.6.1"
-__all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
+__all__ = ["cli", "engine", "filters", "formatter", "review", "sql", "tokens"]
+
+
+def __getattr__(name):
+    if name == "review":
+        import importlib
+
+        return importlib.import_module("sqlparse.review")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def parse(
