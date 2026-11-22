@@ -362,6 +362,56 @@ ex_dll_characteristics = [
 EX_DLL_CHARACTERISTICS = two_way_dict(ex_dll_characteristics)
 
 
+# GuardFlags values from winnt.h.  The load configuration directory is
+# versioned by its Size field, so a flag that is simply absent from an older
+# structure must not be confused with a flag that was explicitly cleared.
+guard_flags = [
+    ("IMAGE_GUARD_CF_INSTRUMENTED", 0x00000100),
+    ("IMAGE_GUARD_CFW_INSTRUMENTED", 0x00000200),
+    ("IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT", 0x00000400),
+    ("IMAGE_GUARD_SECURITY_COOKIE_UNUSED", 0x00000800),
+    ("IMAGE_GUARD_PROTECT_DELAYLOAD_IAT", 0x00001000),
+    ("IMAGE_GUARD_DELAYLOAD_IAT_IN_ITS_OWN_SECTION", 0x00002000),
+    ("IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION", 0x00008000),
+    ("IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT", 0x00010000),
+    ("IMAGE_GUARD_RF_INSTRUMENTED", 0x00020000),
+    ("IMAGE_GUARD_RF_ENABLE", 0x00040000),
+    ("IMAGE_GUARD_RF_STRICT", 0x00080000),
+    ("IMAGE_GUARD_RETPOLINE_PRESENT", 0x00100000),
+    ("IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT", 0x00400000),
+    ("IMAGE_GUARD_XFG_ENABLED", 0x00800000),
+    ("IMAGE_GUARD_CASTGUARD_PRESENT", 0x01000000),
+    ("IMAGE_GUARD_MEMCPY_PRESENT", 0x02000000),
+]
+
+GUARD_FLAGS = two_way_dict(guard_flags)
+
+IMAGE_GUARD_CF_INSTRUMENTED = 0x00000100
+IMAGE_GUARD_CFW_INSTRUMENTED = 0x00000200
+IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT = 0x00000400
+IMAGE_GUARD_SECURITY_COOKIE_UNUSED = 0x00000800
+IMAGE_GUARD_PROTECT_DELAYLOAD_IAT = 0x00001000
+IMAGE_GUARD_DELAYLOAD_IAT_IN_ITS_OWN_SECTION = 0x00002000
+IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION = 0x00008000
+IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT = 0x00010000
+IMAGE_GUARD_RF_INSTRUMENTED = 0x00020000
+IMAGE_GUARD_RF_ENABLE = 0x00040000
+IMAGE_GUARD_RF_STRICT = 0x00080000
+IMAGE_GUARD_RETPOLINE_PRESENT = 0x00100000
+IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT = 0x00400000
+IMAGE_GUARD_XFG_ENABLED = 0x00800000
+IMAGE_GUARD_CASTGUARD_PRESENT = 0x01000000
+IMAGE_GUARD_MEMCPY_PRESENT = 0x02000000
+
+IMAGE_DLLCHARACTERISTICS_GUARD_CF = 0x4000
+
+# GuardCFFunctionTable entries are 4-byte RVAs followed by an optional
+# per-entry payload.  The payload size is encoded in the high nibble of
+# GuardFlags.
+IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_MASK = 0xF0000000
+IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_SHIFT = 28
+
+
 # Unwind info-related enums
 
 unwind_info_flags = [
@@ -1808,7 +1858,589 @@ class LoadConfigData(DataContainer):
 
     struct:     IMAGE_LOAD_CONFIG_DIRECTORY structure
     dynamic_relocations: dynamic relocation information, if present
+
+    ``guard_declarations`` exposes the read-only guard declaration report for
+    the owning PE.  It is the same object as
+    :meth:`PE.verify_guard_declarations`.
     """
+
+    @property
+    def guard_declarations(self):
+        pe = getattr(self, "pe", None)
+        if pe is None:
+            return None
+        return pe.verify_guard_declarations()
+
+    def verify_guard_declarations(self):
+        return self.guard_declarations
+
+
+class GuardFieldEvidence:
+    """Evidence for one load configuration field.
+
+    ``witness`` describes the declaration only: whether the declared load
+    configuration size includes the complete field.  ``coverage`` describes
+    the file separately: whether the bytes backing the field are actually
+    present in a readable part of the image.  A field can therefore be
+    witnessed (the structure version has it) while its value is unreadable,
+    and an unreadable field never gets coerced to zero.
+    """
+
+    def __init__(
+        self,
+        name,
+        relative_offset,
+        size,
+        rva,
+        file_offset,
+        witness,
+        coverage,
+        readable_length=0,
+        readable_range=None,
+        raw_value=None,
+        value=None,
+    ):
+        self.name = name
+        self.relative_offset = relative_offset
+        self.size = size
+        self.rva = rva
+        self.file_offset = file_offset
+        self.witness = witness
+        self.coverage = coverage
+        self.readable_length = readable_length
+        self.readable_range = readable_range
+        self.raw_value = raw_value
+        self.value = value
+
+    @property
+    def declared(self):
+        return self.witness == "present"
+
+    @property
+    def field_witness(self):
+        return self.witness
+
+    @property
+    def actual_coverage(self):
+        return self.coverage
+
+    @property
+    def declared_end(self):
+        """Relative offset just past this field in the load-config structure."""
+
+        return self.relative_offset + self.size
+
+    @property
+    def offset(self):
+        return self.file_offset
+
+    @property
+    def location(self):
+        return _format_location(self.rva, self.file_offset)
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "rva": self.rva,
+            "offset": self.file_offset,
+            "file_offset": self.file_offset,
+            "relative_offset": self.relative_offset,
+            "declared_end": self.declared_end,
+            "size": self.size,
+            "witness": self.witness,
+            "declared": self.declared,
+            "coverage": self.coverage,
+            "readable_length": self.readable_length,
+            "readable_range": list(self.readable_range or ()),
+            "raw_value": self.raw_value,
+            "value": self.value,
+            "location": self.location,
+        }
+
+    def dump(self):
+        value = "unreadable" if self.value is None else f"{self.value:#x}"
+        return (
+            f"{self.name}: witness={self.witness} coverage={self.coverage} "
+            f"value={value} at {self.location}"
+        )
+
+
+class GuardPointerEvidence:
+    """A resolved guard pointer and the PE structure it points into."""
+
+    def __init__(
+        self,
+        field_name,
+        raw_value,
+        rva,
+        file_offset,
+        pointer_kind,
+        section=None,
+        readable=False,
+        executable=False,
+        readable_length=0,
+    ):
+        self.field_name = field_name
+        self.raw_value = raw_value
+        self.rva = rva
+        self.file_offset = file_offset
+        self.pointer_kind = pointer_kind
+        self.section = section
+        self.readable = readable
+        self.executable = executable
+        self.readable_length = readable_length
+
+    @property
+    def offset(self):
+        return self.file_offset
+
+    @property
+    def location(self):
+        return _format_location(self.rva, self.file_offset)
+
+    def to_dict(self):
+        return {
+            "field": self.field_name,
+            "raw_value": self.raw_value,
+            "rva": self.rva,
+            "file_offset": self.file_offset,
+            "pointer_kind": self.pointer_kind,
+            "section": self.section,
+            "readable": self.readable,
+            "executable": self.executable,
+            "readable_length": self.readable_length,
+            "location": self.location,
+        }
+
+
+class GuardTableEvidence:
+    """Evidence for a guard table referenced from the load configuration.
+
+    Table pointers in IMAGE_LOAD_CONFIG_DIRECTORY are virtual addresses.  The
+    entries themselves are RVAs.  ``expected_size`` is derived from the
+    declared count and entry size; ``readable_length`` is what the file can
+    actually supply.  The two are intentionally kept apart.
+    """
+
+    def __init__(
+        self,
+        name,
+        pointer_field,
+        count_field,
+        pointer_value=None,
+        table_rva=None,
+        table_file_offset=None,
+        pointer_kind=None,
+        count=None,
+        entry_size=None,
+        expected_size=None,
+        readable_length=0,
+        readable_range=None,
+        readable_entry_count=0,
+        valid_entry_count=0,
+        invalid_entry_count=0,
+        section=None,
+        coverage="unreadable",
+        entries_checked=0,
+        entries_truncated=False,
+    ):
+        self.name = name
+        self.pointer_field = pointer_field
+        self.count_field = count_field
+        self.pointer_value = pointer_value
+        self.table_rva = table_rva
+        self.table_file_offset = table_file_offset
+        self.pointer_kind = pointer_kind
+        self.count = count
+        self.entry_size = entry_size
+        self.expected_size = expected_size
+        self.readable_length = readable_length
+        self.readable_range = readable_range
+        self.readable_entry_count = readable_entry_count
+        self.valid_entry_count = valid_entry_count
+        self.invalid_entry_count = invalid_entry_count
+        self.section = section
+        self.coverage = coverage
+        self.entries_checked = entries_checked
+        self.entries_truncated = entries_truncated
+
+    @property
+    def rva(self):
+        return self.table_rva
+
+    @property
+    def offset(self):
+        return self.table_file_offset
+
+    @property
+    def location(self):
+        return _format_location(self.table_rva, self.table_file_offset)
+
+    @property
+    def satisfied(self):
+        return (
+            self.coverage in ("readable", "partial")
+            and self.valid_entry_count > 0
+        )
+
+    @property
+    def fully_covered(self):
+        return (
+            self.coverage == "readable"
+            and self.count is not None
+            and self.valid_entry_count == self.count
+        )
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "rva": self.table_rva,
+            "offset": self.table_file_offset,
+            "pointer_field": self.pointer_field,
+            "count_field": self.count_field,
+            "pointer_value": self.pointer_value,
+            "pointer_kind": self.pointer_kind,
+            "table_rva": self.table_rva,
+            "table_file_offset": self.table_file_offset,
+            "count": self.count,
+            "entry_size": self.entry_size,
+            "expected_size": self.expected_size,
+            "readable_length": self.readable_length,
+            "readable_range": list(self.readable_range or ()),
+            "readable_entry_count": self.readable_entry_count,
+            "valid_entry_count": self.valid_entry_count,
+            "invalid_entry_count": self.invalid_entry_count,
+            "section": self.section,
+            "coverage": self.coverage,
+            "satisfied": self.satisfied,
+            "entries_checked": self.entries_checked,
+            "entries_truncated": self.entries_truncated,
+            "location": self.location,
+        }
+
+
+class GuardDeclaration:
+    """Verification result for one selected GuardFlags protection bit."""
+
+    def __init__(
+        self,
+        name,
+        flag_name,
+        flag,
+        state,
+        conclusion,
+        reason,
+        fields=None,
+        pointers=None,
+        tables=None,
+    ):
+        self.name = name
+        self.flag_name = flag_name
+        self.flag = flag
+        self.state = state
+        self.conclusion = conclusion
+        self.reason = reason
+        self.fields = fields or []
+        self.pointers = pointers or []
+        self.tables = tables or []
+
+    @property
+    def status(self):
+        return self.conclusion
+
+    @property
+    def field_witness(self):
+        return self.state
+
+    @property
+    def witness(self):
+        return self.state
+
+    @property
+    def actual_coverage(self):
+        return self.conclusion
+
+    @property
+    def coverage(self):
+        return self.conclusion
+
+    @property
+    def verdict(self):
+        return self.conclusion
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "flag_name": self.flag_name,
+            "flag": self.flag,
+            "state": self.state,
+            "conclusion": self.conclusion,
+            "reason": self.reason,
+            "fields": [f.name for f in self.fields],
+            "field_evidence": [f.to_dict() for f in self.fields],
+            "pointers": [p.to_dict() for p in self.pointers],
+            "tables": [t.to_dict() for t in self.tables],
+        }
+
+
+class GuardCheckCollection(list):
+    """List-like collection that also supports lookup by check name."""
+
+    def __init__(self, checks=(), by_name=None):
+        super().__init__(checks)
+        self._by_name = by_name
+        if self._by_name is None:
+            self._by_name = {check.name: check for check in checks}
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self._by_name[key]
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        return self._by_name.get(key, default)
+
+    def keys(self):
+        return list(self._by_name)
+
+    def values(self):
+        return list(self._by_name.values())
+
+    def items(self):
+        return list(self._by_name.items())
+
+
+class GuardDeclarationReport:
+    """Read-only report returned by :meth:`PE.verify_guard_declarations`."""
+
+    def __init__(
+        self,
+        present=False,
+        directory_rva=None,
+        directory_size=None,
+        declared_size=None,
+        witness_size=None,
+        file_offset=None,
+        readable_range=None,
+        readable_file_range=None,
+        guard_flags=None,
+        guard_flags_field=None,
+        fields=None,
+        declarations=None,
+        checks=None,
+        dll_characteristics_guard_cf=None,
+        warnings=None,
+    ):
+        self.present = present
+        self.directory_rva = directory_rva
+        self.directory_size = directory_size
+        self.declared_size = declared_size
+        self.witness_size = witness_size
+        self.file_offset = file_offset
+        self.readable_range = readable_range
+        self.readable_file_range = readable_file_range
+        self.guard_flags = guard_flags
+        self.guard_flags_field = guard_flags_field
+        self.fields = fields or {}
+        self.declarations = declarations or {}
+        self.checks = GuardCheckCollection(
+            checks or [], by_name=self.declarations
+        )
+        self.dll_characteristics_guard_cf = dll_characteristics_guard_cf
+        self.warnings = warnings or []
+        self.status = self._overall_status()
+
+    @property
+    def offset(self):
+        return self.file_offset
+
+    @property
+    def location(self):
+        return _format_location(self.directory_rva, self.file_offset)
+
+    @property
+    def field_witness(self):
+        """Per-field declaration witness, separate from byte coverage."""
+
+        return {name: field.witness for name, field in self.fields.items()}
+
+    @property
+    def coverage(self):
+        """Per-field physical byte coverage, separate from field witness."""
+
+        return {name: field.coverage for name, field in self.fields.items()}
+
+    @property
+    def witness(self):
+        """Alias for :attr:`field_witness`."""
+
+        return self.field_witness
+
+    @property
+    def actual_coverage(self):
+        """Alias for :attr:`coverage`."""
+
+        return self.coverage
+
+    @property
+    def field_evidence(self):
+        """Alias for :attr:`fields`."""
+
+        return self.fields
+
+    @property
+    def by_flag(self):
+        """Declarations keyed by their GuardFlags constant name."""
+
+        return {check.flag_name: check for check in self.checks}
+
+    @property
+    def pending(self):
+        """Declarations whose required evidence could not be read."""
+
+        return [check for check in self.checks if check.conclusion == "pending"]
+
+    @property
+    def unreadable_fields(self):
+        """Fields that are declared (or physically present) but unreadable."""
+
+        return [
+            field
+            for field in self.fields.values()
+            if field.coverage in ("unreadable", "partial")
+        ]
+
+    @property
+    def absent_fields(self):
+        """Fields outside the declared load-config structure version."""
+
+        return [
+            field for field in self.fields.values() if field.witness == "absent"
+        ]
+
+    def _overall_status(self):
+        if not self.present:
+            return "absent"
+        if self.guard_flags_field is None:
+            return "absent"
+        if self.guard_flags_field.witness == "absent":
+            return "absent"
+        if self.guard_flags is None:
+            return "pending"
+        relevant = [
+            check
+            for check in self.checks
+            if check.state in ("declared_on", "declared_unreadable")
+        ]
+        if not relevant:
+            return "off"
+        conclusions = {check.conclusion for check in relevant}
+        if "pending" in conclusions:
+            return "pending"
+        if "partial" in conclusions:
+            return "partial"
+        if conclusions == {"supported"}:
+            return "supported"
+        return "pending"
+
+    def __getitem__(self, key):
+        if key in self.fields:
+            return self.fields[key]
+        if key in self.declarations:
+            return self.declarations[key]
+        if isinstance(key, str) and hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        return key in self.fields or key in self.declarations or (
+            isinstance(key, str) and hasattr(self, key)
+        )
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self):
+        return len(self.keys())
+
+    def values(self):
+        return [self[key] for key in self.keys()]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self):
+        return list(self.fields) + list(self.declarations)
+
+    def items(self):
+        result = []
+        for key in self.fields:
+            result.append((key, self.fields[key]))
+        for key in self.declarations:
+            result.append((key, self.declarations[key]))
+        return result
+
+    def to_dict(self):
+        return {
+            "present": self.present,
+            "status": self.status,
+            "directory_rva": self.directory_rva,
+            "directory_size": self.directory_size,
+            "declared_size": self.declared_size,
+            "witness_size": self.witness_size,
+            "file_offset": self.file_offset,
+            "readable_range": list(self.readable_range or ()),
+            "readable_file_range": list(self.readable_file_range or ()),
+            "guard_flags": self.guard_flags,
+            "guard_flags_field": (
+                self.guard_flags_field.to_dict()
+                if self.guard_flags_field is not None
+                else None
+            ),
+            "dll_characteristics_guard_cf": self.dll_characteristics_guard_cf,
+            "fields": {name: field.to_dict() for name, field in self.fields.items()},
+            "declarations": {
+                name: declaration.to_dict()
+                for name, declaration in self.declarations.items()
+            },
+            "warnings": list(self.warnings),
+            "location": self.location,
+        }
+
+    def dump(self):
+        lines = [
+            f"LOAD_CONFIG guard declarations: {self.status} at {self.location}",
+            f"declared_size={self.declared_size!r} "
+            f"witness_size={self.witness_size!r} "
+            f"readable_range={self.readable_range!r}",
+        ]
+        for field in self.fields.values():
+            lines.append("  " + field.dump())
+        for declaration in self.declarations.values():
+            lines.append(
+                f"  {declaration.name}: {declaration.conclusion} "
+                f"({declaration.reason})"
+            )
+            for table in declaration.tables:
+                lines.append(
+                    f"    {table.name}: coverage={table.coverage} "
+                    f"count={table.count!r} entries="
+                    f"{table.valid_entry_count}/{table.readable_entry_count} "
+                    f"at {table.location}"
+                )
+        return "\n".join(lines)
+
+
+def _format_location(rva, file_offset):
+    parts = []
+    if rva is not None:
+        parts.append(f"RVA 0x{rva:X}")
+    if file_offset is not None:
+        parts.append(f"file offset 0x{file_offset:X}")
+    return ", ".join(parts) if parts else "unmapped"
 
 
 class BoundImportRefData(DataContainer):
@@ -4119,8 +4751,736 @@ class PE:
             )
 
         return LoadConfigData(
-            struct=load_config, dynamic_relocations=dynamic_relocations
+            struct=load_config,
+            dynamic_relocations=dynamic_relocations,
+            pe=self,
         )
+
+    # ------------------------------------------------------------------
+    # Read-only guard declaration verification
+    # ------------------------------------------------------------------
+
+    #: Load configuration fields that are relevant to the protection
+    #: declarations below.  The list is deliberately explicit: this is a
+    #: verification view, not a second, speculative parser for every field.
+    __GUARD_LOAD_CONFIG_FIELDS__ = (
+        "GuardFlags",
+        "GuardCFCheckFunctionPointer",
+        "GuardCFDispatchFunctionPointer",
+        "GuardCFFunctionTable",
+        "GuardCFFunctionCount",
+        "GuardAddressTakenIatEntryTable",
+        "GuardAddressTakenIatEntryCount",
+        "GuardLongJumpTargetTable",
+        "GuardLongJumpTargetCount",
+        "GuardRFFailureRoutine",
+        "GuardRFFailureRoutineFunctionPointer",
+        "GuardRFVerifyStackPointerFunctionPointer",
+        "GuardEHContinuationTable",
+        "GuardEHContinuationCount",
+        "GuardXFGCheckFunctionPointer",
+        "GuardXFGDispatchFunctionPointer",
+        "GuardXFGTableDispatchFunctionPointer",
+        "CastGuardOsDeterminedFailureMode",
+        "GuardMemcpyFunctionPointer",
+    )
+
+    #: Maximum number of entries validated per guard table.  A malformed
+    #: count must not make a read-only inspection allocate unbounded work.
+    __MAX_GUARD_TABLE_ENTRIES__ = 1 << 16
+
+    def _get_load_config_format(self):
+        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE:
+            return self.__IMAGE_LOAD_CONFIG_DIRECTORY_format__
+        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS:
+            return self.__IMAGE_LOAD_CONFIG_DIRECTORY64_format__
+        return None
+
+    def _get_rva_readable_span(self, rva, length):
+        """Return the file bytes actually backing *rva* for *length* bytes.
+
+        ``get_data()`` is intentionally permissive about sections and virtual
+        size.  Guard verification needs the stricter question: how many of the
+        requested bytes exist in the file's raw data?  The returned dictionary
+        always carries the RVA and, when it can be calculated, the file offset
+        so callers can report a location even when nothing is readable.
+        """
+
+        result = {
+            "rva": rva,
+            "file_offset": None,
+            "readable_length": 0,
+            "readable_rva_range": (rva, rva),
+            "readable_file_range": None,
+            "section": None,
+            "mapping": "unmapped",
+            "data": b"",
+        }
+
+        if rva is None or length is None or rva < 0 or length < 0:
+            return result
+
+        section = self.get_section_by_rva(rva)
+        available = 0
+        data = b""
+
+        if section is not None:
+            result["section"] = section.get_name().decode("utf-8", "replace")
+            result["mapping"] = "section"
+            try:
+                file_offset = section.get_offset_from_rva(rva)
+            except Exception:
+                file_offset = None
+            result["file_offset"] = file_offset
+
+            if file_offset is not None:
+                raw_start = section.get_PointerToRawData_adj()
+                raw_size = section.SizeOfRawData or 0
+                if raw_start is None:
+                    raw_start = 0
+                raw_end = min(raw_start + raw_size, len(self.__data__))
+                if raw_start <= file_offset < raw_end:
+                    available = min(length, raw_end - file_offset)
+                if available:
+                    data = bytes(self.__data__[file_offset : file_offset + available])
+        else:
+            # Mirror pefile's existing convention: an RVA outside every section
+            # is treated as a file offset (headers and overlay data).
+            result["mapping"] = "file"
+            file_offset = rva
+            result["file_offset"] = file_offset
+            if file_offset < len(self.__data__):
+                available = min(length, len(self.__data__) - file_offset)
+                data = bytes(self.__data__[file_offset : file_offset + available])
+
+        result["readable_length"] = available
+        result["readable_rva_range"] = (rva, rva + available)
+        if result["file_offset"] is not None:
+            result["readable_file_range"] = (
+                result["file_offset"],
+                result["file_offset"] + available,
+            )
+        result["data"] = data
+        return result
+
+    @staticmethod
+    def _unpack_field_value(data, size):
+        if size == 2:
+            return struct.unpack("<H", data[:2])[0]
+        if size == 4:
+            return struct.unpack("<I", data[:4])[0]
+        if size == 8:
+            return struct.unpack("<Q", data[:8])[0]
+        raise ValueError(f"Unsupported load config field size: {size}")
+
+    def _build_guard_field_evidence(
+        self,
+        format_def,
+        field_name,
+        declared_size,
+        directory_rva,
+        directory_file_offset,
+    ):
+        structure = Structure(format_def)
+        relative_offset = structure.get_field_relative_offset(field_name)
+        field_type = None
+        for entry in format_def[1]:
+            entry_type, entry_name = entry.split(",", 1)
+            if entry_name == field_name:
+                field_type = entry_type
+                break
+        field_size = sizeof_type(field_type)
+
+        span = self._get_rva_readable_span(
+            directory_rva + relative_offset, field_size
+        )
+        file_offset = span["file_offset"]
+        if file_offset is None and directory_file_offset is not None:
+            file_offset = directory_file_offset + relative_offset
+
+        if declared_size is None:
+            witness = "unknown"
+        elif relative_offset + field_size <= declared_size:
+            witness = "present"
+        else:
+            witness = "absent"
+
+        if span["readable_length"] == field_size:
+            coverage = "readable"
+        elif span["readable_length"] > 0:
+            coverage = "partial"
+        else:
+            coverage = "unreadable"
+
+        raw_value = None
+        if coverage == "readable":
+            raw_value = self._unpack_field_value(span["data"], field_size)
+        value = raw_value if witness == "present" else None
+
+        return GuardFieldEvidence(
+            name=field_name,
+            relative_offset=relative_offset,
+            size=field_size,
+            rva=directory_rva + relative_offset,
+            file_offset=file_offset,
+            witness=witness,
+            coverage=coverage,
+            readable_length=span["readable_length"],
+            readable_range=span["readable_rva_range"],
+            raw_value=raw_value,
+            value=value,
+        )
+
+    def _resolve_guard_pointer(self, pointer):
+        """Resolve a load-config guard pointer to an RVA.
+
+        The Windows structure stores virtual addresses (ImageBase-relative on
+        disk).  Compact or synthetic images sometimes store RVAs directly, so
+        accept both forms and report which interpretation was used.
+        """
+
+        if pointer is None:
+            return None, "unreadable"
+        if pointer == 0:
+            return None, "null"
+
+        image_base = getattr(self.OPTIONAL_HEADER, "ImageBase", 0) or 0
+        size_of_image = getattr(self.OPTIONAL_HEADER, "SizeOfImage", 0) or 0
+        limit = max(size_of_image, len(self.__data__))
+
+        if pointer >= image_base and (pointer - image_base) < limit:
+            return pointer - image_base, "va"
+        return pointer, "rva"
+
+    def _build_guard_pointer_evidence(
+        self, field_name, field, require_executable=False
+    ):
+        pointer_value = field.value if field is not None else None
+        pointer_rva, pointer_kind = self._resolve_guard_pointer(pointer_value)
+
+        if field is None:
+            return None, False, False
+
+        has_evidence = (
+            field.witness == "present"
+            and field.coverage == "readable"
+            and pointer_value not in (None, 0)
+        )
+        if pointer_rva is None:
+            pointer = GuardPointerEvidence(
+                field_name=field_name,
+                raw_value=pointer_value,
+                rva=None,
+                file_offset=None,
+                pointer_kind=pointer_kind,
+                readable=False,
+                executable=False,
+            )
+            return pointer, False, has_evidence
+
+        span = self._get_rva_readable_span(pointer_rva, 1)
+        target_section = self.get_section_by_rva(pointer_rva)
+        executable = bool(
+            target_section is not None
+            and getattr(target_section, "IMAGE_SCN_MEM_EXECUTE", False)
+        )
+        readable = span["readable_length"] > 0
+        pointer = GuardPointerEvidence(
+            field_name=field_name,
+            raw_value=pointer_value,
+            rva=pointer_rva,
+            file_offset=span["file_offset"],
+            pointer_kind=pointer_kind,
+            section=(
+                target_section.get_name().decode("utf-8", "replace")
+                if target_section is not None
+                else span["section"]
+            ),
+            readable=readable,
+            executable=executable,
+            readable_length=span["readable_length"],
+        )
+        full = has_evidence and readable and (
+            executable if require_executable else True
+        )
+        return pointer, full, has_evidence or (readable and pointer_value not in (None, 0))
+
+    def _read_guard_table(
+        self,
+        name,
+        pointer_field_name,
+        count_field_name,
+        fields,
+        guard_flags,
+        require_executable=True,
+    ):
+        pointer_field = fields.get(pointer_field_name)
+        count_field = fields.get(count_field_name)
+        pointer_value = pointer_field.value if pointer_field is not None else None
+        count = count_field.value if count_field is not None else None
+        pointer_rva, pointer_kind = self._resolve_guard_pointer(pointer_value)
+
+        entry_size = 4
+        if name == "GuardCFFunctionTable" and guard_flags is not None:
+            entry_size += (
+                guard_flags & IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_MASK
+            ) >> IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_SHIFT
+
+        expected_size = None
+        if count is not None:
+            expected_size = count * entry_size
+
+        if pointer_rva is not None and expected_size is not None:
+            span = self._get_rva_readable_span(pointer_rva, expected_size)
+        else:
+            span = {
+                "file_offset": None,
+                "readable_length": 0,
+                "readable_rva_range": (pointer_rva, pointer_rva)
+                if pointer_rva is not None
+                else (None, None),
+                "section": None,
+                "data": b"",
+            }
+
+        readable_length = span["readable_length"]
+        readable_entry_count = (
+            readable_length // entry_size if entry_size else 0
+        )
+        entries_to_check = readable_entry_count
+        entries_truncated = False
+        if count is not None and entries_to_check > count:
+            entries_to_check = count
+        if entries_to_check > self.__MAX_GUARD_TABLE_ENTRIES__:
+            entries_to_check = self.__MAX_GUARD_TABLE_ENTRIES__
+            entries_truncated = True
+        if count is not None and count > entries_to_check:
+            entries_truncated = True
+
+        valid_entry_count = 0
+        invalid_entry_count = 0
+        for index in range(entries_to_check):
+            entry_rva = struct.unpack_from(
+                "<I", span["data"], index * entry_size
+            )[0]
+            if entry_rva == 0:
+                invalid_entry_count += 1
+                continue
+            target_section = self.get_section_by_rva(entry_rva)
+            target_readable = (
+                self._get_rva_readable_span(entry_rva, 1)["readable_length"] > 0
+            )
+            if target_section is None or not target_readable:
+                invalid_entry_count += 1
+            elif require_executable and not getattr(
+                target_section, "IMAGE_SCN_MEM_EXECUTE", False
+            ):
+                invalid_entry_count += 1
+            else:
+                valid_entry_count += 1
+
+        if count is None or pointer_rva is None or expected_size is None:
+            coverage = "unknown"
+        elif count == 0:
+            coverage = "empty"
+        elif expected_size and readable_length >= expected_size:
+            coverage = "readable"
+        elif readable_length > 0:
+            coverage = "partial"
+        else:
+            coverage = "unreadable"
+
+        return GuardTableEvidence(
+            name=name,
+            pointer_field=pointer_field_name,
+            count_field=count_field_name,
+            pointer_value=pointer_value,
+            table_rva=pointer_rva,
+            table_file_offset=span["file_offset"],
+            pointer_kind=pointer_kind,
+            count=count,
+            entry_size=entry_size,
+            expected_size=expected_size,
+            readable_length=readable_length,
+            readable_range=span["readable_rva_range"],
+            readable_entry_count=readable_entry_count,
+            valid_entry_count=valid_entry_count,
+            invalid_entry_count=invalid_entry_count,
+            section=span["section"],
+            coverage=coverage,
+            entries_checked=entries_to_check,
+            entries_truncated=entries_truncated,
+        )
+
+    @staticmethod
+    def _guard_conclusion(state, requirements):
+        if state == "field_absent":
+            return "absent"
+        if state != "declared_on":
+            return "pending" if state == "field_unreadable" else "off"
+        if not requirements:
+            return "supported"
+        full_count = sum(1 for full, _ in requirements if full)
+        evidence_count = sum(1 for _, evidence in requirements if evidence)
+        if full_count == len(requirements):
+            return "supported"
+        if evidence_count:
+            return "partial"
+        return "pending"
+
+    def verify_guard_declarations(self):
+        """Read-only verification of selected load-config guard declarations.
+
+        The load configuration structure is versioned by its ``Size`` field.
+        A value that lies beyond that size does not exist in this image's
+        declaration, while a declared field whose backing bytes are truncated,
+        virtual-only, or otherwise unreadable has an unknown value.  Neither
+        case is reported as zero.
+
+        Field ``witness`` and actual byte ``coverage`` are separate.  Every
+        field, pointer and table carries its RVA and computed file offset so a
+        report can point back to the location that was (or could not be) read.
+
+        The explicitly selected declarations are:
+
+        * ``IMAGE_GUARD_CF_INSTRUMENTED`` with the CF check function pointer.
+        * ``IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT`` with the CF function table.
+        * ``IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT`` with the long-jump table.
+        * ``IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT`` with the EH table.
+        * ``IMAGE_GUARD_RF_INSTRUMENTED`` with its RF function pointers.
+        * ``IMAGE_GUARD_XFG_ENABLED`` with its XFG function pointers.
+        * ``IMAGE_GUARD_CASTGUARD_PRESENT`` with the CastGuard failure routine.
+        * ``IMAGE_GUARD_MEMCPY_PRESENT`` with the memcpy function pointer.
+
+        Conclusions are one of ``supported`` (the declaration is backed by
+        readable, structurally valid evidence), ``partial`` (some evidence is
+        readable), ``pending`` (the flag is set but required evidence could not
+        be read), ``off`` (the field is readable and the bit is clear) or
+        ``absent`` (the GuardFlags field is outside the declared structure).
+        """
+
+        try:
+            directory = self.OPTIONAL_HEADER.DATA_DIRECTORY[
+                DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG"]
+            ]
+        except (AttributeError, IndexError):
+            directory = None
+
+        if directory is None or not directory.VirtualAddress:
+            return GuardDeclarationReport(
+                present=False,
+                warnings=["No load configuration directory is present."],
+            )
+
+        format_def = self._get_load_config_format()
+        if format_def is None:
+            return GuardDeclarationReport(
+                present=False,
+                directory_rva=directory.VirtualAddress,
+                directory_size=directory.Size,
+                warnings=["Unsupported PE type for load configuration parsing."],
+            )
+
+        directory_rva = directory.VirtualAddress
+        directory_size = directory.Size
+
+        size_span = self._get_rva_readable_span(directory_rva, 4)
+        declared_size = None
+        if size_span["readable_length"] == 4:
+            declared_size = struct.unpack("<I", size_span["data"])[0]
+
+        full_size = Structure(format_def).sizeof()
+        witness_size = declared_size if declared_size is not None else directory_size
+        if witness_size is None:
+            witness_size = 0
+
+        header_length = min(full_size, max(witness_size, 4))
+        header_span = self._get_rva_readable_span(directory_rva, header_length)
+
+        fields = {}
+        for field_name in ("Size",) + self.__GUARD_LOAD_CONFIG_FIELDS__:
+            try:
+                fields[field_name] = self._build_guard_field_evidence(
+                    format_def,
+                    field_name,
+                    declared_size,
+                    directory_rva,
+                    header_span["file_offset"],
+                )
+            except KeyError:
+                continue
+
+        guard_flags_field = fields.get("GuardFlags")
+        guard_flags = (
+            guard_flags_field.value
+            if guard_flags_field is not None
+            and guard_flags_field.witness == "present"
+            and guard_flags_field.coverage == "readable"
+            else None
+        )
+
+        if guard_flags_field is None:
+            flag_state = "field_absent"
+        elif guard_flags_field.witness == "absent":
+            flag_state = "field_absent"
+        elif guard_flags_field.coverage != "readable" or guard_flags is None:
+            flag_state = "field_unreadable"
+        elif guard_flags & IMAGE_GUARD_CF_INSTRUMENTED:
+            flag_state = "declared_on"
+        else:
+            flag_state = "declared_off"
+
+        dll_characteristics_guard_cf = None
+        try:
+            dll_characteristics_guard_cf = bool(
+                self.OPTIONAL_HEADER.DllCharacteristics
+                & IMAGE_DLLCHARACTERISTICS_GUARD_CF
+            )
+        except AttributeError:
+            pass
+
+        checks = []
+        declarations = {}
+
+        def add_check(name, flag_name, flag, pointer_fields=(), table_specs=()):
+            if guard_flags is None:
+                state = flag_state
+            elif guard_flags & flag:
+                state = "declared_on"
+            else:
+                state = "declared_off"
+
+            pointers = []
+            requirements = []
+            for pointer_field_name in pointer_fields:
+                pointer_field = fields.get(pointer_field_name)
+                pointer, full, evidence = self._build_guard_pointer_evidence(
+                    pointer_field_name, pointer_field, require_executable=False
+                )
+                if pointer is not None:
+                    pointers.append(pointer)
+                if pointer_field is not None:
+                    requirements.append((full, evidence))
+
+            tables = []
+            for (
+                table_name,
+                pointer_field_name,
+                count_field_name,
+                require_executable,
+            ) in table_specs:
+                table = self._read_guard_table(
+                    table_name,
+                    pointer_field_name,
+                    count_field_name,
+                    fields,
+                    guard_flags,
+                    require_executable=require_executable,
+                )
+                tables.append(table)
+                requirements.append(
+                    (
+                        table.coverage == "readable"
+                        and table.count is not None
+                        and table.valid_entry_count == table.count,
+                        table.valid_entry_count > 0,
+                    )
+                )
+
+            conclusion = self._guard_conclusion(state, requirements)
+            if state == "field_absent":
+                reason = (
+                    "GuardFlags is outside the declared load-config Size; "
+                    "this structure version has no GuardFlags declaration."
+                )
+            elif state == "field_unreadable":
+                reason = (
+                    "GuardFlags is declared but its backing bytes are not "
+                    "readable at the reported location."
+                )
+            elif state == "declared_off":
+                reason = (
+                    f"{flag_name} is clear in a readable GuardFlags field; "
+                    "the sample declared this protection off."
+                )
+            elif conclusion == "supported":
+                reason = (
+                    f"{flag_name} is set and all selected evidence is readable "
+                    "and structurally valid."
+                )
+            elif conclusion == "partial":
+                reason = (
+                    f"{flag_name} is set and some selected evidence is readable "
+                    "and structurally valid, but the declaration is not fully "
+                    "covered."
+                )
+            else:
+                reason = (
+                    f"{flag_name} is set but no required evidence could be read "
+                    "or validated; the declaration remains pending."
+                )
+
+            declaration = GuardDeclaration(
+                name=name,
+                flag_name=flag_name,
+                flag=flag,
+                state=state,
+                conclusion=conclusion,
+                reason=reason,
+                fields=[
+                    fields[field_name]
+                    for field_name in (
+                        ("GuardFlags",)
+                        + tuple(pointer_fields)
+                        + tuple(spec[1] for spec in table_specs)
+                        + tuple(spec[2] for spec in table_specs)
+                    )
+                    if field_name in fields
+                ],
+                pointers=pointers,
+                tables=tables,
+            )
+            checks.append(declaration)
+            declarations[name] = declaration
+
+        add_check(
+            "cfg_instrumented",
+            "IMAGE_GUARD_CF_INSTRUMENTED",
+            IMAGE_GUARD_CF_INSTRUMENTED,
+            pointer_fields=("GuardCFCheckFunctionPointer",),
+        )
+        add_check(
+            "cfg_function_table",
+            "IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT",
+            IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT,
+            table_specs=(
+                (
+                    "GuardCFFunctionTable",
+                    "GuardCFFunctionTable",
+                    "GuardCFFunctionCount",
+                    True,
+                ),
+            ),
+        )
+        add_check(
+            "cfg_long_jump_table",
+            "IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT",
+            IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT,
+            table_specs=(
+                (
+                    "GuardLongJumpTargetTable",
+                    "GuardLongJumpTargetTable",
+                    "GuardLongJumpTargetCount",
+                    True,
+                ),
+            ),
+        )
+        add_check(
+            "eh_continuation_table",
+            "IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT",
+            IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT,
+            table_specs=(
+                (
+                    "GuardEHContinuationTable",
+                    "GuardEHContinuationTable",
+                    "GuardEHContinuationCount",
+                    True,
+                ),
+            ),
+        )
+        add_check(
+            "rf_instrumented",
+            "IMAGE_GUARD_RF_INSTRUMENTED",
+            IMAGE_GUARD_RF_INSTRUMENTED,
+            pointer_fields=(
+                "GuardRFFailureRoutine",
+                "GuardRFFailureRoutineFunctionPointer",
+                "GuardRFVerifyStackPointerFunctionPointer",
+            ),
+        )
+        add_check(
+            "xfg_enabled",
+            "IMAGE_GUARD_XFG_ENABLED",
+            IMAGE_GUARD_XFG_ENABLED,
+            pointer_fields=(
+                "GuardXFGCheckFunctionPointer",
+                "GuardXFGDispatchFunctionPointer",
+                "GuardXFGTableDispatchFunctionPointer",
+            ),
+        )
+        add_check(
+            "cast_guard_present",
+            "IMAGE_GUARD_CASTGUARD_PRESENT",
+            IMAGE_GUARD_CASTGUARD_PRESENT,
+            pointer_fields=("CastGuardOsDeterminedFailureMode",),
+        )
+        add_check(
+            "memcpy_present",
+            "IMAGE_GUARD_MEMCPY_PRESENT",
+            IMAGE_GUARD_MEMCPY_PRESENT,
+            pointer_fields=("GuardMemcpyFunctionPointer",),
+        )
+
+        warnings = []
+        if declared_size is not None and directory_size:
+            if declared_size > directory_size:
+                warnings.append(
+                    "Load-config Size is larger than the data-directory size."
+                )
+            elif declared_size < directory_size:
+                warnings.append(
+                    "Load-config Size is smaller than the data-directory size."
+                )
+        if declared_size is not None and declared_size > full_size:
+            warnings.append(
+                "Load-config Size exceeds the known structure version; "
+                "only the known fields are checked."
+            )
+        if declared_size is None:
+            warnings.append(
+                "Load-config Size is unreadable; field witness falls back to "
+                "the data-directory size."
+            )
+
+        return GuardDeclarationReport(
+            present=True,
+            directory_rva=directory_rva,
+            directory_size=directory_size,
+            declared_size=declared_size,
+            witness_size=witness_size,
+            file_offset=header_span["file_offset"],
+            readable_range=header_span["readable_rva_range"],
+            readable_file_range=header_span["readable_file_range"],
+            guard_flags=guard_flags,
+            guard_flags_field=guard_flags_field,
+            fields=fields,
+            declarations=declarations,
+            checks=checks,
+            dll_characteristics_guard_cf=dll_characteristics_guard_cf,
+            warnings=warnings,
+        )
+
+    def get_guard_declarations(self):
+        """Alias for :meth:`verify_guard_declarations`."""
+
+        return self.verify_guard_declarations()
+
+    def verify_load_config_guard(self):
+        """Alias for :meth:`verify_guard_declarations`."""
+
+        return self.verify_guard_declarations()
+
+    @property
+    def guard_declarations(self):
+        """Read-only verification report for load-config guard declarations."""
+
+        return self.verify_guard_declarations()
+
+    @property
+    def GUARD_DECLARATIONS(self):
+        """Read-only verification report for load-config guard declarations."""
+
+        return self.verify_guard_declarations()
 
     def parse_dynamic_relocations(
         self, dynamic_value_reloc_table_offset, dynamic_value_reloc_table_section
@@ -7968,6 +9328,26 @@ class PE:
                 self.SectionAlignment_Warning = True
 
         return cache_adjust_SectionAlignment(val, section_alignment, file_alignment)
+
+
+def verify_guard_declarations(pe):
+    """Module-level convenience wrapper for the PE method.
+
+    Accepts a :class:`PE` instance, a file name, or the PE contents.
+    """
+
+    if not isinstance(pe, PE):
+        if isinstance(pe, (bytes, bytearray, memoryview)):
+            pe = PE(data=bytes(pe))
+        else:
+            pe = PE(pe)
+    return pe.verify_guard_declarations()
+
+
+def get_guard_declarations(pe):
+    """Module-level convenience wrapper for the PE method."""
+
+    return verify_guard_declarations(pe)
 
 
 def main():

@@ -63,6 +63,35 @@ To work with authenticated binaries, including **Authenticode signatures**, plea
 
 _pefile_ runs in several pipelines scanning hundreds of thousands of new PE files every day, and, while not perfect, it has grown to be pretty robust over time. That being said, small glitches are found now and then. If you bump into a PE that does not appear to be processed correctly, do report it, please! It will help make pefile a tiny bit more powerful.
 
+## Guard declaration verification
+
+`pefile` exposes a read-only view of the protection declarations in
+`IMAGE_LOAD_CONFIG_DIRECTORY`. It keeps the structure version (what the
+declared load-config `Size` actually covers) separate from file coverage (what
+bytes can really be read):
+
+```python
+import pefile
+
+pe = pefile.PE("sample.exe")
+report = pe.verify_guard_declarations()
+
+print(report.status)                      # supported/partial/pending/off/absent
+print(report.fields["GuardFlags"].witness)
+print(report.fields["GuardFlags"].coverage)
+print(report.declarations["cfg_function_table"].conclusion)
+print(report.fields["GuardFlags"].location)
+```
+
+A field outside the declared load-config size is reported as `witness="absent"`
+(the structure is too old to contain it), not as a zero value. A field that is
+declared but truncated or virtual-only is reported with `coverage="unreadable"`
+and `value=None`. Guard table pointers are resolved through the image, and each
+field, pointer and table carries an RVA and computed file offset so a report can
+link back to the exact location. Selected declarations include CFG, the CF
+function table, long-jump and EH continuation tables, RF, XFG, CastGuard and
+memcpy.
+
 ## Dependencies
 
 _pefile_ is self-contained. The module has no dependencies; it is endianness independent; and it works on Windows, macOS, and Linux.
