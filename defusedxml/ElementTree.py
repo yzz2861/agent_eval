@@ -174,8 +174,31 @@ def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_exte
     return parser.close()
 
 
+# Scoped summary helpers live in a separate module to keep the parse facade
+# small.  Import them here so callers can use the existing ElementTree entry
+# point module for both parsing and approved excerpts.
+from .summary import (  # noqa: E402
+    DEFAULT_MAX_OUTPUT,
+    Excerpt,
+    ScopedExcerpt,
+    ScopedSummary,
+    Summary,
+    scoped_summary,
+    scoped_summary_iter,
+    scoped_summary_tree,
+    summarize,
+    summarize_iter,
+    summarize_tree,
+)
+
+
 __all__ = [
+    "DEFAULT_MAX_OUTPUT",
+    "Excerpt",
     "ParseError",
+    "ScopedExcerpt",
+    "ScopedSummary",
+    "Summary",
     "XML",
     "XMLParse",
     "XMLParser",
@@ -184,5 +207,11 @@ __all__ = [
     "fromstringlist",
     "iterparse",
     "parse",
+    "scoped_summary",
+    "scoped_summary_iter",
+    "scoped_summary_tree",
+    "summarize",
+    "summarize_iter",
+    "summarize_tree",
     "tostring",
 ]

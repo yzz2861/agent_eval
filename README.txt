@@ -397,6 +397,19 @@ modify the default by changing the module variable `MAX_DATA`. A value of
 `-1` disables the limit.
 
 
+defusedxml.summary
+------------------
+
+summarize(), summarize_tree(), summarize_iter()
+
+Scoped summaries return only explicitly approved element paths.  Paths use
+expanded names (``{urn:example}feed/{urn:example}title``); plain names match
+only elements without a namespace, so a nested namespace rebinding cannot
+promote an identically named internal field.  Each excerpt carries its source
+range (``start``/``end`` and ``raw``) and the returned text is capped by
+``max_output``.
+
+
 defusedxml.lxml
 ---------------
 

@@ -9,6 +9,11 @@ import warnings
 
 # This module is an alias for ElementTree just like xml.etree.cElementTree
 from .ElementTree import (
+    DEFAULT_MAX_OUTPUT,
+    Excerpt,
+    ScopedExcerpt,
+    ScopedSummary,
+    Summary,
     XML,
     XMLParse,
     XMLParser,
@@ -17,6 +22,12 @@ from .ElementTree import (
     fromstringlist,
     iterparse,
     parse,
+    scoped_summary,
+    scoped_summary_iter,
+    scoped_summary_tree,
+    summarize,
+    summarize_iter,
+    summarize_tree,
     tostring,
     DefusedXMLParser,
     ParseError,
@@ -32,7 +43,12 @@ warnings.warn(
 )
 
 __all__ = [
+    "DEFAULT_MAX_OUTPUT",
+    "Excerpt",
     "ParseError",
+    "ScopedExcerpt",
+    "ScopedSummary",
+    "Summary",
     "XML",
     "XMLParse",
     "XMLParser",
@@ -41,6 +57,12 @@ __all__ = [
     "fromstringlist",
     "iterparse",
     "parse",
+    "scoped_summary",
+    "scoped_summary_iter",
+    "scoped_summary_tree",
+    "summarize",
+    "summarize_iter",
+    "summarize_tree",
     "tostring",
     # backwards compatibility
     "DefusedXMLParser",

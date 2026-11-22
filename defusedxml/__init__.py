@@ -17,6 +17,19 @@ from .common import (
     NotSupportedError,
     _apply_defusing,
 )
+from .summary import (
+    DEFAULT_MAX_OUTPUT,
+    Excerpt,
+    ScopedExcerpt,
+    ScopedSummary,
+    Summary,
+    scoped_summary,
+    scoped_summary_iter,
+    scoped_summary_tree,
+    summarize,
+    summarize_iter,
+    summarize_tree,
+)
 
 
 def defuse_stdlib():
@@ -60,9 +73,20 @@ def defuse_stdlib():
 __version__ = "0.8.0rc2"
 
 __all__ = [
+    "DEFAULT_MAX_OUTPUT",
     "DefusedXmlException",
     "DTDForbidden",
+    "Excerpt",
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
     "NotSupportedError",
+    "ScopedExcerpt",
+    "ScopedSummary",
+    "Summary",
+    "scoped_summary",
+    "scoped_summary_iter",
+    "scoped_summary_tree",
+    "summarize",
+    "summarize_iter",
+    "summarize_tree",
 ]

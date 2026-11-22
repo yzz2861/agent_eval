@@ -15,6 +15,7 @@ from pyexpat import ExpatError
 
 from defusedxml import ElementTree, minidom, pulldom, sax, xmlrpc, expatreader
 from defusedxml import defuse_stdlib
+from defusedxml import summarize, summarize_iter, summarize_tree
 from defusedxml import (
     DTDForbidden,
     EntitiesForbidden,
@@ -579,6 +580,126 @@ class TestDefusedGzip(DefusedTestCase):
             self.decode_response(response, 4095, 8192)
 
 
+class TestScopedSummary(DefusedTestCase):
+    xml_summary = (
+        "<feed>"
+        "<title>Public title</title>"
+        "<body>Public body</body>"
+        "</feed>"
+    )
+    xml_local_namespace = (
+        "<feed>"
+        "<title>Public title</title>"
+        "<scope xmlns='urn:internal'>"
+        "<title>internal title</title>"
+        "</scope>"
+        "</feed>"
+    )
+    xml_default_namespace = (
+        "<feed xmlns='urn:public'>"
+        "<title>Public title</title>"
+        "<scope xmlns='urn:internal'>"
+        "<title>internal title</title>"
+        "</scope>"
+        "</feed>"
+    )
+    xml_prefix_rebind = (
+        "<feed xmlns:p='urn:public'>"
+        "<p:title>Public title</p:title>"
+        "<scope xmlns:p='urn:internal'>"
+        "<p:title>internal title</p:title>"
+        "</scope>"
+        "</feed>"
+    )
+
+    def _summary_readers(self):
+        return (("tree", summarize_tree), ("iter", summarize_iter))
+
+    def test_normal_summary_both_readers(self):
+        paths = ["feed/title", "feed/body"]
+        for name, reader in self._summary_readers():
+            result = reader(self.xml_summary, paths, max_output=1024)
+            self.assertEqual([e.text for e in result], ["Public title", "Public body"], name)
+            self.assertFalse(result.truncated, name)
+            self.assertEqual(result.output_size, len("Public titlePublic body"), name)
+            for excerpt in result:
+                self.assertEqual(self.xml_summary[excerpt.start:excerpt.end], excerpt.raw, name)
+                self.assertEqual(excerpt.range, (excerpt.start, excerpt.end), name)
+
+        for method in ("tree", "iter"):
+            result = summarize(self.xml_summary, paths, max_output=1024, method=method)
+            self.assertEqual([e.text for e in result], ["Public title", "Public body"], method)
+
+    def test_local_namespace_does_not_leak_tree_and_iter(self):
+        for name, reader in self._summary_readers():
+            result = reader(self.xml_local_namespace, ["feed/title"], max_output=1024)
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertNotIn("internal title", " ".join(e.text for e in result), name)
+
+            result = reader(
+                self.xml_default_namespace,
+                ["{urn:public}feed/{urn:public}title"],
+                max_output=1024,
+            )
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertNotIn("internal title", " ".join(e.text for e in result), name)
+
+    def test_prefix_rebinding_does_not_leak_tree_and_iter(self):
+        for name, reader in self._summary_readers():
+            result = reader(
+                self.xml_prefix_rebind,
+                ["feed/{urn:public}title"],
+                max_output=1024,
+            )
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertNotIn("internal title", " ".join(e.text for e in result), name)
+
+            result = reader(
+                self.xml_prefix_rebind,
+                ["feed/p:title"],
+                namespaces={"p": "urn:public"},
+                max_output=1024,
+            )
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertNotIn("internal title", " ".join(e.text for e in result), name)
+
+    def test_nested_same_named_field_stays_out(self):
+        xml = (
+            "<feed>"
+            "<title>Public title</title>"
+            "<scope><title>internal title</title></scope>"
+            "</feed>"
+        )
+        for name, reader in self._summary_readers():
+            result = reader(xml, ["feed/title"], max_output=1024)
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertNotIn("internal title", " ".join(e.text for e in result), name)
+
+    def test_bare_names_do_not_match_namespaced_fields(self):
+        for name, reader in self._summary_readers():
+            result = reader(self.xml_default_namespace, ["feed/title"], max_output=1024)
+            self.assertEqual(result.excerpts, (), name)
+
+    def test_output_limit(self):
+        for name, reader in self._summary_readers():
+            result = reader(self.xml_summary, ["feed/title", "feed/body"], max_output=12)
+            self.assertEqual([e.text for e in result], ["Public title"], name)
+            self.assertTrue(result.truncated, name)
+            self.assertEqual(result.output_size, len("Public title"), name)
+
+    def test_mapping_labels_and_self_closing_range(self):
+        xml = "<feed><title>Public</title><empty/></feed>"
+        for name, reader in self._summary_readers():
+            result = reader(xml, {"title": "feed/title", "empty": "feed/empty"}, max_output=100)
+            self.assertEqual(
+                [(e.label, e.text) for e in result],
+                [("title", "Public"), ("empty", "")],
+                name,
+            )
+            empty = result[1]
+            self.assertEqual(xml[empty.start:empty.end], "<empty/>", name)
+
+
 def test_main():
     suite = unittest.TestSuite()
     cls = [
@@ -591,6 +712,7 @@ def test_main():
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,
+        TestScopedSummary,
     ]
     for c in cls:
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(c))

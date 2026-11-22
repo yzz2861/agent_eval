@@ -356,6 +356,17 @@ You can modify the default by changing the module variable <span
 class="title-ref">MAX_DATA</span>. A value of <span
 class="title-ref">-1</span> disables the limit.
 
+### defusedxml.summary
+
+summarize(), summarize_tree(), summarize_iter()
+
+Scoped summaries return only explicitly approved element paths. Paths use
+expanded names such as `{urn:example}feed/{urn:example}title`; plain names
+match only elements without a namespace, so a nested namespace rebinding
+cannot promote an identically named internal field. Each excerpt carries its
+source range (`start`/`end` and `raw`), and returned text is capped by
+`max_output`.
+
 ### defusedxml.lxml
 
 **DEPRECATED** The module is deprecated and will be removed in a future
