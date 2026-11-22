@@ -1,0 +1,551 @@
+{
+  "freeze_id": "adjudication-freeze-2026-11",
+  "blocked": true,
+  "sample_rows": 14,
+  "unique_samples": 13,
+  "duplicate_samples_removed": 1,
+  "overall": {
+    "name": "overall",
+    "applicable_pairs": 22,
+    "expected_pairs": 10,
+    "true_hits": 8,
+    "false_positive_hits": 4,
+    "scan_missing": 1,
+    "rule_disabled": 2,
+    "correctly_silent": 7,
+    "out_of_scope": 1,
+    "missed_critical": [
+      {
+        "sample_id": "S01",
+        "path": "src/company/s01_os_system.py",
+        "rule_id": "B602",
+        "severity": "HIGH"
+      }
+    ],
+    "disabled_rules": [
+      "B108"
+    ],
+    "recall": 0.8
+  },
+  "old_overall": {
+    "name": "overall",
+    "applicable_pairs": 22,
+    "expected_pairs": 10,
+    "true_hits": 8,
+    "false_positive_hits": 3,
+    "scan_missing": 2,
+    "rule_disabled": 0,
+    "correctly_silent": 9,
+    "out_of_scope": 1,
+    "missed_critical": [
+      {
+        "sample_id": "S03",
+        "path": "src/company/s03_subprocess_call.py",
+        "rule_id": "B602",
+        "severity": "HIGH"
+      }
+    ],
+    "disabled_rules": [],
+    "recall": 0.8
+  },
+  "scans": {
+    "old": {
+      "label": "升级前",
+      "raw_hits": 12,
+      "unique_hits": 11,
+      "duplicate_hits_removed": 1,
+      "disabled_rule_count": 0,
+      "error_count": 0,
+      "confirmed_hits": 8,
+      "fp_hits_on_adjudicated": 2,
+      "unadjudicated_hits": 1
+    },
+    "new": {
+      "label": "升级后",
+      "raw_hits": 15,
+      "unique_hits": 14,
+      "duplicate_hits_removed": 1,
+      "disabled_rule_count": 1,
+      "error_count": 0,
+      "confirmed_hits": 8,
+      "fp_hits_on_adjudicated": 3,
+      "unadjudicated_hits": 3
+    }
+  },
+  "groups": [
+    {
+      "family": "command_injection",
+      "min_recall": 1.0,
+      "block_on_critical_miss": true,
+      "blocked": true,
+      "reasons": [
+        "recall 75.0% < floor 1.00",
+        "confirmed HIGH finding lost: B602 @ src/company/s01_os_system.py"
+      ],
+      "bucket": {
+        "name": "command_injection",
+        "applicable_pairs": 7,
+        "expected_pairs": 4,
+        "true_hits": 3,
+        "false_positive_hits": 1,
+        "scan_missing": 1,
+        "rule_disabled": 0,
+        "correctly_silent": 2,
+        "out_of_scope": 0,
+        "missed_critical": [
+          {
+            "sample_id": "S01",
+            "path": "src/company/s01_os_system.py",
+            "rule_id": "B602",
+            "severity": "HIGH"
+          }
+        ],
+        "disabled_rules": [],
+        "recall": 0.75
+      },
+      "old_bucket": {
+        "name": "command_injection",
+        "applicable_pairs": 7,
+        "expected_pairs": 4,
+        "true_hits": 3,
+        "false_positive_hits": 1,
+        "scan_missing": 1,
+        "rule_disabled": 0,
+        "correctly_silent": 2,
+        "out_of_scope": 0,
+        "missed_critical": [
+          {
+            "sample_id": "S03",
+            "path": "src/company/s03_subprocess_call.py",
+            "rule_id": "B602",
+            "severity": "HIGH"
+          }
+        ],
+        "disabled_rules": [],
+        "recall": 0.75
+      }
+    },
+    {
+      "family": "temp_file",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false,
+      "blocked": true,
+      "reasons": [
+        "recall 0.0% < floor 0.80"
+      ],
+      "bucket": {
+        "name": "temp_file",
+        "applicable_pairs": 2,
+        "expected_pairs": 1,
+        "true_hits": 0,
+        "false_positive_hits": 0,
+        "scan_missing": 0,
+        "rule_disabled": 2,
+        "correctly_silent": 0,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [
+          "B108"
+        ],
+        "recall": 0.0
+      },
+      "old_bucket": {
+        "name": "temp_file",
+        "applicable_pairs": 2,
+        "expected_pairs": 1,
+        "true_hits": 0,
+        "false_positive_hits": 0,
+        "scan_missing": 1,
+        "rule_disabled": 0,
+        "correctly_silent": 1,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 0.0
+      }
+    },
+    {
+      "family": "tls_validation",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false,
+      "blocked": false,
+      "reasons": [],
+      "bucket": {
+        "name": "tls_validation",
+        "applicable_pairs": 4,
+        "expected_pairs": 1,
+        "true_hits": 1,
+        "false_positive_hits": 1,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 2,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      },
+      "old_bucket": {
+        "name": "tls_validation",
+        "applicable_pairs": 4,
+        "expected_pairs": 1,
+        "true_hits": 1,
+        "false_positive_hits": 1,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 2,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      }
+    },
+    {
+      "family": "unsafe_deserialization",
+      "min_recall": 1.0,
+      "block_on_critical_miss": false,
+      "blocked": false,
+      "reasons": [],
+      "bucket": {
+        "name": "unsafe_deserialization",
+        "applicable_pairs": 2,
+        "expected_pairs": 1,
+        "true_hits": 1,
+        "false_positive_hits": 1,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 0,
+        "out_of_scope": 1,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      },
+      "old_bucket": {
+        "name": "unsafe_deserialization",
+        "applicable_pairs": 2,
+        "expected_pairs": 1,
+        "true_hits": 1,
+        "false_positive_hits": 1,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 0,
+        "out_of_scope": 1,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      }
+    },
+    {
+      "family": "weak_crypto",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false,
+      "blocked": false,
+      "reasons": [],
+      "bucket": {
+        "name": "weak_crypto",
+        "applicable_pairs": 7,
+        "expected_pairs": 3,
+        "true_hits": 3,
+        "false_positive_hits": 1,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 3,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      },
+      "old_bucket": {
+        "name": "weak_crypto",
+        "applicable_pairs": 7,
+        "expected_pairs": 3,
+        "true_hits": 3,
+        "false_positive_hits": 0,
+        "scan_missing": 0,
+        "rule_disabled": 0,
+        "correctly_silent": 4,
+        "out_of_scope": 0,
+        "missed_critical": [],
+        "disabled_rules": [],
+        "recall": 1.0
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "sample_id": "S01",
+      "path": "src/company/s01_os_system.py",
+      "rule_id": "B602",
+      "rule_family": "command_injection",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "scan_missing",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S01",
+      "path": "src/company/s01_os_system.py",
+      "rule_id": "B605",
+      "rule_family": "command_injection",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S02",
+      "path": "src/company/s02_shell_popen.py",
+      "rule_id": "B602",
+      "rule_family": "command_injection",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S02",
+      "path": "src/company/s02_shell_popen.py",
+      "rule_id": "B605",
+      "rule_family": "command_injection",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S03",
+      "path": "src/company/s03_subprocess_call.py",
+      "rule_id": "B602",
+      "rule_family": "command_injection",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S04",
+      "path": "src/company/s04_md5.py",
+      "rule_id": "B311",
+      "rule_family": "weak_crypto",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S04",
+      "path": "src/company/s04_md5.py",
+      "rule_id": "B324",
+      "rule_family": "weak_crypto",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S05",
+      "path": "src/company/s05_sha1.py",
+      "rule_id": "B324",
+      "rule_family": "weak_crypto",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S06",
+      "path": "src/company/s06_random_token.py",
+      "rule_id": "B311",
+      "rule_family": "weak_crypto",
+      "severity": "LOW",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S06",
+      "path": "src/company/s06_random_token.py",
+      "rule_id": "B324",
+      "rule_family": "weak_crypto",
+      "severity": "LOW",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S07",
+      "path": "src/company/s07_verify_disabled.py",
+      "rule_id": "B310",
+      "rule_family": "tls_validation",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S07",
+      "path": "src/company/s07_verify_disabled.py",
+      "rule_id": "B501",
+      "rule_family": "tls_validation",
+      "severity": "HIGH",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S08",
+      "path": "src/company/s08_urlopen.py",
+      "rule_id": "B310",
+      "rule_family": "tls_validation",
+      "severity": "LOW",
+      "adjudication": "false_positive",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S08",
+      "path": "src/company/s08_urlopen.py",
+      "rule_id": "B501",
+      "rule_family": "tls_validation",
+      "severity": "LOW",
+      "adjudication": "false_positive",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S09",
+      "path": "src/company/s09_pickle_loads.py",
+      "rule_id": "B301",
+      "rule_family": "unsafe_deserialization",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S10",
+      "path": "src/company/s10_yaml_load.py",
+      "rule_id": "B301",
+      "rule_family": "unsafe_deserialization",
+      "severity": "MEDIUM",
+      "adjudication": "false_positive",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S11",
+      "path": "src/company/s11_clean_crypto.py",
+      "rule_id": "B108",
+      "rule_family": "temp_file",
+      "severity": "MEDIUM",
+      "adjudication": "clean",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "rule_disabled",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S11",
+      "path": "src/company/s11_clean_crypto.py",
+      "rule_id": "B311",
+      "rule_family": "weak_crypto",
+      "severity": "LOW",
+      "adjudication": "clean",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 3
+    },
+    {
+      "sample_id": "S11",
+      "path": "src/company/s11_clean_crypto.py",
+      "rule_id": "B324",
+      "rule_family": "weak_crypto",
+      "severity": "MEDIUM",
+      "adjudication": "clean",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "correctly_silent",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S12",
+      "path": "src/company/s12_mktemp.py",
+      "rule_id": "B108",
+      "rule_family": "temp_file",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "rule_disabled",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S12",
+      "path": "src/company/s12_mktemp.py",
+      "rule_id": "B301",
+      "rule_family": "unsafe_deserialization",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": false,
+      "verdict": "out_of_scope",
+      "matched_line": null
+    },
+    {
+      "sample_id": "S13",
+      "path": "src/company/s13_wget_shellout.py",
+      "rule_id": "B602",
+      "rule_family": "command_injection",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": false,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 4
+    },
+    {
+      "sample_id": "S13",
+      "path": "src/company/s13_wget_shellout.py",
+      "rule_id": "B605",
+      "rule_family": "command_injection",
+      "severity": "MEDIUM",
+      "adjudication": "confirmed",
+      "expected": true,
+      "in_scope": true,
+      "verdict": "hit",
+      "matched_line": 4
+    }
+  ]
+}

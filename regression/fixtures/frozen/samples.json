@@ -1,0 +1,145 @@
+{
+  "samples": [
+    {
+      "sample_id": "S01",
+      "path": "src/company/s01_os_system.py",
+      "family": "command_injection",
+      "adjudication": "confirmed",
+      "rule_id": "B602",
+      "severity": "HIGH",
+      "note": "人工确认 shell 注入等价点",
+      "sha256": "3f17aabf84a2a234b0ed38cb665e3b86edf7e95311ff6bdcd6c9afa6d4368a44"
+    },
+    {
+      "sample_id": "S02",
+      "path": "src/company/s02_shell_popen.py",
+      "family": "command_injection",
+      "adjudication": "confirmed",
+      "rule_id": "B602",
+      "severity": "HIGH",
+      "note": "Popen(shell=True) 注入",
+      "sha256": "906bdd7aec844f4c0043e86567c5b4aa52350c57d0ff03177fb5618cd622fb10"
+    },
+    {
+      "sample_id": "S03",
+      "path": "src/company/s03_subprocess_call.py",
+      "family": "command_injection",
+      "adjudication": "confirmed",
+      "rule_id": "B602",
+      "severity": "HIGH",
+      "note": "升级后新增确认样本",
+      "sha256": "9620756b3c00560ca5800982dd737600c7ad470a0bbd2d53a72e219246734451"
+    },
+    {
+      "sample_id": "S04",
+      "path": "src/company/s04_md5.py",
+      "family": "weak_crypto",
+      "adjudication": "confirmed",
+      "rule_id": "B324",
+      "severity": "MEDIUM",
+      "note": "md5 弱哈希",
+      "sha256": "afb4b21f1f64f4c8e087b16adcbd6726bd8c6a4ea3664ef9d82085506bd418d3"
+    },
+    {
+      "sample_id": "S05",
+      "path": "src/company/s05_sha1.py",
+      "family": "weak_crypto",
+      "adjudication": "confirmed",
+      "rule_id": "B324",
+      "severity": "MEDIUM",
+      "note": "sha1 弱哈希",
+      "sha256": "429660a6c0a64a20a1927ebec699a5a24ae39fa5b03c9d726878bfe0ab4c3c64"
+    },
+    {
+      "sample_id": "S06",
+      "path": "src/company/s06_random_token.py",
+      "family": "weak_crypto",
+      "adjudication": "confirmed",
+      "rule_id": "B311",
+      "severity": "LOW",
+      "note": "random 用于安全令牌",
+      "sha256": "db696007e70ceb1ad520de14b105988fda166d600aab53c16f6596e470692cd9"
+    },
+    {
+      "sample_id": "S07",
+      "path": "src/company/s07_verify_disabled.py",
+      "family": "tls_validation",
+      "adjudication": "confirmed",
+      "rule_id": "B501",
+      "severity": "HIGH",
+      "note": "关闭证书校验",
+      "sha256": "75657514f8c6116b193993186e4c1fa6d602c8e9ac339e13340fae66eb4f8660"
+    },
+    {
+      "sample_id": "S08",
+      "path": "src/company/s08_urlopen.py",
+      "family": "tls_validation",
+      "adjudication": "false_positive",
+      "rule_id": "B310",
+      "severity": "LOW",
+      "note": "内网可信地址裁决误报",
+      "sha256": "2e7a3e62a6864de856e4d043e2dbda136698693bc62bb6668f1f361d44cd613e"
+    },
+    {
+      "sample_id": "S09",
+      "path": "src/company/s09_pickle_loads.py",
+      "family": "unsafe_deserialization",
+      "adjudication": "confirmed",
+      "rule_id": "B301",
+      "severity": "MEDIUM",
+      "note": "pickle.loads 不可信数据",
+      "sha256": "6bc1de5b1c3c7db2830dc05f3511a63f6aa7fc2948ce5fbc2a26ef4e4a6ce427"
+    },
+    {
+      "sample_id": "S10",
+      "path": "src/company/s10_yaml_load.py",
+      "family": "unsafe_deserialization",
+      "adjudication": "false_positive",
+      "rule_id": "B301",
+      "severity": "MEDIUM",
+      "note": "受控配置裁决误报",
+      "sha256": "5c5e84a73a6df8743e39743288bcecb2b5b20c254102f346c9ff1e63f446832c"
+    },
+    {
+      "sample_id": "S11",
+      "path": "src/company/s11_clean_crypto.py",
+      "family": "weak_crypto",
+      "adjudication": "clean",
+      "rule_id": null,
+      "severity": null,
+      "note": "sha256 合规无应报发现",
+      "sha256": "1a90ebc35dd54a38d310241cff2af598902fba336aeb5dc5acc272092563500d"
+    },
+    {
+      "sample_id": "S12",
+      "path": "src/company/s12_mktemp.py",
+      "family": "temp_file",
+      "adjudication": "confirmed",
+      "rule_id": "B108",
+      "severity": "MEDIUM",
+      "note": "mktemp 竞态",
+      "sha256": "993f9e600dd3b2986c066ffa7dd56bc78db108e537db9e4e634304dd79346add"
+    },
+    {
+      "sample_id": "S13",
+      "path": "src/company/s13_wget_shellout.py",
+      "family": "command_injection",
+      "adjudication": "confirmed",
+      "rule_id": "B605",
+      "severity": "MEDIUM",
+      "note": "os.system 拼接 wget",
+      "sha256": "71c3d97771fc18965390879a74e6ae1b6ca13694e4850139d48bc6a747b63225"
+    },
+    {
+      "sample_id": "S14",
+      "path": "src/company/s01_os_system.py",
+      "family": "command_injection",
+      "adjudication": "confirmed",
+      "rule_id": "B602",
+      "severity": "HIGH",
+      "note": "同一文件的重复冻结副本用于验证去重",
+      "sha256": "3f17aabf84a2a234b0ed38cb665e3b86edf7e95311ff6bdcd6c9afa6d4368a44",
+      "duplicate_of": "S01"
+    }
+  ]
+}

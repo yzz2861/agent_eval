@@ -1,0 +1,119 @@
+{
+  "applicability": [
+    {
+      "sample_id": "S01",
+      "rule_id": "B602",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S01",
+      "rule_id": "B605",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S02",
+      "rule_id": "B602",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S02",
+      "rule_id": "B605",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S03",
+      "rule_id": "B602",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S04",
+      "rule_id": "B311",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S04",
+      "rule_id": "B324",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S05",
+      "rule_id": "B324",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S06",
+      "rule_id": "B311",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S06",
+      "rule_id": "B324",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S07",
+      "rule_id": "B310",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S07",
+      "rule_id": "B501",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S08",
+      "rule_id": "B310",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S08",
+      "rule_id": "B501",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S09",
+      "rule_id": "B301",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S10",
+      "rule_id": "B301",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S11",
+      "rule_id": "B108",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S11",
+      "rule_id": "B311",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S11",
+      "rule_id": "B324",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S12",
+      "rule_id": "B108",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S12",
+      "rule_id": "B301",
+      "in_scope": false
+    },
+    {
+      "sample_id": "S13",
+      "rule_id": "B602",
+      "in_scope": true
+    },
+    {
+      "sample_id": "S13",
+      "rule_id": "B605",
+      "in_scope": true
+    }
+  ]
+}

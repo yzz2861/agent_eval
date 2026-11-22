@@ -1,0 +1,225 @@
+{
+  "label": "升级后",
+  "generated_at": "2026-11-22T00:00:00Z",
+  "results": [
+    {
+      "filename": "src/company/s02_shell_popen.py",
+      "test_id": "B602",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s03_subprocess_call.py",
+      "test_id": "B602",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s04_md5.py",
+      "test_id": "B324",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s05_sha1.py",
+      "test_id": "B324",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s05_sha1.py",
+      "test_id": "B324",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s06_random_token.py",
+      "test_id": "B311",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s07_verify_disabled.py",
+      "test_id": "B501",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s08_urlopen.py",
+      "test_id": "B310",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s09_pickle_loads.py",
+      "test_id": "B301",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s10_yaml_load.py",
+      "test_id": "B301",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s11_clean_crypto.py",
+      "test_id": "B311",
+      "test_name": "blacklist_calls",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "issue_severity": "LOW",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s13_wget_shellout.py",
+      "test_id": "B605",
+      "test_name": "blacklist_calls",
+      "line_number": 4,
+      "line_range": [
+        4
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/s13_wget_shellout.py",
+      "test_id": "B602",
+      "test_name": "blacklist_calls",
+      "line_number": 4,
+      "line_range": [
+        4
+      ],
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/tools/build_helper.py",
+      "test_id": "B404",
+      "test_name": "blacklist_imports",
+      "line_number": 2,
+      "line_range": [
+        2
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    },
+    {
+      "filename": "src/company/tools/build_helper.py",
+      "test_id": "B608",
+      "test_name": "blacklist_calls",
+      "line_number": 5,
+      "line_range": [
+        5
+      ],
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "fixture finding",
+      "code": "",
+      "more_info": "https://bandit.readthedocs.io/"
+    }
+  ],
+  "errors": [],
+  "disabled_rules": [
+    "B108"
+  ],
+  "metrics": {
+    "_totals": {
+      "loc": 130
+    }
+  }
+}

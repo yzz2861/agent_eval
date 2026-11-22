@@ -1,0 +1,12 @@
+{
+  "rules": [
+    {"rule_id": "B602", "family": "command_injection", "title": "subprocess shell injection", "default_severity": "HIGH"},
+    {"rule_id": "B605", "family": "command_injection", "title": "os.system call", "default_severity": "MEDIUM"},
+    {"rule_id": "B324", "family": "weak_crypto", "title": "insecure hash md5/sha1/sha2", "default_severity": "MEDIUM"},
+    {"rule_id": "B311", "family": "weak_crypto", "title": "weak pseudo-random generator", "default_severity": "LOW"},
+    {"rule_id": "B501", "family": "tls_validation", "title": "certificate verification disabled", "default_severity": "HIGH"},
+    {"rule_id": "B310", "family": "tls_validation", "title": "urllib without timeout/audit", "default_severity": "LOW"},
+    {"rule_id": "B301", "family": "unsafe_deserialization", "title": "blacklisted calls incl. pickle/yaml.load", "default_severity": "MEDIUM"},
+    {"rule_id": "B108", "family": "temp_file", "title": "insecure temp file usage", "default_severity": "MEDIUM"}
+  ]
+}

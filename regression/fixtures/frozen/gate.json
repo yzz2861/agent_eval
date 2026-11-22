@@ -1,0 +1,30 @@
+{
+  "default_min_recall": 0.8,
+  "groups": [
+    {
+      "family": "command_injection",
+      "min_recall": 1.0,
+      "block_on_critical_miss": true
+    },
+    {
+      "family": "weak_crypto",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false
+    },
+    {
+      "family": "tls_validation",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false
+    },
+    {
+      "family": "unsafe_deserialization",
+      "min_recall": 1.0,
+      "block_on_critical_miss": false
+    },
+    {
+      "family": "temp_file",
+      "min_recall": 0.8,
+      "block_on_critical_miss": false
+    }
+  ]
+}
