@@ -35,6 +35,23 @@ from RestrictedPython.Utilities import utility_builtins  # isort:skip
 from RestrictedPython.PrintCollector import PrintCollector  # isort:skip
 from RestrictedPython.compile import CompileResult  # isort:skip
 
+# Optional call evidence
+from RestrictedPython.evidence import CallReceipt  # isort:skip
+from RestrictedPython.evidence import EvidenceCompileResult  # isort:skip
+from RestrictedPython.evidence import EvidenceRecorder  # isort:skip
+from RestrictedPython.evidence import EvidenceReport  # isort:skip
+from RestrictedPython.evidence import EvidenceRunResult  # isort:skip
+from RestrictedPython.evidence import EvidenceSession  # isort:skip
+from RestrictedPython.evidence import EvidenceSink  # isort:skip
+from RestrictedPython.evidence import EvidenceTrace  # isort:skip
+from RestrictedPython.evidence import FunctionAdapter  # isort:skip
+from RestrictedPython.evidence import compile_restricted_evidence  # isort:skip
+from RestrictedPython.evidence import (  # isort:skip
+    compile_restricted_with_evidence)
+from RestrictedPython.evidence import execute_restricted  # isort:skip
+from RestrictedPython.evidence import run_restricted  # isort:skip
+from RestrictedPython.evidence import run_restricted_evidence  # isort:skip
+
 # Policy
 from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:skip
 

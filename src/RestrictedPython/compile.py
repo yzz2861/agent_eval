@@ -45,6 +45,7 @@ def _compile_restricted_mode(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        _policy_kwargs: collections.abc.Mapping[str, typing.Any] | None = None,
 ) -> CompileResult:
 
     if not IS_CPYTHON:
@@ -88,7 +89,10 @@ def _compile_restricted_mode(
                 ))
         if c_ast:
             policy_instance = policy(
-                collected_errors, collected_warnings, used_names)
+                collected_errors,
+                collected_warnings,
+                used_names,
+                **(_policy_kwargs or {}))
             policy_instance.visit(c_ast)
             if not collected_errors:
                 byte_code = compile(c_ast, filename, mode=mode  # ,

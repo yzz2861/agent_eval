@@ -137,3 +137,33 @@ This results in an implicit blacklisting of all not allowed AST elements.
 Any possibly new introduced AST element in Python (new language element) will implicitly be blocked and not allowed in RestrictedPython.
 
 So, if new elements should be introduced, an explicit ``visit_<new AST elem>`` is necessary.
+
+call evidence
++++++++++++++
+
+RestrictedPython.evidence provides optional provenance records for calls from
+restricted code into approved host functions.
+
+EvidenceSession(script_id, recorder=None, sink=None, max_delivery_attempts=2)
+    Binds one script identity to its caller-registered adapters.  Register a
+    host callable with register_adapter(name, function, adapter_id=None).
+    compile() returns an EvidenceCompileResult carrying the code and a session
+    reference; run() compiles and executes and returns an EvidenceRunResult.
+
+run_restricted_evidence(source, session=None, *, script_id=None,
+adapters=None, recorder=None, sink=None, globals=None, locals=None, ...)
+    Convenience wrapper which creates or reuses a session and then runs the
+    source.  compile_restricted_evidence() is the compile-only variant.
+
+EvidenceRecorder(sink=None, max_delivery_attempts=2)
+    Collects CallReceipt objects.  Failed sink delivery is retried and can be
+    flushed later.  report() returns an EvidenceReport.
+
+CallReceipt binds call_id, script_id, statement, expression, function_name,
+adapter_id, parent_call_id, depth, attempt, previous_call_id, status and
+sequence.  It never stores restricted arguments, return values or exception
+messages.
+
+EvidenceReport supports for_script(), for_adapter(), for_function(),
+for_call_site(), children(), roots(), trace() and as_dict().  Partial records
+are exposed through missing_sequences and missing_call_ids.

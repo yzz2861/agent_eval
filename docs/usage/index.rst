@@ -7,4 +7,5 @@ Usage of RestrictedPython
    basic_usage
    framework_usage
    policy
+   evidence
    security_considerations

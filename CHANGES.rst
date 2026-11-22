@@ -4,7 +4,10 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add optional call evidence for approved host functions.  Evidence sessions
+  bind a script identity, the restricted source statement and the caller
+  registered adapter to each receipt.  Receipts support nested callbacks,
+  retry chains, partial-record reconciliation and metadata-only reporting.
 
 
 9.0 (2026-11-04)
