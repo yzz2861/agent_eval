@@ -1,0 +1,73 @@
+"""
+Training-data helpers for redacted, offline HPACK replay.
+
+This module is a stable import location for pipelines that build training
+corpora.  The implementation lives in :mod:`hpack.projection`.
+"""
+from __future__ import annotations
+
+from .projection import (
+    REDACTED,
+    Checkpoint,
+    CompressionCheckpoint,
+    DynamicTableCheckpoint,
+    EncodedFragment,
+    Fragment,
+    FragmentProjection,
+    HeaderFragment,
+    HeaderProjection,
+    OfflineFragment,
+    PolicyAddition,
+    ProjectedFragment,
+    ProjectedHeader,
+    ProjectionPolicy,
+    ProjectionReport,
+    RedactedHeader,
+    RedactedProjection,
+    RedactionPolicy,
+    ReplayReport,
+    TableCheckpoint,
+    TrustedCheckpoint,
+    build_projection,
+    build_redacted_projection,
+    create_checkpoint,
+    make_checkpoint,
+    project,
+    project_headers,
+    redact_headers,
+    replay_fragments,
+    replay_projection,
+)
+
+__all__ = [
+    "REDACTED",
+    "Checkpoint",
+    "CompressionCheckpoint",
+    "DynamicTableCheckpoint",
+    "EncodedFragment",
+    "Fragment",
+    "FragmentProjection",
+    "HeaderFragment",
+    "HeaderProjection",
+    "OfflineFragment",
+    "PolicyAddition",
+    "ProjectedFragment",
+    "ProjectedHeader",
+    "ProjectionPolicy",
+    "ProjectionReport",
+    "RedactedHeader",
+    "RedactedProjection",
+    "RedactionPolicy",
+    "ReplayReport",
+    "TableCheckpoint",
+    "TrustedCheckpoint",
+    "build_projection",
+    "build_redacted_projection",
+    "create_checkpoint",
+    "make_checkpoint",
+    "project",
+    "project_headers",
+    "redact_headers",
+    "replay_fragments",
+    "replay_projection",
+]

@@ -16,6 +16,8 @@ from .table import HeaderTable, table_entry_size
 if TYPE_CHECKING:
     from collections.abc import Iterable  # pragma: no cover
 
+    from .projection import TableCheckpoint
+
 log = logging.getLogger(__name__)
 
 INDEX_NONE = b"\x00"
@@ -184,6 +186,19 @@ class Encoder:
         self.header_table.maxsize = value
         if self.header_table.resized:
             self.table_size_changes.append(value)
+
+    def snapshot(self, checkpoint_id: str, connection_id: str = "", batch_id: str = "") -> TableCheckpoint:
+        """Capture this encoder's dynamic table as a trusted checkpoint."""
+        from .projection import TableCheckpoint as Checkpoint  # noqa: PLC0415
+
+        return Checkpoint.from_encoder(
+            self,
+            checkpoint_id,
+            connection_id=connection_id,
+            batch_id=batch_id,
+        )
+
+    checkpoint = snapshot
 
     def encode(self,
                headers: Iterable[\
@@ -475,6 +490,19 @@ class Decoder:
     @header_table_size.setter
     def header_table_size(self, value: int) -> None:
         self.header_table.maxsize = value
+
+    def snapshot(self, checkpoint_id: str, connection_id: str = "", batch_id: str = "") -> TableCheckpoint:
+        """Capture this decoder's dynamic table as a trusted checkpoint."""
+        from .projection import TableCheckpoint as Checkpoint  # noqa: PLC0415
+
+        return Checkpoint.from_decoder(
+            self,
+            checkpoint_id,
+            connection_id=connection_id,
+            batch_id=batch_id,
+        )
+
+    checkpoint = snapshot
 
     def decode(self, data: bytes, raw: bool = False) -> Iterable[HeaderTuple]:
         """
