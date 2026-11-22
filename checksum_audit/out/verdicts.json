@@ -1,0 +1,1302 @@
+[
+  {
+    "frame_id": 1,
+    "name": "L2-FCS-OK",
+    "note": "TAP 保留 FCS 且帧未改动",
+    "collector": "COL-TAP-03",
+    "cap_len": 55,
+    "wire_len": 55,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "eth.fcs",
+        "wire_range": [
+          51,
+          55
+        ],
+        "have_range": [
+          51,
+          55
+        ],
+        "stored": "0xaf500c44",
+        "expected": "0xaf500c44",
+        "reason": "对完整帧重算 CRC-32 一致"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x2954",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 2,
+    "name": "L2-FCS-BAD",
+    "note": "帧体被改、FCS 未重算（L2 真实失配）",
+    "collector": "COL-TAP-03",
+    "cap_len": 55,
+    "wire_len": 55,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "eth.fcs",
+        "wire_range": [
+          51,
+          55
+        ],
+        "have_range": [
+          51,
+          55
+        ],
+        "stored": "0xaf500c44",
+        "expected": "0x308a8fda",
+        "reason": "FCS 已填写但与重算 CRC-32 不一致，链路层损坏或被篡改"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5bc5",
+        "reason": "IP 头校验和已填写但重算不一致，头部被改动或损坏"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x2954",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 3,
+    "name": "L2-FCS-ABSENT",
+    "note": "镜像口已剥离 FCS，设备未填写该层",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x2954",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 4,
+    "name": "L2-FCS-SHORT",
+    "note": "snaplen 截断，FCS 4 字节只抓到 2 字节",
+    "collector": "COL-TAP-03",
+    "cap_len": 53,
+    "wire_len": 55,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "eth.fcs",
+        "wire_range": [
+          51,
+          55
+        ],
+        "have_range": [
+          51,
+          53
+        ],
+        "stored": null,
+        "expected": null,
+        "reason": "采集声明保留 FCS，但样本在 FCS 字段处截断，4 字节未取全"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x2954",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 5,
+    "name": "L3-IP-OK",
+    "note": "IPv4 首部校验和正确，L4 同样正确",
+    "collector": "COL-ING-01",
+    "cap_len": 64,
+    "wire_len": 64,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb3",
+        "expected": "0x5cb3",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x5a49",
+        "expected": "0x5a49",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 6,
+    "name": "L3-IP-BAD",
+    "note": "IP sum 字段被破坏（仅 L3 真实失配，L4 仍正确）",
+    "collector": "COL-ING-01",
+    "cap_len": 64,
+    "wire_len": 64,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0xa3b3",
+        "expected": "0x5cb3",
+        "reason": "IP 头校验和已填写但重算不一致，头部被改动或损坏"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x5a49",
+        "expected": "0x5a49",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 7,
+    "name": "L3-IP-ZERO-EGRESS",
+    "note": "IP sum 为 0：出向卸载点应判设备未填写而非篡改",
+    "collector": "COL-EG-02",
+    "cap_len": 64,
+    "wire_len": 64,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "device_unfilled",
+        "verdict_zh": "设备未填写（卸载占位）",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x0000",
+        "expected": "0x5cb3",
+        "reason": "出方向且声明 TX IP 校验卸载，0 是 NIC 接管前的占位，不是篡改"
+      },
+      {
+        "layer": "l4",
+        "verdict": "device_unfilled",
+        "verdict_zh": "设备未填写（卸载占位）",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x0000",
+        "expected": "0x5a49",
+        "reason": "出方向且声明 TX 传输层校验卸载，0 为 NIC 接管前占位，Wireshark 的 incorrect 提示在此场景应判设备未填写"
+      }
+    ]
+  },
+  {
+    "frame_id": 8,
+    "name": "L3-IP-ZERO-INGRESS",
+    "note": "同样的 0 值到了入向镜像口：没有卸载声明，判失配",
+    "collector": "COL-ING-01",
+    "cap_len": 64,
+    "wire_len": 64,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x0000",
+        "expected": "0x5cb3",
+        "reason": "IP 头校验和已填写但重算不一致，头部被改动或损坏"
+      },
+      {
+        "layer": "l4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x0000",
+        "expected": "0x5a49",
+        "reason": "字段已填写且分段完整，重算不一致，疑似载荷被篡改或损坏"
+      }
+    ]
+  },
+  {
+    "frame_id": 9,
+    "name": "L3-IP-SHORT",
+    "note": "截断点落在 IP 首部，sum 字段不完整",
+    "collector": "COL-ING-01",
+    "cap_len": 26,
+    "wire_len": 64,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          14,
+          26
+        ],
+        "stored": null,
+        "expected": null,
+        "reason": "以太网载荷不足，IP 头未取全"
+      },
+      {
+        "layer": "l4",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": null,
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "IP 层不可解析，传输层声明无法建立"
+      }
+    ]
+  },
+  {
+    "frame_id": 10,
+    "name": "L4-TCP-OK",
+    "note": "TCP 校验和（含伪首部）正确",
+    "collector": "COL-ING-01",
+    "cap_len": 65,
+    "wire_len": 65,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0xa05d",
+        "expected": "0xa05d",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 11,
+    "name": "L4-TCP-BAD",
+    "note": "仅应用载荷被改：L3 通过、L4 失配",
+    "collector": "COL-ING-01",
+    "cap_len": 65,
+    "wire_len": 65,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0xa05d",
+        "expected": "0x9f5d",
+        "reason": "字段已填写且分段完整，重算不一致，疑似载荷被篡改或损坏"
+      }
+    ]
+  },
+  {
+    "frame_id": 12,
+    "name": "L4-TCP-ZERO-EGRESS",
+    "note": "TCP sum 为 0：出向 NIC 卸载点判设备未填写",
+    "collector": "COL-EG-02",
+    "cap_len": 65,
+    "wire_len": 65,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "device_unfilled",
+        "verdict_zh": "设备未填写（卸载占位）",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x0000",
+        "expected": "0xa05d",
+        "reason": "出方向且声明 TX 传输层校验卸载，0 为 NIC 接管前占位，Wireshark 的 incorrect 提示在此场景应判设备未填写"
+      }
+    ]
+  },
+  {
+    "frame_id": 13,
+    "name": "L4-TCP-ZERO-INGRESS",
+    "note": "同样的 0 值在入向点：无卸载声明，判失配",
+    "collector": "COL-ING-01",
+    "cap_len": 65,
+    "wire_len": 65,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          50,
+          52
+        ],
+        "stored": "0x0000",
+        "expected": "0xa05d",
+        "reason": "字段已填写且分段完整，重算不一致，疑似载荷被篡改或损坏"
+      }
+    ]
+  },
+  {
+    "frame_id": 14,
+    "name": "L4-TCP-SHORT",
+    "note": "截断在 TCP 首部，校验字段缺失；L3 仍可验",
+    "collector": "COL-ING-01",
+    "cap_len": 46,
+    "wire_len": 65,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          34,
+          46
+        ],
+        "stored": null,
+        "expected": null,
+        "reason": "字段可读，但校验和覆盖 31 字节分段，样本仅覆盖到第 12 字节；读到 UDP/TCP 头部不等于分段完整，不能据此判篡改"
+      }
+    ]
+  },
+  {
+    "frame_id": 15,
+    "name": "L4-TCP-PAYLOAD-GAP",
+    "note": "TCP 头与校验字段读得到，但载荷缺 4 字节：L3 可验、L4 覆盖范围不闭合判 SH",
+    "collector": "COL-ING-01",
+    "cap_len": 61,
+    "wire_len": 65,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb2",
+        "expected": "0x5cb2",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "tcp.sum",
+        "wire_range": [
+          50,
+          52
+        ],
+        "have_range": [
+          34,
+          61
+        ],
+        "stored": "0xa05d",
+        "expected": null,
+        "reason": "字段可读，但校验和覆盖 31 字节分段，样本仅覆盖到第 27 字节；读到 UDP/TCP 头部不等于分段完整，不能据此判篡改"
+      }
+    ]
+  },
+  {
+    "frame_id": 16,
+    "name": "L4-UDP-OK",
+    "note": "UDP 校验和正确",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb5",
+        "expected": "0x5cb5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "udp.sum",
+        "wire_range": [
+          40,
+          42
+        ],
+        "have_range": [
+          40,
+          42
+        ],
+        "stored": "0xa516",
+        "expected": "0xa516",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 17,
+    "name": "L4-UDP-BAD",
+    "note": "UDP 载荷被改：L4 失配",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb5",
+        "expected": "0x5cb5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "udp.sum",
+        "wire_range": [
+          40,
+          42
+        ],
+        "have_range": [
+          40,
+          42
+        ],
+        "stored": "0xa516",
+        "expected": "0xa616",
+        "reason": "字段已填写且分段完整，重算不一致，疑似载荷被篡改或损坏"
+      }
+    ]
+  },
+  {
+    "frame_id": 18,
+    "name": "L4-UDP-ZERO-LEGAL",
+    "note": "UDP sum 为 0：IPv4 下表示发送方刻意不校验，任何方向都合法",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb5",
+        "expected": "0x5cb5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "udp.sum",
+        "wire_range": [
+          40,
+          42
+        ],
+        "have_range": [
+          40,
+          42
+        ],
+        "stored": "0x0000",
+        "expected": "0x0000",
+        "reason": "UDP 校验和为 0 是 IPv4 合法的'发送方省略'，设备已显式填写该语义"
+      }
+    ]
+  },
+  {
+    "frame_id": 19,
+    "name": "L4-UDP-ZERO-EGRESS",
+    "note": "UDP sum 为 0 且出向声明卸载：按设备未填写处理",
+    "collector": "COL-EG-02",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb5",
+        "expected": "0x5cb5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "device_unfilled",
+        "verdict_zh": "设备未填写（卸载占位）",
+        "field": "udp.sum",
+        "wire_range": [
+          40,
+          42
+        ],
+        "have_range": [
+          40,
+          42
+        ],
+        "stored": "0x0000",
+        "expected": "0xa516",
+        "reason": "出方向且声明 TX 传输层校验卸载，0 为 NIC 接管前占位，Wireshark 的 incorrect 提示在此场景应判设备未填写"
+      }
+    ]
+  },
+  {
+    "frame_id": 20,
+    "name": "L4-UDP-SHORT",
+    "note": "能读到 src/dst/len 三个 UDP 字段，却读不到 checksum：字段可读≠完整",
+    "collector": "COL-ING-01",
+    "cap_len": 40,
+    "wire_len": 51,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cb5",
+        "expected": "0x5cb5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "udp.sum",
+        "wire_range": [
+          40,
+          42
+        ],
+        "have_range": [
+          34,
+          40
+        ],
+        "stored": null,
+        "expected": null,
+        "reason": "UDP 头部未取全，校验和字段本身都读不完整"
+      }
+    ]
+  },
+  {
+    "frame_id": 21,
+    "name": "L4-ICMP-OK",
+    "note": "ICMP 校验和正确",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x2954",
+        "reason": "分段完整，伪头+分段重算一致"
+      }
+    ]
+  },
+  {
+    "frame_id": 22,
+    "name": "L4-ICMP-BAD",
+    "note": "ICMP 校验字段被破坏",
+    "collector": "COL-ING-01",
+    "cap_len": 51,
+    "wire_len": 51,
+    "truncated": false,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "mismatch",
+        "verdict_zh": "可校验·不一致",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          36,
+          38
+        ],
+        "stored": "0x2954",
+        "expected": "0x1c54",
+        "reason": "字段已填写且分段完整，重算不一致，疑似载荷被篡改或损坏"
+      }
+    ]
+  },
+  {
+    "frame_id": 23,
+    "name": "L4-ICMP-SHORT",
+    "note": "截断在 ICMP 校验字段之前",
+    "collector": "COL-ING-01",
+    "cap_len": 36,
+    "wire_len": 51,
+    "truncated": true,
+    "layers": [
+      {
+        "layer": "eth",
+        "verdict": "not_present",
+        "verdict_zh": "本层不存在",
+        "field": "eth.fcs",
+        "wire_range": null,
+        "have_range": null,
+        "stored": null,
+        "expected": null,
+        "reason": "采集点在 MAC 与驱动之间，FCS 已被网卡/驱动剥离，样本中不存在该字段"
+      },
+      {
+        "layer": "ipv4",
+        "verdict": "verifiable_ok",
+        "verdict_zh": "可校验·一致",
+        "field": "ip.sum",
+        "wire_range": [
+          24,
+          26
+        ],
+        "have_range": [
+          24,
+          26
+        ],
+        "stored": "0x5cc5",
+        "expected": "0x5cc5",
+        "reason": "头部完整，重算 RFC1071 校验和一致"
+      },
+      {
+        "layer": "l4",
+        "verdict": "insufficient",
+        "verdict_zh": "样本字节不足",
+        "field": "icmp.sum",
+        "wire_range": [
+          36,
+          38
+        ],
+        "have_range": [
+          34,
+          36
+        ],
+        "stored": null,
+        "expected": null,
+        "reason": "ICMP 头部未取全，校验和字段本身都读不完整"
+      }
+    ]
+  }
+]
