@@ -1,0 +1,57 @@
+{
+  "record": {
+    "recordId": "reverifiable-ed25519",
+    "envelope": {
+      "payload": "eyJzdWJqZWN0IjoiZXhhbXBsZS9hcHBAMS4wLjAiLCJkZWNpc2lvbiI6ImFwcHJvdmVkIn0=",
+      "payloadType": "application/vnd.example.review+json",
+      "signatures": [
+        {
+          "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+          "sig": "Iupvwr9jRP+xg5j7q+Ct3B4rcBHJQWNP2fWKrnBQraYfwg9b/8eoKjKqTxl+nv/kn37p8x+y1t5wdlIjEVZ2DA=="
+        }
+      ]
+    },
+    "conclusion": "approved",
+    "reviewSource": "legacy-review-v1",
+    "evidenceKeyids": [
+      "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc"
+    ],
+    "signingAlgorithms": {
+      "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "parameters": {
+          "hash": "none"
+        }
+      }
+    },
+    "envelopeDigest": "3591d9c20b7e5075ba1db6fad9bbbdbd379c9abeaf2b775722e940290a117868",
+    "priorFailure": null
+  },
+  "capabilities": {
+    "supportedAlgorithms": [
+      {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "parameters": {
+          "hash": "none"
+        }
+      }
+    ],
+    "publicKeys": [
+      {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "4f66dabebcf30628963786001984c0b75c175cdcf3bc4855933a2628f0cd0a0f"
+        }
+      }
+    ],
+    "trustedReviewSources": [
+      "legacy-review-v1"
+    ],
+    "allowLegacyEvidence": true,
+    "threshold": 1
+  }
+}

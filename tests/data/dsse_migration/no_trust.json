@@ -1,0 +1,47 @@
+{
+  "record": {
+    "recordId": "no-trust-rsa",
+    "envelope": {
+      "payload": "eyJzdWJqZWN0IjoiZXhhbXBsZS90b29sQDAuOS4wIiwiZGVjaXNpb24iOiJhcHByb3ZlZCJ9",
+      "payloadType": "application/vnd.example.review+json",
+      "signatures": [
+        {
+          "keyid": "2f685fa7546f1856b123223ab086b3def14c89d24eef18f49c32508c2f60e241",
+          "sig": "nVXxt0trB6LY3s+qvPsBe/AW+jBbB1rcuq2mnVxVfh68UiQszp8zPbJgpdcCDgaeuEP8Ez2iIxjyZIb7sDtsbLjmHyla4c16jzlLczHcRt39aPKeL3kSw62xdXjytyM8LCfo8F64S8ofqq+Tuc1dumXc+DRZ0E2+rM5HO52DRUZHFTmUD/5XaEy8mOL41bdu1Vf0MfcDphFHQQy+NLxryTfyqmJC3VClCKeK/z+wzYCO9cp+ZpZ3Xc10KvCYGcKvVfwErXqdMZ+AH2BkQxhfw5p2jaHVfb3g1NcOX4baf3EFMZZ4an6UGeY3PSVRWgzML5pbQKA/qGP9jTBg1kR5Bw=="
+        }
+      ]
+    },
+    "conclusion": "approved",
+    "reviewSource": "legacy-review-v1",
+    "evidenceKeyids": [
+      "2f685fa7546f1856b123223ab086b3def14c89d24eef18f49c32508c2f60e241"
+    ],
+    "signingAlgorithms": {
+      "2f685fa7546f1856b123223ab086b3def14c89d24eef18f49c32508c2f60e241": {
+        "keytype": "rsa",
+        "scheme": "rsassa-pss-sha256",
+        "parameters": {
+          "hash": "sha256",
+          "salt_length": 32
+        }
+      }
+    },
+    "envelopeDigest": "5212087609255b5fe8e99b51da035b1ff152489f54e4dcb611fcbfdfe064b0b7",
+    "priorFailure": null
+  },
+  "capabilities": {
+    "supportedAlgorithms": [
+      {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "parameters": {
+          "hash": "none"
+        }
+      }
+    ],
+    "publicKeys": [],
+    "trustedReviewSources": [],
+    "allowLegacyEvidence": false,
+    "threshold": 1
+  }
+}

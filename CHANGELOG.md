@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+* DSSE review-record migration assessment (`assess_migration`) that classifies
+  historical conclusions as re-verified, approved-evidence reuse, or recheck.
+
 ## 1.6.0
 
 ### Changed

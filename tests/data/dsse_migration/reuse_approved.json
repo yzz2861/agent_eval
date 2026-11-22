@@ -1,0 +1,48 @@
+{
+  "record": {
+    "recordId": "reuse-approved-ecdsa",
+    "envelope": {
+      "payload": "eyJzdWJqZWN0IjoiZXhhbXBsZS9saWJAMi4zLjQiLCJkZWNpc2lvbiI6ImFwcHJvdmVkIn0=",
+      "payloadType": "application/vnd.example.review+json",
+      "signatures": [
+        {
+          "keyid": "50d7e110ad65f3b2dba5c3cfc8c5ca259be9774cc26be3410044ffd4be3aa5f3",
+          "sig": "MEUCIQCi+UbwMU9t9j2Pd4M07Hi8xVNOiIexMlz3ZqJl9jwL5AIgQM6XtnZGUSgS3cg8vOXpeJUOvPPoZ1yHvnNIaZyCXGI="
+        }
+      ]
+    },
+    "conclusion": "approved",
+    "reviewSource": "legacy-review-v1",
+    "evidenceKeyids": [
+      "50d7e110ad65f3b2dba5c3cfc8c5ca259be9774cc26be3410044ffd4be3aa5f3"
+    ],
+    "signingAlgorithms": {
+      "50d7e110ad65f3b2dba5c3cfc8c5ca259be9774cc26be3410044ffd4be3aa5f3": {
+        "keytype": "ecdsa",
+        "scheme": "ecdsa-sha2-nistp256",
+        "parameters": {
+          "hash": "sha256"
+        }
+      }
+    },
+    "envelopeDigest": "9e9863069ed66375b873ce932b0e03f105282336a49cf4053f89541017116b54",
+    "priorFailure": "missing_public_key"
+  },
+  "capabilities": {
+    "supportedAlgorithms": [
+      {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "parameters": {
+          "hash": "none"
+        }
+      }
+    ],
+    "publicKeys": [],
+    "trustedReviewSources": [
+      "legacy-review-v1"
+    ],
+    "allowLegacyEvidence": true,
+    "threshold": 1
+  }
+}
