@@ -74,4 +74,4 @@ ignore = [
     "SIM102",  # Allow nested if statements.
     "SIM117",  # Allow nested with statements.
 ]
-per-file-ignores = {"signxml/__init__.py" = ["F401"], "signxml/xades/__init__.py" = ["F401"], "signxml/verifier.py" = ["E721"]}
+per-file-ignores = {"signxml/__init__.py" = ["F401"], "signxml/xades/__init__.py" = ["F401"], "signxml/legacy_review/__init__.py" = ["F401"], "signxml/verifier.py" = ["E721"]}

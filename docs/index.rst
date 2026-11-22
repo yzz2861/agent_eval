@@ -17,6 +17,14 @@ XAdES API documentation
    :imported-members:
    :undoc-members:
 
+Offline legacy-policy review API documentation
+==============================================
+
+.. automodule:: signxml.legacy_review
+   :members:
+   :imported-members:
+   :undoc-members:
+
 Change log
 ==========
 

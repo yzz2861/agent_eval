@@ -297,6 +297,38 @@ SignXML supports signing and verifying documents using `XAdES <https://en.wikipe
         if isinstance(verify_result, XAdESVerifyResult):
             verify_result.signed_properties  # use this to access parsed XAdES properties
 
+Offline review of legacy (deprecated-algorithm) signatures
+----------------------------------------------------------
+
+When a publisher retires an XML signature algorithm (for example the SHA-1 family), historical documents
+must remain auditable without weakening the current policy. The :mod:`signxml.legacy_review` package
+provides a fully offline review entry point for this situation. It takes a test public key, a digitally
+signed trusted time evidence token, and one or more versioned admission policy tables, and returns a
+checklist that separates the historical admission decision from the current one. A document that was
+legitimately signed under an old policy stays historically accepted even though the current strict
+configuration rejects it; the report independently states whether a re-signature is required.
+
+Trusted time evidence, rather than any date typed into the document, drives the historical decision, so a
+self-reported date cannot mask an old policy. Re-signing goes through :func:`~signxml.legacy_review.issue_upgrade`,
+which signs the exact bytes SignXML verified and emits a signed :class:`~signxml.legacy_review.UpgradeReceipt`
+binding the fingerprints of both the original and the reissued document. A body-swapped document fails the
+binding checks even if its XML signature is otherwise well formed. A runnable end-to-end demonstration that
+prints the differing checklists lives in `examples/legacy_review/offline_review_demo.py`.
+
+.. code-block:: python
+
+    from signxml.legacy_review import OfflineReviewer, build_default_policy_table
+
+    reviewer = OfflineReviewer(
+        trusted_public_key=test_public_key,
+        trusted_evidence_key=trusted_timestamp_key.public_key(),
+        policy_tables=build_default_policy_table(),
+    )
+    report = reviewer.review(document_bytes, time_evidence=trusted_time_evidence)
+    print(report.render_checklist())
+    if report.reissue_required:
+        bundle = issue_upgrade(reviewer, document_bytes, reissue_key=publisher_key, time_evidence=trusted_time_evidence)
+
 Authors
 -------
 * `Andrey Kislyuk <https://github.com/kislyuk>`_ and SignXML contributors.

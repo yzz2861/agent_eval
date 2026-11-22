@@ -31,3 +31,6 @@ npm-debug.log
 
 # OS X metadata files
 .DS_Store
+
+# Offline legacy review demo artifacts
+examples/legacy_review/output/
