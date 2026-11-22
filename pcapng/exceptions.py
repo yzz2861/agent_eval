@@ -68,3 +68,13 @@ class BadMagic(PcapngLoadError):
     """
 
     pass
+
+
+class CommentAuditError(PcapngException):
+    """
+    Indicate that an approved comment entry could not be reconciled
+    with the original capture (for example, it points at a section,
+    interface or packet that does not exist).
+    """
+
+    pass
