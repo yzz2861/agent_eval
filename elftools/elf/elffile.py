@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     from ..construct.lib.container import Container
+    from .attribution import AttributionResult
 
 
 class ELFFile:
@@ -273,6 +274,25 @@ class ELFFile:
             if (start >= seg['p_vaddr'] and
                 end <= seg['p_vaddr'] + seg['p_filesz']):
                 yield start - seg['p_vaddr'] + seg['p_offset']
+
+    def attribute_address_range(
+        self,
+        start: int,
+        size: int,
+        *,
+        include_dynsym: bool = True,
+    ) -> AttributionResult:
+        """Read-only attribution of the half-open range [start, start+size).
+
+            See elftools.elf.attribution.attribute_address_range
+            for the full description of the evidence combined and the
+            undetermined boundaries that may be reported. The query never
+            writes to the underlying stream.
+        """
+        from .attribution import attribute_address_range
+
+        return attribute_address_range(
+            self, start, size, include_dynsym=include_dynsym)
 
     def has_dwarf_info(self, strict: bool = False) -> bool:
         """ Check whether this file appears to have debugging information.
