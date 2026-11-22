@@ -11,6 +11,8 @@ from markupsafe import escape
 from markupsafe import Markup
 
 from . import nodes
+from .capabilities import CapabilityManifest
+from .capabilities import fingerprint
 from .exceptions import TemplateAssertionError
 from .idtracking import Symbols
 from .idtracking import VAR_LOAD_ALIAS
@@ -253,6 +255,9 @@ class DependencyFinderVisitor(NodeVisitor):
     def __init__(self) -> None:
         self.filters: set[str] = set()
         self.tests: set[str] = set()
+        self.templates: set[str] = set()
+        self.dynamic_templates: set[str] = set()
+        self.has_calls = False
 
     def visit_Filter(self, node: nodes.Filter) -> None:
         self.generic_visit(node)
@@ -261,6 +266,37 @@ class DependencyFinderVisitor(NodeVisitor):
     def visit_Test(self, node: nodes.Test) -> None:
         self.generic_visit(node)
         self.tests.add(node.name)
+
+    def visit_Call(self, node: nodes.Call) -> None:
+        self.has_calls = True
+        self.generic_visit(node)
+
+    def _template_reference(self, node: nodes.Expr, kind: str) -> None:
+        if isinstance(node, nodes.Const) and isinstance(node.value, str):
+            self.templates.add(node.value)
+        elif isinstance(node, (nodes.Tuple, nodes.List)) and all(
+            isinstance(item, nodes.Const) and isinstance(item.value, str)
+            for item in node.items
+        ):
+            self.templates.update(item.value for item in node.items)
+        else:
+            self.dynamic_templates.add(kind)
+
+    def visit_Extends(self, node: nodes.Extends) -> None:
+        self.generic_visit(node)
+        self._template_reference(node.template, "extends")
+
+    def visit_Include(self, node: nodes.Include) -> None:
+        self.generic_visit(node)
+        self._template_reference(node.template, "include")
+
+    def visit_Import(self, node: nodes.Import) -> None:
+        self.generic_visit(node)
+        self._template_reference(node.template, "import")
+
+    def visit_FromImport(self, node: nodes.FromImport) -> None:
+        self.generic_visit(node)
+        self._template_reference(node.template, "from_import")
 
     def visit_Block(self, node: nodes.Block) -> None:
         """Stop visiting at blocks."""
@@ -339,6 +375,12 @@ class CodeGenerator(NodeVisitor):
         # registry of all filters and tests (global, not block local)
         self.tests: dict[str, str] = {}
         self.filters: dict[str, str] = {}
+
+        # dependencies resolved during compilation and embedded in the
+        # generated module so cached bytecode carries its capability manifest
+        self.template_dependencies: set[str] = set()
+        self.dynamic_template_references: set[str] = set()
+        self.has_dynamic_calls = False
 
         # the debug information
         self.debug_info: list[tuple[int, int]] = []
@@ -547,6 +589,10 @@ class CodeGenerator(NodeVisitor):
         for node in nodes:
             visitor.visit(node)
 
+        self.template_dependencies.update(visitor.templates)
+        self.dynamic_template_references.update(visitor.dynamic_templates)
+        self.has_dynamic_calls = self.has_dynamic_calls or visitor.has_calls
+
         for id_map, names, dependency in (
             (self.filters, visitor.filters, "filters"),
             (
@@ -576,6 +622,38 @@ class CodeGenerator(NodeVisitor):
                 )
                 self.outdent()
                 self.outdent()
+
+    def _build_capability_manifest(self, node: nodes.Template) -> CapabilityManifest:
+        """Describe the concrete bindings the compiled template depends on."""
+        global_names = set(self.environment.globals)
+        used_globals = find_undeclared(node.body, global_names)
+
+        for block in node.find_all(nodes.Block):
+            used_globals.update(find_undeclared(block.body, global_names))
+
+        return CapabilityManifest(
+            {
+                "version": 1,
+                "name": self.name,
+                "filters": {
+                    name: fingerprint(self.environment.filters.get(name))
+                    for name in sorted(self.filters)
+                },
+                "tests": {
+                    name: fingerprint(self.environment.tests.get(name))
+                    for name in sorted(self.tests)
+                },
+                "globals": {
+                    name: fingerprint(self.environment.globals[name])
+                    for name in sorted(used_globals)
+                    if name in self.environment.globals
+                },
+                "templates": sorted(self.template_dependencies),
+                "dynamic_templates": sorted(self.dynamic_template_references),
+                "dynamic_calls": self.has_dynamic_calls,
+            },
+            template_name=self.name,
+        )
 
     def enter_frame(self, frame: Frame) -> None:
         undefs = []
@@ -941,6 +1019,8 @@ class CodeGenerator(NodeVisitor):
         self.writeline(f"blocks = {{{blocks_kv_str}}}", extra=1)
         debug_kv_str = "&".join(f"{k}={v}" for k, v in self.debug_info)
         self.writeline(f"debug_info = {debug_kv_str!r}")
+        manifest = self._build_capability_manifest(node)
+        self.writeline(f"capability_manifest = {manifest!r}", extra=1)
 
     def visit_Block(self, node: nodes.Block, frame: Frame) -> None:
         """Call a block and register it for the template."""
@@ -1019,6 +1099,10 @@ class CodeGenerator(NodeVisitor):
         self.writeline("parent_template = environment.get_template(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
+        self.writeline(
+            "parent_template = environment._review_template_reference("
+            "parent_template, context)"
+        )
         self.writeline("for name, parent_block in parent_template.blocks.items():")
         self.indent()
         self.writeline("context.blocks.setdefault(name, []).append(parent_block)")
@@ -1051,6 +1135,9 @@ class CodeGenerator(NodeVisitor):
         self.writeline(f"template = environment.{func_name}(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
+        self.writeline(
+            "template = environment._review_template_reference(template, context)"
+        )
         if node.ignore_missing:
             self.outdent()
             self.writeline("except TemplateNotFound:")
@@ -1094,9 +1181,12 @@ class CodeGenerator(NodeVisitor):
     def _import_common(
         self, node: nodes.Import | nodes.FromImport, frame: Frame
     ) -> None:
-        self.write(f"{self.choose_async('await ')}environment.get_template(")
+        self.write(
+            f"{self.choose_async('await ')}environment._review_template_reference("
+            "environment.get_template("
+        )
         self.visit(node.template, frame)
-        self.write(f", {self.name!r}).")
+        self.write(f", {self.name!r}), context).")
 
         if node.with_context:
             f_name = f"make_module{self.choose_async('_async')}"
@@ -1456,6 +1546,11 @@ class CodeGenerator(NodeVisitor):
         will be evaluated at runtime. Any other exception will also be
         evaluated at runtime for easier debugging.
         """
+        if isinstance(node, (nodes.Filter, nodes.Test)) and getattr(
+            self.environment, "sandboxed", False
+        ):
+            raise nodes.Impossible()
+
         const = node.as_const(frame.eval_ctx)
 
         if frame.eval_ctx.autoescape:

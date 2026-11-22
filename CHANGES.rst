@@ -5,6 +5,11 @@ Version 3.2.0
 
 Unreleased
 
+-   Sandboxed templates record the concrete filters, tests, globals, template
+   references, and runtime call targets they depend on.  Shared bytecode
+   cache entries are re-checked against the current environment, and overlays
+   bind capabilities to their own tables.
+
 -   Drop support for Python 3.7, 3.8, and 3.9.
 -   Update minimum MarkupSafe version to >= 3.0.
 -   Update minimum Babel version to >= 2.17.

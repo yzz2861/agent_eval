@@ -33,6 +33,14 @@ class Optimizer(NodeTransformer):
     ) -> nodes.Node:
         node = super().generic_visit(node, *args, **kwargs)
 
+        # Filters and tests are capability-bearing calls.  Folding them would
+        # bake one implementation (and its result) into shared bytecode before
+        # the sandbox has a chance to review the actual call.
+        if isinstance(node, (nodes.Filter, nodes.Test)) and getattr(
+            self.environment, "sandboxed", False
+        ):
+            return node
+
         # Do constant folding. Some other nodes besides Expr have
         # as_const, but folding them causes errors later on.
         if isinstance(node, nodes.Expr):

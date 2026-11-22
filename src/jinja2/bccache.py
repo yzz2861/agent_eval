@@ -30,7 +30,7 @@ if t.TYPE_CHECKING:
         def set(self, key: str, value: bytes, timeout: int | None = None) -> None: ...
 
 
-bc_version = 5
+bc_version = 6
 # Magic bytes to identify Jinja bytecode cache files. Contains the
 # Python major and minor version to avoid loading incompatible bytecode
 # if a project upgrades its Python version.

@@ -16,6 +16,7 @@ from types import CodeType
 from markupsafe import Markup
 
 from . import nodes
+from .capabilities import CapabilityManifest
 from .compiler import CodeGenerator
 from .compiler import generate
 from .defaults import BLOCK_END_STRING
@@ -952,6 +953,19 @@ class Environment:
         """
         return template
 
+    def _prepare_render(self, template: "Template") -> t.Any:
+        """Hook for capability review before a template starts rendering."""
+        return None
+
+    def _finish_render(self, token: t.Any) -> None:
+        """Hook paired with :meth:`_prepare_render`."""
+
+    def _review_template_reference(
+        self, template: "Template", context: Context | None = None
+    ) -> "Template":
+        """Hook for reviewing a template loaded by include/extends/import."""
+        return template
+
     @internalcode
     def _load_template(
         self, name: str, globals: t.MutableMapping[str, t.Any] | None
@@ -1160,6 +1174,10 @@ class Template:
     _module: t.Optional["TemplateModule"]
     _debug_info: str
     _uptodate: t.Callable[[], bool] | None
+    capability_manifest: CapabilityManifest
+    _capability_manifest_known: bool
+    _capability_approval: t.Any
+    _capability_denied: bool
 
     def __new__(
         cls,
@@ -1263,6 +1281,12 @@ class Template:
         t._debug_info = namespace["debug_info"]
         t._uptodate = None
 
+        manifest = namespace.get("capability_manifest")
+        t._capability_manifest_known = manifest is not None
+        t.capability_manifest = CapabilityManifest(manifest or {}, template_name=t.name)
+        t._capability_approval = None
+        t._capability_denied = False
+
         # store the reference
         namespace["environment"] = environment
         namespace["__jinja_template__"] = t
@@ -1284,12 +1308,17 @@ class Template:
 
             return asyncio.run(self.render_async(*args, **kwargs))
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        token = self.environment._prepare_render(self)
 
         try:
-            return self.environment.concat(self.root_render_func(ctx))  # type: ignore
-        except Exception:
-            self.environment.handle_exception()
+            ctx = self.new_context(dict(*args, **kwargs))
+
+            try:
+                return self.environment.concat(self.root_render_func(ctx))  # type: ignore
+            except Exception:
+                self.environment.handle_exception()
+        finally:
+            self.environment._finish_render(token)
 
     async def render_async(self, *args: t.Any, **kwargs: t.Any) -> str:
         """This works similar to :meth:`render` but returns a coroutine
@@ -1305,14 +1334,19 @@ class Template:
                 "The environment was not created with async mode enabled."
             )
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        token = self.environment._prepare_render(self)
 
         try:
-            return self.environment.concat(  # type: ignore
-                [n async for n in self.root_render_func(ctx)]  # type: ignore
-            )
-        except Exception:
-            return self.environment.handle_exception()
+            ctx = self.new_context(dict(*args, **kwargs))
+
+            try:
+                return self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
+            except Exception:
+                return self.environment.handle_exception()
+        finally:
+            self.environment._finish_render(token)
 
     def stream(self, *args: t.Any, **kwargs: t.Any) -> "TemplateStream":
         """Works exactly like :meth:`generate` but returns a
@@ -1328,21 +1362,26 @@ class Template:
 
         It accepts the same arguments as :meth:`render`.
         """
-        if self.environment.is_async:
-            import asyncio
-
-            async def to_list() -> list[str]:
-                return [x async for x in self.generate_async(*args, **kwargs)]
-
-            yield from asyncio.run(to_list())
-            return
-
-        ctx = self.new_context(dict(*args, **kwargs))
+        token = self.environment._prepare_render(self)
 
         try:
-            yield from self.root_render_func(ctx)
-        except Exception:
-            yield self.environment.handle_exception()
+            if self.environment.is_async:
+                import asyncio
+
+                async def to_list() -> list[str]:
+                    return [x async for x in self.generate_async(*args, **kwargs)]
+
+                yield from asyncio.run(to_list())
+                return
+
+            ctx = self.new_context(dict(*args, **kwargs))
+
+            try:
+                yield from self.root_render_func(ctx)
+            except Exception:
+                yield self.environment.handle_exception()
+        finally:
+            self.environment._finish_render(token)
 
     async def generate_async(
         self, *args: t.Any, **kwargs: t.Any
@@ -1355,16 +1394,21 @@ class Template:
                 "The environment was not created with async mode enabled."
             )
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        token = self.environment._prepare_render(self)
 
         try:
-            agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
+            ctx = self.new_context(dict(*args, **kwargs))
 
-            async with aclosing(agen):
-                async for event in agen:
-                    yield event
-        except Exception:
-            yield self.environment.handle_exception()
+            try:
+                agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
+
+                async with aclosing(agen):
+                    async for event in agen:
+                        yield event
+            except Exception:
+                yield self.environment.handle_exception()
+        finally:
+            self.environment._finish_render(token)
 
     def new_context(
         self,
@@ -1395,8 +1439,13 @@ class Template:
         a dict which is then used as context.  The arguments are the same
         as for the :meth:`new_context` method.
         """
-        ctx = self.new_context(vars, shared, locals)
-        return TemplateModule(self, ctx)
+        token = self.environment._prepare_render(self)
+
+        try:
+            ctx = self.new_context(vars, shared, locals)
+            return TemplateModule(self, ctx)
+        finally:
+            self.environment._finish_render(token)
 
     async def make_module_async(
         self,
@@ -1409,12 +1458,17 @@ class Template:
         normal :meth:`make_module` one.  Likewise the module attribute
         becomes unavailable in async mode.
         """
-        ctx = self.new_context(vars, shared, locals)
-        return TemplateModule(
-            self,
-            ctx,
-            [x async for x in self.root_render_func(ctx)],  # type: ignore
-        )
+        token = self.environment._prepare_render(self)
+
+        try:
+            ctx = self.new_context(vars, shared, locals)
+            return TemplateModule(
+                self,
+                ctx,
+                [x async for x in self.root_render_func(ctx)],  # type: ignore
+            )
+        finally:
+            self.environment._finish_render(token)
 
     @internalcode
     def _get_default_module(self, ctx: Context | None = None) -> "TemplateModule":
@@ -1472,6 +1526,38 @@ class Template:
         This attribute is not available if async mode is enabled.
         """
         return self._get_default_module()
+
+    @property
+    def capabilities(self) -> CapabilityManifest:
+        """The capability manifest embedded by the compiler."""
+        return self.capability_manifest
+
+    @property
+    def dependencies(self) -> CapabilityManifest:
+        """Alias for :attr:`capabilities`."""
+        return self.capability_manifest
+
+    @property
+    def capability_dependencies(self) -> CapabilityManifest:
+        """Alias for :attr:`capabilities`."""
+        return self.capability_manifest
+
+    @property
+    def capability_approved(self) -> bool:
+        return self._capability_approval is not None and not getattr(
+            self, "_capability_denied", False
+        )
+
+    def review_capabilities(self, reviewer: t.Any = None, **kwargs: t.Any) -> t.Any:
+        method = getattr(self.environment, "review_capabilities", None)
+        if method is None:
+            raise TypeError("capability review requires a sandboxed environment")
+        return method(self, reviewer=reviewer, **kwargs)
+
+    review_template_capabilities = review_capabilities
+    recheck_capabilities = review_capabilities
+    capability_review = review_capabilities
+    approve_capabilities = review_capabilities
 
     def get_corresponding_lineno(self, lineno: int) -> int:
         """Return the source line number of a line number in the

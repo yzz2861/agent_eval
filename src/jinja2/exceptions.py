@@ -160,6 +160,23 @@ class SecurityError(TemplateRuntimeError):
     """
 
 
+class CapabilityError(SecurityError):
+    """Base class for capability review failures in the sandbox."""
+
+
+class CapabilityReviewRequired(CapabilityError):
+    """A template must be reviewed before its cached code can run."""
+
+
+class UnapprovedCapability(CapabilityError):
+    """A dynamic call uses a capability that was not approved."""
+
+
+CapabilityReviewError = CapabilityReviewRequired
+CapabilityNotApproved = UnapprovedCapability
+UnapprovedDynamicCall = UnapprovedCapability
+
+
 class FilterArgumentError(TemplateRuntimeError):
     """This error is raised if a filter was called with inappropriate
     arguments

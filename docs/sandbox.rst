@@ -109,3 +109,28 @@ For example, the power (``**``) operator can be disabled:
                 return self.undefined("The power (**) operator is unavailable.")
 
             return super().call_binop(self, context, operator, left, right)
+
+
+Capability Review
+-----------------
+
+Compiled sandbox templates carry a :class:`~jinja2.CapabilityManifest`.
+It records the filters, tests, globals, and template references that were
+bound when the template was compiled, along with a fingerprint of each
+callable.  This manifest is part of the generated module, so it travels
+with shared bytecode caches.
+
+A cached template is only auto-approved while each recorded fingerprint
+still matches the current environment.  If a backend refreshes a filter
+implementation, affected templates raise
+:exc:`~jinja2.exceptions.CapabilityReviewRequired` instead of inheriting
+the old approval.  Call :meth:`~jinja2.sandbox.SandboxedEnvironment.review_capabilities`
+to bind the current concrete capabilities and approve the template again.
+Other templates keep their existing approval.
+
+Environment overlays use independent filter and test tables, so a
+same-named replacement in an overlay is reviewed against that overlay.
+Delayed includes and imports are reviewed when their template name is
+resolved at runtime.  Calls whose target is only known at runtime are also
+checked before dispatch; :attr:`~jinja2.sandbox.SandboxedEnvironment.capability_reviewer`
+can approve those call-time capabilities.
