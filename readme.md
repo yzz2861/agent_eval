@@ -37,6 +37,7 @@ revocation checks.
      - Policy constraints
      - Policy mapping
      - Inhibit anyPolicy
+     - Per-hop policy evidence and caller-approved initial policy sets
    - Failure on unknown/unsupported critical extensions
  - TLS/SSL server validation
  - Whitelisting certificates

@@ -1,5 +1,14 @@
 # changelog
 
+## Unreleased
+
+ - Added offline certificate policy evidence queries via
+   `CertificateValidator.query_policies()` / `.validate_policies()` and the
+   `certvalidator.policy` module. Results include per-hop policy mappings,
+   policy constraints, inhibitAnyPolicy state, the caller-approved initial
+   policy domain, distinct path identities for identical final policy OIDs,
+   and pending evidence for unreadable extensions.
+
 ## 0.11.1
 
  - Updated [asn1crypto](https://github.com/wbond/asn1crypto) dependency to

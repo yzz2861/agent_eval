@@ -8,6 +8,7 @@
    - [Revocation Checking](#revocation-checking)
    - [Custom Trust Roots/CA Certs](#custom-trust-rootsca-certs)
    - [Moment-In-Time Validation](#moment-in-time-validation)
+   - [Policy Evidence Queries](#policy-evidence-queries)
 
 ## Basic Path Validation
 
@@ -406,3 +407,46 @@ validator = CertificateValidator(end_entity_cert, validation_context=context)
 If moment-in-time validation is being performed, the `allow_fetching` option
 can not be used. Instead, any revocation CRLs or OCSP responses should be
 provided via the `crls` or `ocsps` parameters.
+
+### Policy Evidence Queries
+
+Basic path validation answers whether a path is valid, but a regulated
+consumer often also needs to show which certificate policy the path actually
+carried. `query_policies()` runs the same offline path validation and returns
+one `PolicyPathResult` per candidate path, including the per-hop policy tree,
+policy mappings, policy constraints and the caller-approved initial policy
+domain.
+
+```python
+from certvalidator import CertificateValidator, ValidationContext
+
+context = ValidationContext(
+    trust_roots=trust_roots,
+    other_certs=intermediates,
+    revocation_mode="soft-fail"
+)
+validator = CertificateValidator(end_entity_cert, validation_context=context)
+
+query = validator.query_policies(initial_policy_set=set([
+    "1.3.6.1.4.1.99999.1.1"
+]))
+
+for result in query.results:
+    print(result.path_id, result.status, result.final_policies)
+    for hop in result.hops:
+        print(hop["subject"], hop["certificate_policies"], hop["policy_mappings"])
+        print(hop["policy_constraints"], hop["state_before"], hop["state_after"])
+
+accepted = query.accepted_results
+```
+
+The query does not hide paths that merely share the same final policy OID.
+Each result has a unique `path_id`, its certificate `chain`, and the complete
+`final_policy_trails` from the anyPolicy root to the leaf. An extension that
+asn1crypto or this implementation can not evaluate is listed in `pending` with
+its OID, criticality and reason; a critical pending item prevents the path
+from being accepted.
+
+`query_certificate_policies()` is the equivalent module-level function from
+`certvalidator.policy`, and `validate_policy_path()` can be used when the
+candidate `ValidationPath` objects have already been built.

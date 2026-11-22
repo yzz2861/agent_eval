@@ -202,7 +202,11 @@ def validate_usage(validation_context, cert, key_usage, extended_key_usage, exte
         ))
 
 
-def _validate_path(validation_context, path, end_entity_name_override=None):
+def _validate_path(validation_context, path, end_entity_name_override=None,
+                   initial_policy_set=None, policy_audit=None,
+                   initial_explicit_policy=False,
+                   initial_any_policy_inhibit=False,
+                   initial_policy_mapping_inhibit=False):
     """
     Internal copy of validate_path() that allows overriding the name of the
     end-entity certificate as used in exception messages. This functionality is
@@ -220,6 +224,25 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
         A unicode string of the name to use for the final certificate in the
         path. This is necessary when dealing with indirect CRL issuers or
         OCSP responder certificates.
+
+    :param initial_policy_set:
+        None, or a set of unicode strings of policy identifiers the caller is
+        willing to accept. These are the policies in the trust anchor's
+        domain. None is equivalent to the "any-policy" initial policy set.
+
+    :param policy_audit:
+        None, or an object used to record per-hop policy evidence. The object
+        must implement the methods described by
+        certvalidator.policy.PolicyPathResult.
+
+    :param initial_explicit_policy:
+        A bool - if the initial-explicit-policy input is set
+
+    :param initial_any_policy_inhibit:
+        A bool - if the initial-any-policy-inhibit input is set
+
+    :param initial_policy_mapping_inhibit:
+        A bool - if the initial-policy-mapping-inhibit input is set
 
     :return:
         The final certificate in the path - an instance of
@@ -254,6 +277,36 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             type_name(end_entity_name_override)
         ))
 
+    if initial_policy_set is not None:
+        if not isinstance(initial_policy_set, (set, frozenset, list, tuple)):
+            raise TypeError(pretty_message(
+                '''
+                initial_policy_set must be a set of unicode strings, not %s
+                ''',
+                type_name(initial_policy_set)
+            ))
+        normalized_policy_set = set()
+        for policy_identifier in initial_policy_set:
+            if not isinstance(policy_identifier, str_cls):
+                raise TypeError(pretty_message(
+                    '''
+                    initial_policy_set must contain only unicode strings, not
+                    %s
+                    ''',
+                    type_name(policy_identifier)
+                ))
+            if policy_identifier in set(['any_policy', 'any-policy', '2.5.29.32.0']):
+                normalized_policy_set = set(['any_policy'])
+                break
+            normalized_policy_set.add(policy_identifier)
+        if not normalized_policy_set:
+            raise ValueError(pretty_message(
+                '''
+                initial_policy_set must contain at least one policy identifier
+                '''
+            ))
+        initial_policy_set = normalized_policy_set
+
     # Inputs
 
     trust_anchor = path.first
@@ -262,22 +315,35 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
     # the trust anchor is not part of the path
     path_length = len(path) - 1
 
-    # We don't accept any certificate policy or name constraint values as input
-    # and instead just start allowing everything during initialization
+    # Name constraints are not implemented. Policy inputs are only used when
+    # explicitly requested by a caller using the policy audit API.
 
     # Step 1: initialization
 
     # Step 1 a
-    valid_policy_tree = PolicyTreeRoot('any_policy', set(), set(['any_policy']))
+    if initial_policy_set is None:
+        initial_policy_set = set(['any_policy'])
+        root_expected_policy_set = set(['any_policy'])
+    else:
+        root_expected_policy_set = set(initial_policy_set)
+    valid_policy_tree = PolicyTreeRoot('any_policy', set(), root_expected_policy_set)
 
     # Steps 1 b-c skipped since they relate to name constraints
 
     # Steps 1 d-f
-    # We do not use initial-explicit-policy, initial-any-policy-inhibit or
-    # initial-policy-mapping-inhibit, so they are all set to the path length + 1
-    explicit_policy = path_length + 1
-    inhibit_any_policy = path_length + 1
-    policy_mapping = path_length + 1
+    explicit_policy = 0 if initial_explicit_policy else path_length + 1
+    inhibit_any_policy = 0 if initial_any_policy_inhibit else path_length + 1
+    policy_mapping = 0 if initial_policy_mapping_inhibit else path_length + 1
+
+    if policy_audit is not None:
+        policy_audit.begin(
+            path,
+            path_length,
+            initial_policy_set,
+            _policy_state(explicit_policy, policy_mapping, inhibit_any_policy),
+            _policy_tree_snapshot(valid_policy_tree),
+            trust_anchor
+        )
 
     # Steps 1 g-i
     working_public_key = trust_anchor.public_key
@@ -448,6 +514,17 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                 _cert_type(index, last_index, end_entity_name_override),
             ))
 
+        if policy_audit is not None:
+            state_before = _policy_state(explicit_policy, policy_mapping, inhibit_any_policy)
+            policy_tree_before = _policy_tree_snapshot(valid_policy_tree)
+            policy_mapping_counter_before = policy_mapping
+            mapping_status = 'not_processed'
+            tree_after_mappings = policy_tree_before
+            certificate_policies = _policy_entries(cert, 'certificate_policies')
+            policy_mappings = _policy_entries(cert, 'policy_mappings')
+            policy_constraints = _policy_constraints(cert)
+            inhibit_any = _inhibit_any_policy(cert)
+
         # Steps 2 b-c skipped since they relate to name constraints
 
         # Steps 2 d
@@ -524,10 +601,15 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                 _cert_type(index, last_index, end_entity_name_override, definite=True),
             ))
 
+        if policy_audit is not None:
+            policy_tree_after_policies = _policy_tree_snapshot(valid_policy_tree)
+
         if index != last_index:
             # Step 3: prepare for certificate index+1
 
             if cert.policy_mappings_value:
+                if policy_audit is not None:
+                    mapping_status = 'applied' if policy_mapping > 0 else 'inhibited'
                 policy_map = {}
                 for mapping in cert.policy_mappings_value:
                     issuer_domain_policy = mapping['issuer_domain_policy'].native
@@ -582,6 +664,12 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                             if len(valid_policy_tree.children) == 0:
                                 valid_policy_tree = None
 
+            elif policy_audit is not None:
+                mapping_status = 'none'
+
+            if policy_audit is not None:
+                tree_after_mappings = _policy_tree_snapshot(valid_policy_tree)
+
             # Step 3 c
             working_issuer_name = cert.subject
 
@@ -628,6 +716,27 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             if cert.inhibit_any_policy_value:
                 inhibit_any_policy = min(cert.inhibit_any_policy_value.native, inhibit_any_policy)
 
+            if policy_audit is not None:
+                policy_audit.record_hop(
+                    index,
+                    cert,
+                    {
+                        'is_trust_anchor': False,
+                        'is_end_entity': False,
+                        'certificate_policies': certificate_policies,
+                        'policy_mappings': policy_mappings,
+                        'policy_constraints': policy_constraints,
+                        'inhibit_any_policy': inhibit_any,
+                        'state_before': state_before,
+                        'state_after': _policy_state(explicit_policy, policy_mapping, inhibit_any_policy),
+                        'policy_mapping_counter_before': policy_mapping_counter_before,
+                        'mapping_status': mapping_status,
+                        'policy_tree_before': policy_tree_before,
+                        'policy_tree_after_policies': policy_tree_after_policies,
+                        'policy_tree_after_mappings': tree_after_mappings,
+                    }
+                )
+
             # Step 3 k
             if not cert.ca:
                 raise PathValidationError(pretty_message(
@@ -661,6 +770,27 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                     ''',
                     _cert_type(index, last_index, end_entity_name_override, definite=True)
                 ))
+
+        elif policy_audit is not None:
+            policy_audit.record_hop(
+                index,
+                cert,
+                {
+                    'is_trust_anchor': False,
+                    'is_end_entity': True,
+                    'certificate_policies': certificate_policies,
+                    'policy_mappings': policy_mappings,
+                    'policy_constraints': policy_constraints,
+                    'inhibit_any_policy': inhibit_any,
+                    'state_before': state_before,
+                    'state_after': state_before,
+                    'policy_mapping_counter_before': policy_mapping_counter_before,
+                    'mapping_status': mapping_status,
+                    'policy_tree_before': policy_tree_before,
+                    'policy_tree_after_policies': policy_tree_after_policies,
+                    'policy_tree_after_mappings': tree_after_mappings,
+                }
+            )
 
         # Step 3 o
         # Check for critical unsupported extensions
@@ -721,7 +851,55 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
     else:
         intersection = valid_policy_tree
 
-    # Step 4 g iii is skipped since the initial policy set is always any_policy
+    # Step 4 g iii
+    removed_policies = []
+    expanded_any_policy = []
+    if intersection is not None and initial_policy_set != set(['any_policy']):
+        # Steps 4 g iii 1-2: constrain the policies directly beneath the
+        # anyPolicy root to the caller's initial policy domain.
+        for node in list(intersection.at_depth(1)):
+            if node.valid_policy == 'any_policy':
+                continue
+            if node.valid_policy in initial_policy_set:
+                continue
+            removed_policies.append(node.valid_policy)
+            node.parent.remove_child(node)
+
+        # Step 4 g iii 3: turn any anyPolicy leaf into the explicit policies
+        # approved by the caller.
+        for node in list(intersection.at_depth(last_index)):
+            if node.valid_policy != 'any_policy':
+                continue
+            for policy_identifier in sorted(initial_policy_set):
+                expanded_any_policy.append(policy_identifier)
+                node.parent.add_child(
+                    policy_identifier,
+                    node.qualifier_set,
+                    set([policy_identifier])
+                )
+            node.parent.remove_child(node)
+
+        for node in intersection.walk_up(1):
+            if not node.children:
+                node.parent.remove_child(node)
+        if len(intersection.children) == 0:
+            intersection = None
+
+    final_nodes = []
+    final_policies = []
+    if intersection is not None:
+        final_nodes = list(intersection.at_depth(last_index))
+        final_policies = sorted(set([node.valid_policy for node in final_nodes]))
+
+    if policy_audit is not None:
+        policy_audit.finish(
+            _policy_state(explicit_policy, policy_mapping, inhibit_any_policy),
+            _policy_tree_snapshot(intersection),
+            _policy_node_snapshots(final_nodes),
+            final_policies,
+            removed_policies,
+            expanded_any_policy
+        )
 
     if explicit_policy == 0 and intersection is None:
         raise PathValidationError(pretty_message(
@@ -733,6 +911,152 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
         ))
 
     return cert
+
+
+def _policy_state(explicit_policy, policy_mapping, inhibit_any_policy):
+    """
+    :return:
+        A dict of the policy state inputs used by the RFC 5280 algorithm
+    """
+
+    return {
+        'explicit_policy': explicit_policy,
+        'policy_mapping': policy_mapping,
+        'inhibit_any_policy': inhibit_any_policy,
+    }
+
+
+def _policy_native(value):
+    """
+    Converts an asn1crypto value into a value that can be safely serialized to
+    JSON
+    """
+
+    if value is None or isinstance(value, (bool, int, float, str_cls)):
+        return value
+    if hasattr(value, 'native'):
+        return _policy_native(value.native)
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            [_policy_native(item) for item in value],
+            key=lambda item: repr(item)
+        )
+    if isinstance(value, (list, tuple)):
+        return [_policy_native(item) for item in value]
+    if isinstance(value, dict):
+        return dict((key, _policy_native(item)) for key, item in value.items())
+    return str_cls(value)
+
+
+def _policy_entries(cert, attribute):
+    """
+    Reads a policy-related extension without hiding values that the installed
+    asn1crypto version cannot parse
+    """
+
+    try:
+        value = getattr(cert, attribute + '_value')
+    except (ValueError, TypeError, KeyError):
+        return None
+    if value is None:
+        return None
+
+    entries = []
+    try:
+        for entry in value:
+            entries.append(_policy_native(entry))
+    except (ValueError, TypeError, KeyError):
+        return None
+    return entries
+
+
+def _policy_constraints(cert):
+    """
+    :return:
+        None, or a dict with the policy constraints values
+    """
+
+    try:
+        constraints = cert.policy_constraints_value
+    except (ValueError, TypeError, KeyError):
+        return None
+    if constraints is None:
+        return None
+    return {
+        'require_explicit_policy': _policy_native(constraints['require_explicit_policy']),
+        'inhibit_policy_mapping': _policy_native(constraints['inhibit_policy_mapping']),
+    }
+
+
+def _inhibit_any_policy(cert):
+    """
+    :return:
+        None, or an integer of the inhibit anyPolicy skip count
+    """
+
+    try:
+        value = cert.inhibit_any_policy_value
+    except (ValueError, TypeError, KeyError):
+        return None
+    if value is None:
+        return None
+    return _policy_native(value)
+
+
+def _policy_tree_snapshot(tree):
+    """
+    :param tree:
+        None or a PolicyTreeRoot object
+
+    :return:
+        None or a list of dicts describing every node in the tree, including
+        the policy trail from the anyPolicy root
+    """
+
+    if tree is None:
+        return None
+
+    nodes = []
+
+    def visit(node, trail):
+        for child in node.children:
+            child_trail = trail + [child.valid_policy]
+            nodes.append({
+                'depth': len(child_trail) - 1,
+                'valid_policy': child.valid_policy,
+                'expected_policy_set': sorted(child.expected_policy_set),
+                'qualifiers': _policy_native(child.qualifier_set),
+                'policy_trail': child_trail,
+            })
+            visit(child, child_trail)
+
+    visit(tree, [])
+    return nodes
+
+
+def _policy_node_snapshots(nodes):
+    """
+    :param nodes:
+        A list of PolicyTreeNode objects
+
+    :return:
+        A list of dicts of the leaf policies and their derivation trails
+    """
+
+    output = []
+    for node in nodes:
+        trail = []
+        current = node
+        while current is not None and current.parent is not None:
+            trail.insert(0, current.valid_policy)
+            current = current.parent
+        output.append({
+            'valid_policy': node.valid_policy,
+            'expected_policy_set': sorted(node.expected_policy_set),
+            'qualifiers': _policy_native(node.qualifier_set),
+            'policy_trail': trail,
+        })
+    return output
 
 
 def _cert_type(index, last_index, end_entity_name_override, definite=False):

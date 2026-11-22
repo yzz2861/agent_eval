@@ -200,3 +200,32 @@
 >
 > > A list of newly-fetched asn1crypto.x509.Certificate objects that were
 > > obtained from OCSP responses and CRLs
+
+### Policy query API
+
+`certvalidator.policy` contains the offline policy evidence API:
+
+```python
+from certvalidator.policy import (
+    query_certificate_policies,
+    query_policy_paths,
+    validate_policy_path,
+)
+```
+
+ - `query_certificate_policies(end_entity_cert, intermediate_certs=None,
+   validation_context=None, initial_policy_set=None,
+   initial_explicit_policy=False, initial_any_policy_inhibit=False,
+   initial_policy_mapping_inhibit=False)` builds every candidate path and
+   returns a `PolicyQuery`.
+ - `query_policy_paths(validation_context, paths, initial_policy_set=None,
+   ...)` evaluates already-built `ValidationPath` objects.
+ - `validate_policy_path(validation_context, path, initial_policy_set=None,
+   ...)` returns one `PolicyPathResult` and records structural path errors in
+   `.error` instead of raising.
+
+`PolicyQuery` exposes `.results`, `.accepted_results`, `.accepted`, `.pending`,
+`.select()` and `.require_accepted()`. `PolicyPathResult` exposes `.path_id`,
+`.chain`, `.valid`, `.accepted`, `.status`, `.final_policies`,
+`.final_policy_trails`, `.leaf_policies`, `.hops`, `.pending` and `.error`.
+Both objects implement `.to_dict()`.

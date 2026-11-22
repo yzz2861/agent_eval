@@ -74,3 +74,8 @@ class RevokedError(PathValidationError):
 class InvalidCertificateError(PathValidationError):
 
     pass
+
+
+class PolicyValidationError(ValidationError):
+
+    pass

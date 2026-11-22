@@ -5,8 +5,15 @@ from asn1crypto import pem
 from asn1crypto.x509 import Certificate
 
 from .context import ValidationContext
-from .errors import ValidationError, PathBuildingError, InvalidCertificateError
+from .errors import ValidationError, PathBuildingError, InvalidCertificateError, PolicyValidationError
 from .validate import validate_path, validate_tls_hostname, validate_usage
+from .policy import (
+    PolicyPathResult,
+    PolicyQuery,
+    query_certificate_policies,
+    query_policy_paths,
+    validate_policy_path,
+)
 from .version import __version__, __version_info__
 from ._errors import pretty_message
 from ._types import type_name, str_cls, byte_cls
@@ -17,6 +24,12 @@ __all__ = [
     '__version_info__',
     'CertificateValidator',
     'ValidationContext',
+    'PolicyPathResult',
+    'PolicyQuery',
+    'query_certificate_policies',
+    'query_policy_paths',
+    'validate_policy_path',
+    'PolicyValidationError',
 ]
 
 
@@ -222,3 +235,77 @@ class CertificateValidator():
         self._validate_path()
         validate_tls_hostname(self._context, self._certificate, hostname)
         return self._path
+
+    def query_policies(self, initial_policy_set=None,
+                       initial_explicit_policy=False,
+                       initial_any_policy_inhibit=False,
+                       initial_policy_mapping_inhibit=False):
+        """
+        Builds every candidate path to the certificate and reports the
+        per-hop policy evidence for each one.
+
+        :param initial_policy_set:
+            None, or a set of unicode strings of policy identifiers approved
+            by the caller. None is equivalent to "any-policy".
+
+        :param initial_explicit_policy:
+            A bool - if the initial-explicit-policy input is set
+
+        :param initial_any_policy_inhibit:
+            A bool - if the initial-any-policy-inhibit input is set
+
+        :param initial_policy_mapping_inhibit:
+            A bool - if the initial-policy-mapping-inhibit input is set
+
+        :return:
+            A certvalidator.policy.PolicyQuery object
+        """
+
+        return query_certificate_policies(
+            self._certificate,
+            validation_context=self._context,
+            initial_policy_set=initial_policy_set,
+            initial_explicit_policy=initial_explicit_policy,
+            initial_any_policy_inhibit=initial_any_policy_inhibit,
+            initial_policy_mapping_inhibit=initial_policy_mapping_inhibit
+        )
+
+    def validate_policy(self, initial_policy_set=None,
+                        initial_explicit_policy=False,
+                        initial_any_policy_inhibit=False,
+                        initial_policy_mapping_inhibit=False):
+        """
+        Returns the first candidate path that satisfies the policy query.
+
+        :raises:
+            certvalidator.errors.PolicyValidationError - when no path satisfies
+            the requested policy set
+
+        :return:
+            A certvalidator.policy.PolicyPathResult object
+        """
+
+        return self.query_policies(
+            initial_policy_set=initial_policy_set,
+            initial_explicit_policy=initial_explicit_policy,
+            initial_any_policy_inhibit=initial_any_policy_inhibit,
+            initial_policy_mapping_inhibit=initial_policy_mapping_inhibit
+        ).require_accepted()
+
+    def validate_policies(self, initial_policy_set=None,
+                          initial_explicit_policy=False,
+                          initial_any_policy_inhibit=False,
+                          initial_policy_mapping_inhibit=False):
+        """
+        Policy-query alias of .query_policies()
+
+        :return:
+            A certvalidator.policy.PolicyQuery object
+        """
+
+        return self.query_policies(
+            initial_policy_set=initial_policy_set,
+            initial_explicit_policy=initial_explicit_policy,
+            initial_any_policy_inhibit=initial_any_policy_inhibit,
+            initial_policy_mapping_inhibit=initial_policy_mapping_inhibit
+        )
