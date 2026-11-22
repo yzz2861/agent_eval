@@ -1,0 +1,64 @@
+{
+  "fingerprint": "881D5AEEE352BBF17657FB82733201ABB404019E",
+  "key_signatures": [],
+  "uids": [
+    {
+      "index": 0,
+      "uid": "Alice Public <alice@public.example>",
+      "kept": true,
+      "reason": null,
+      "signatures": [
+        {
+          "order": 0,
+          "sigtype": "Positive_Cert",
+          "signer_keyid": "733201ABB404019E",
+          "attribution": "SELF",
+          "exportable": true,
+          "verdict": "KEEP",
+          "reason": null
+        },
+        {
+          "order": 1,
+          "sigtype": "Positive_Cert",
+          "signer_keyid": "C803372AEF4A5B3D",
+          "attribution": "C803372AEF4A5B3D",
+          "exportable": true,
+          "verdict": "KEEP",
+          "reason": null
+        },
+        {
+          "order": 2,
+          "sigtype": "Generic_Cert",
+          "signer_keyid": "C803372AEF4A5B3D",
+          "attribution": "C803372AEF4A5B3D",
+          "exportable": false,
+          "verdict": "DROP",
+          "reason": "LOCAL_ONLY"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "uid": "Ops Internal Only (internal-only) <ops@intranet.local>",
+      "kept": false,
+      "reason": "SELF_SIG_MISSING",
+      "signatures": [
+        {
+          "order": 0,
+          "sigtype": "Positive_Cert",
+          "signer_keyid": "733201ABB404019E",
+          "attribution": "SELF",
+          "exportable": false,
+          "verdict": "DROP",
+          "reason": "LOCAL_ONLY"
+        }
+      ]
+    }
+  ],
+  "blocked": [
+    {
+      "uid": "Ops Internal Only (internal-only) <ops@intranet.local>",
+      "reason": "SELF_SIG_MISSING"
+    }
+  ]
+}
