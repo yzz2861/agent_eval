@@ -19,6 +19,22 @@ Flake8Result = collections.namedtuple(
 
 
 class BaseLinter(ast.NodeVisitor):
+    _python_versions = None
+    python_versions = None
+    _min_python_version = None
+    _max_python_version = None
+
+    @classmethod
+    def supports_version(cls, version):
+        """Return whether this rule applies to ``version``.
+
+        The authoritative bounds live in :mod:`dlint.scope`; this convenience
+        method lets integrations query a linter class directly.
+        """
+        from .. import scope
+
+        return scope.rule_supports_version(cls._code, version)
+
     def __init__(self, *args, **kwargs):
         self.results = []
         self.namespace = None

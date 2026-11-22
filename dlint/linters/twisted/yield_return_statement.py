@@ -23,6 +23,9 @@ class YieldReturnStatementLinter(base.BaseLinter):
 
     _code = 'DUO101'
     _error_tmpl = 'DUO101 "inlineCallbacks" function cannot have non-empty "return" statement'
+    _python_versions = ('2.7', '3.0', '3.1', '3.2')
+    python_versions = ('2.7', '3.0', '3.1', '3.2')
+    _max_python_version = (3, 3)
 
     def visit_FunctionDef(self, node):
         self.generic_visit(node)

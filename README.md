@@ -85,6 +85,33 @@ To fine-tune your linting, check out the `flake8` help:
 $ python -m flake8 --help
 ```
 
+## Cross-version scope audits
+
+When one Dlint report is shared by maintenance groups on different Python
+versions, `dlint.scope` (also importable as `dlint.audit`) can audit the same
+report per target version:
+
+```python
+from dlint.scope import audit_scope
+
+audit = audit_scope(
+    sources={"app.py": source},
+    report=report_items,
+    versions=["2.7", "3.8"],
+    rules=["DUO105", "DUO108"],
+)
+
+audit["2.7"].eligible          # report items this group can sign off
+audit["3.8"].syntax_unsupported
+audit["3.8"].rule_not_enabled
+audit["3.8"].rule_not_applicable
+audit["3.8"].no_findings        # genuinely clean, not skipped
+```
+
+Each version keeps its own result. `common_eligible()` is opt-in and only
+returns items eligible for every version; a fragment skipped by one target
+environment is not forced into that intersection.
+
 ## Inline Editor
 
 Dlint results can also be included inline in your editor for fast feedback.

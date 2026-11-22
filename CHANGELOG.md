@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Cross-version scope audit API (`dlint.scope`, also `dlint.audit`) that separates eligible report items, target-environment skips, and genuine clean results.
 
 ## [0.10.2] - 2020-02-19
 ### Changed
