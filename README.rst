@@ -146,6 +146,52 @@ The rationale for such a restricted set of allowed tags (e.g. no
 images) is documented in the `design decisions`_ section of
 django-content-editor_'s documentation.
 
+Trusted status re-check (optional)
+==================================
+
+The sanitizer only removes dangerous or unwanted markup; it cannot know
+whether a status statement such as the literal wording "已批准" is trusted.
+A user can type those words into a form, so document text must never be
+treated as an approval. The optional ``html_sanitizer.status_review``
+module keeps the trust decision with the caller:
+
+- The caller constructs ``StatusMarker`` objects separately from the
+  submitted HTML. A marker names a trusted status, the ``id`` of the DOM
+  element that explains the status, and the wording a reader sees inside
+  that explanation.
+- ``StatusReviewer`` stamps the matching DOM element with
+  ``data-trusted-marker`` and ``data-trusted-status`` before cleaning. The
+  attributes are allowed on every destination tag, so the explanation and
+  the reader-visible status stay linked when a tag migrates (e.g. ``<b>``
+  or a bold ``<span>`` becomes ``<strong>``).
+- Repeated wording is counted, but only a retained caller marker can make
+  a status trusted. If cleaning drops the explanation element (or its
+  marker attributes), the evidence is reported as removed.
+- The archive view may issue an approval conclusion only when a trusted
+  ``APPROVED`` marker actually survives cleaning. Two fragments that look
+  identical to a reader therefore get different archive conclusions.
+
+Example::
+
+    from html_sanitizer.status_review import (
+        StatusMarker, StatusReviewer, TrustedStatus,
+    )
+    marker = StatusMarker(
+        marker_id="m1", anchor_id="status-note",
+        status=TrustedStatus.APPROVED, claim="已批准",
+    )
+    fragment = '<p id="status-note">状态：已批准</p>'
+
+    StatusReviewer([marker]).review(fragment).reader_visible_statuses()
+    # {"m1": "approved"}
+    StatusReviewer([]).review(fragment).archive_conclusion().approved
+    # False
+
+A runnable end-to-end demonstration (two identical-looking fragments plus
+tag migration, duplicate wording and marker removal) ships in
+``html_sanitizer/demo_status_review.py`` and can be run with
+``python -m html_sanitizer.demo_status_review``.
+
 Django
 ======
 
