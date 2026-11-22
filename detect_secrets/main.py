@@ -118,6 +118,42 @@ def scan_adhoc_string(line: str) -> str:
 
 
 def handle_audit_action(args: argparse.Namespace) -> None:
+    if getattr(args, 'export_scoped', False) or getattr(args, 'link_reports', False):
+        from .audit.audience import export_report
+        from .audit.audience import link_reports
+        from .audit.audience import load_ledger
+
+        ledger = load_ledger(args.audience_ledger)
+        if getattr(args, 'link_reports', False):
+            result = dict(link_reports(
+                args.filename[0],
+                args.filename[1],
+                ledger,
+                audience=getattr(args, 'audience', None),
+                at=getattr(args, 'as_of', None),
+            ))
+        else:
+            result = export_report(
+                args.filename[0],
+                ledger,
+                audience=getattr(args, 'audience', None),
+                period=getattr(args, 'audience_period', None),
+                at=getattr(args, 'as_of', None),
+                previous_report=getattr(args, 'previous_report', None),
+                include_retired=getattr(args, 'include_retired', True),
+                allow_expired=getattr(args, 'allow_expired', False),
+                only_real=getattr(args, 'only_real', False),
+                only_false=getattr(args, 'only_false', False),
+            )
+        rendered = json.dumps(result, indent=4, sort_keys=True)
+        output = getattr(args, 'output', None)
+        if output:
+            with open(output, 'w') as handle:
+                handle.write(rendered + '\n')
+        else:
+            print(rendered)
+        return
+
     try:
         if args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
@@ -135,6 +171,30 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 class_to_print = audit.report.SecretClassToPrint.REAL_SECRET
             elif args.only_false:
                 class_to_print = audit.report.SecretClassToPrint.FALSE_POSITIVE
+            if getattr(args, 'audience_ledger', None):
+                from .audit.audience import export_report
+                from .audit.audience import load_ledger
+
+                result = export_report(
+                    args.filename[0],
+                    load_ledger(args.audience_ledger),
+                    audience=getattr(args, 'audience', None),
+                    period=getattr(args, 'audience_period', None),
+                    at=getattr(args, 'as_of', None),
+                    previous_report=getattr(args, 'previous_report', None),
+                    include_retired=getattr(args, 'include_retired', True),
+                    allow_expired=getattr(args, 'allow_expired', False),
+                    class_to_print=class_to_print,
+                )
+                rendered = json.dumps(result, indent=4, sort_keys=True)
+                output = getattr(args, 'output', None)
+                if output:
+                    with open(output, 'w') as handle:
+                        handle.write(rendered + '\n')
+                else:
+                    print(rendered)
+                return
+
             print(
                 json.dumps(
                     audit.report.generate_report(args.filename[0], class_to_print),

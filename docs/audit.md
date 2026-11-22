@@ -263,3 +263,35 @@ $ detect-secrets audit --report --only-false .secret.baseline
     }
 ]
 ```
+
+
+## Scoped audience export
+
+Use `--export` with a caller-provided audience-period ledger to write only
+the part of an audit report owned by one audience. Findings are identified
+by an audience-and-period-scoped `alias`; raw secret values and the
+baseline stable digest are never written.
+
+A ledger is a JSON object with `master_key` and `periods`. Each period has
+an `audience`, `period`, `not_before`, `not_after`, and optional
+`filenames`, `findings`, `aliases`, `previous_period`, and `retain_until`.
+
+```bash
+$ detect-secrets audit --export --audience partner-a \
+    --audience-ledger audience-ledger.json audit-report.json
+```
+
+Re-export inside one period is stable. A new period rotates aliases; while
+the prior period is still retained, the new report carries
+`previous_alias`/`alias_history` so a reviewer can link the reports.
+Retained linking stops after the ledger retention window.
+
+`transfer_audience_scope` re-issues both scopes under a fresh period. The
+old audience receives retired aliases for findings it no longer owns, and
+the new audience receives new aliases with no cross-audience
+`previous_alias`. As a result, two audiences cannot merge identities by
+comparing old and new reports.
+
+Library entry points are in `detect_secrets.audit.audience`:
+`AudienceLedger`, `AudiencePeriod`, `export_report`, `link_reports`,
+`renew_audience`, `transfer_audience_scope`, and `verify_report`.

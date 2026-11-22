@@ -23,6 +23,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
 
     _add_mode_parser(parser)
     _add_report_module(parser)
+    _add_export_module(parser)
     _add_statistics_module(parser)
     return cast(argparse.ArgumentParser, parser)
 
@@ -83,6 +84,91 @@ def _add_report_module(parent: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_export_module(parent: argparse.ArgumentParser) -> None:
+    parser = parent.add_argument_group(
+        title='scoped export',
+        description=(
+            'Export an audit report for one audience. The caller supplies an audience '
+            'period ledger; only aliases allowed for that audience and period are written.'
+        ),
+    )
+
+    parser.add_argument(
+        '--export',
+        '--export-report',
+        dest='export_scoped',
+        action='store_true',
+        help='Export a scoped report using --audience-ledger.',
+    )
+
+    parser.add_argument(
+        '--export-scoped',
+        dest='export_scoped',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        '--audience',
+        dest='audience',
+        help='Audience whose scoped report should be exported.',
+    )
+
+    parser.add_argument(
+        '--audience-ledger',
+        '--ledger',
+        dest='audience_ledger',
+        help='Caller-provided audience period ledger (JSON path).',
+    )
+
+    parser.add_argument(
+        '--period',
+        dest='audience_period',
+        help='Explicit audience period to export (defaults to the active one).',
+    )
+
+    parser.add_argument(
+        '--at',
+        '--as-of',
+        dest='as_of',
+        help='Offline clock used for window/link checks.',
+    )
+
+    parser.add_argument(
+        '--previous-report',
+        dest='previous_report',
+        help='Prior scoped report used to link or retire aliases.',
+    )
+
+    parser.add_argument(
+        '--allow-expired',
+        dest='allow_expired',
+        action='store_true',
+        help='Allow an explicit historical period to be re-exported.',
+    )
+
+    parser.add_argument(
+        '--no-retired',
+        dest='include_retired',
+        action='store_false',
+        help='Do not include the retired-alias section.',
+    )
+
+    parser.add_argument(
+        '--link-reports',
+        '--link',
+        dest='link_reports',
+        action='store_true',
+        help='Link two scoped reports within the allowed retention window.',
+    )
+
+    parser.add_argument(
+        '--output',
+        dest='output',
+        help='Write the exported JSON to this file instead of stdout.',
+    )
+
+
 def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
     parser = parent.add_argument_group(
         title='analytics',
@@ -101,6 +187,28 @@ def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
 
 def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'audit':
+        return
+
+    if getattr(args, 'export_scoped', False):
+        if len(args.filename) != 1:
+            raise argparse.ArgumentTypeError(
+                'Scoped export accepts exactly one baseline file.',
+            )
+        if not getattr(args, 'audience_ledger', None):
+            raise argparse.ArgumentTypeError(
+                'Scoped export requires --audience-ledger.',
+            )
+        return
+
+    if getattr(args, 'link_reports', False):
+        if len(args.filename) != 2:
+            raise argparse.ArgumentTypeError(
+                '--link-reports requires a previous and a current report.',
+            )
+        if not getattr(args, 'audience_ledger', None):
+            raise argparse.ArgumentTypeError(
+                '--link-reports requires --audience-ledger.',
+            )
         return
 
     if args.diff and len(args.filename) != 2:
