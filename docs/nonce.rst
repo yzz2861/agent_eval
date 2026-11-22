@@ -186,3 +186,37 @@ Both templates output the following with a different nonce:
 .. code-block:: html
 
 	<script nonce='123456' type="application/javascript" async=false>var hello='world';</script>
+
+Shared-cache cooperation
+========================
+Django ships a page cache (UpdateCacheMiddleware / FetchFromCacheMiddleware or
+the cache_page decorator) that can store and reuse whole responses across
+requests. A response whose CSP header embeds a nonce is only valid together
+with the body rendered for that same request: the nonce in request.csp_nonce is
+generated lazily and is different on every request. If such a response were
+stored and reused, a later request could receive a body and a
+Content-Security-Policy (or Content-Security-Policy-Report-Only) header that
+were decided separately.
+
+CSPMiddleware therefore cooperates with the shared cache in two ways:
+
+* A response that actually embeds the per-request nonce gets
+  Cache-Control: no-store while it is processed. Django's cache middleware
+  (and any other conforming shared cache) skips responses marked private,
+  no-cache or no-store, so the nonce-bound body/header pair is never split,
+  stored, or reassembled for another request. The enforced and report-only
+  policies are handled independently: a nonce in either header is enough to
+  make the response non-cacheable.
+* Responses that do not embed a nonce are reusable. When one is stored, it is
+  saved together with a fingerprint of the current CONTENT_SECURITY_POLICY and
+  CONTENT_SECURITY_POLICY_REPORT_ONLY settings. On the next request the
+  middleware only returns the cached response when the fingerprint still
+  matches. If either policy has changed, the stale entry is deleted and treated
+  as a cache miss so the page is rebuilt under the new policy.
+
+Reading request.csp_nonce after the response has been processed still raises
+csp.exceptions.CSPNonceError when the nonce was never generated: deciding the
+headers first and accessing the nonce afterwards cannot produce a coherent
+body/header pair and is treated as a programming error. Responses exempted with
+the csp_exempt decorator and views that already opt out of caching keep their
+existing behavior and are not stored by this cache.

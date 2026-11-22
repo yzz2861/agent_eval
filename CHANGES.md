@@ -1,6 +1,23 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+## New Features and Improvements
+
+- **Shared-cache cooperation for nonced responses**: `CSPMiddleware` now keeps
+  responses that embed the per-request nonce out of shared caches by adding
+  `Cache-Control: no-store`. The enforced and report-only policies are handled
+  independently, so a nonce in either header makes the response non-cacheable.
+  Reusable (non-nonced) responses are stored together with a fingerprint of the
+  current `CONTENT_SECURITY_POLICY` and
+  `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings, and a cached response is only
+  reused while that fingerprint matches. After a policy change the stale cache
+  entry is deleted and the page is rebuilt under the new policy. Existing
+  `csp_exempt` decorators and views that already opt out of caching keep their
+  previous behavior.
+
 4.0
 ===
 

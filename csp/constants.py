@@ -3,6 +3,13 @@ from typing import Any
 HEADER = "Content-Security-Policy"
 HEADER_REPORT_ONLY = "Content-Security-Policy-Report-Only"
 
+# Shared-cache cooperation.
+# Django cache alias used to store reusable CSP responses together with the
+# fingerprint of the policy they were built under.
+CACHE_FINGERPRINT_CACHE_ALIAS = "default"
+# Namespace for the per-URL entries stored in that cache.
+CACHE_FINGERPRINT_KEY_PREFIX = "csp.policy.fingerprint:"
+
 NONE = "'none'"
 REPORT_SAMPLE = "'report-sample'"
 SELF = "'self'"
