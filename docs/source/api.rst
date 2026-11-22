@@ -17,6 +17,76 @@ In most cases there's no need to set the `encoding` parameter. If
 is encoded either in utf-8 or latin-1.
 
 
+Blind review views
+------------------
+
+External reviewers sometimes need to inspect a migration without receiving
+the literals used by it.  :func:`sqlparse.blind_review` returns a frozen,
+read-only view that keeps the statement flow, identifiers, operators,
+parentheses, boolean relations and list cardinality outside withheld
+predicates, but replaces string and numeric literals with keyed markers:
+
+.. code-block:: python
+
+   review = sqlparse.blind_review(
+       "UPDATE demo_account SET note = 'aurora' "
+       "WHERE tenant_code = 'aurora' AND access_token = 'kestrel';",
+       key=review_key,  # keep this secret out of the ticket
+   )
+   print(review.to_ticket())
+
+The view is conservative: if the input contains unparsed text, such as an
+unterminated string or block comment, it raises
+``sqlparse.exceptions.SQLParseError`` instead of emitting raw text.
+
+Markers have the form ``<kind:role:id>``.  The same value used in the same
+role keeps the same marker, so equality relations remain reviewable.  A value
+used in a predicate and the same value used in an assignment receive
+different roles and therefore different markers.  Visible roles are
+``predicate``, ``assignment``, ``default``, ``row``, ``projection``,
+``value`` and ``type_argument``.  Reuse the same key when comparing
+versions; otherwise use one :class:`sqlparse.BlindReviewer` instance for
+both versions. Keep the key outside the ticket and use a high-entropy
+secret.
+
+The default policy treats credential-like columns (for example ``password``,
+``token`` and ``api_key``) as internal-only.  A matching predicate is replaced
+with an ``INTERNAL REVIEW REQUIRED`` marker and listed in
+``review.internal_only``.  Additional columns and tables can be supplied with
+``internal_only_columns`` and ``internal_only_tables``.
+
+``review.scope`` deliberately ignores literal values.  It records statement
+types, tables, update targets and a normalized structure where markers are
+replaced by ``?``.  ``review.diff(other)`` therefore distinguishes a
+value-only edit from a change to the impact scope:
+
+.. code-block:: python
+
+   before = sqlparse.blind_review(sql_before, key=key)
+   after = sqlparse.blind_review(sql_after, key=key)
+   print(after.diff(before).summary())
+
+.. autofunction:: sqlparse.blind_review
+
+.. autoclass:: sqlparse.BlindReview
+   :members:
+
+.. autoclass:: sqlparse.BlindReviewDiff
+   :members:
+
+.. autoclass:: sqlparse.BlindReviewer
+   :members:
+
+.. autoclass:: sqlparse.BlindScope
+   :members:
+
+.. autoclass:: sqlparse.LiteralRef
+   :members:
+
+.. autoclass:: sqlparse.InternalPredicate
+   :members:
+
+
 .. _formatting:
 
 Formatting of SQL Statements

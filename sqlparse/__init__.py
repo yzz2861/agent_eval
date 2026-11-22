@@ -11,10 +11,34 @@
 from collections.abc import Generator
 from typing import IO, Any
 
-from sqlparse import cli, engine, filters, formatter, sql, tokens
+from sqlparse import blind, cli, engine, filters, formatter, sql, tokens
+from sqlparse.blind import (
+    BlindReview,
+    BlindReviewDiff,
+    BlindReviewer,
+    BlindScope,
+    InternalPredicate,
+    LiteralRef,
+    blind_review,
+)
 
 __version__ = "0.6.1"
-__all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
+__all__ = [
+    "BlindReview",
+    "BlindReviewDiff",
+    "BlindReviewer",
+    "BlindScope",
+    "InternalPredicate",
+    "LiteralRef",
+    "blind",
+    "blind_review",
+    "cli",
+    "engine",
+    "filters",
+    "formatter",
+    "sql",
+    "tokens",
+]
 
 
 def parse(

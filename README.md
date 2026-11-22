@@ -41,8 +41,8 @@ pip install sqlparse
 
 ## Usage
 
-Three module-level functions cover most needs: `split()`, `format()` and
-`parse()`.
+The module-level API covers splitting, formatting and parsing. For
+migration review, `blind_review()` creates a value-free, read-only view.
 
 ### Split a script into statements
 
@@ -69,6 +69,29 @@ WHERE active=1
 
 `format()` accepts the same options as the command line, among them
 `reindent`, `keyword_case`, `strip_comments` and `indent_width`.
+
+### Create a blind review view
+
+For migrations that need an external review without exposing embedded
+identifiers, `blind_review()` returns a frozen view that keeps keywords,
+identifiers, operators, parentheses and condition structure. String and
+numeric literals become keyed markers such as
+`<string:predicate:4f8a1c2d3e>`. The same value in the same use keeps the
+same marker, while an assignment and a predicate use different roles.
+Predicates on credential-like columns are withheld as
+`INTERNAL REVIEW REQUIRED` and listed in `review.internal_only`.
+
+```python
+ticket_text = sqlparse.blind_review(
+    "UPDATE demo_account SET note = 'aurora' "
+    "WHERE tenant_code = 'aurora' AND access_token = 'kestrel';",
+    key=review_key,  # keep this secret out of the ticket
+).to_ticket()
+```
+
+Reuse the same key when comparing versions. `review.diff(other)` reports
+whether the impact structure changed separately from a value-only binding
+change, without printing either version's literals.
 
 ### Parse and inspect a statement
 
