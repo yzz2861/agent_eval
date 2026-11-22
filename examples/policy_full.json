@@ -1,0 +1,134 @@
+{
+  "name": "risk-board-base-policy",
+  "description": "Base metric policy with explicit dispositions per band.",
+  "versions": {
+    "3.1": {
+      "allowed_values": {
+        "AV": [
+          "N",
+          "A",
+          "L",
+          "P"
+        ],
+        "AC": [
+          "L",
+          "H"
+        ],
+        "PR": [
+          "N",
+          "L",
+          "H"
+        ],
+        "UI": [
+          "N",
+          "R"
+        ],
+        "S": [
+          "C",
+          "U"
+        ],
+        "C": [
+          "H",
+          "L",
+          "N"
+        ],
+        "I": [
+          "H",
+          "L",
+          "N"
+        ],
+        "A": [
+          "H",
+          "L",
+          "N"
+        ]
+      },
+      "bands": [
+        {
+          "name": "None",
+          "lower": 0.0,
+          "upper": 0.1,
+          "disposition": "triage"
+        },
+        {
+          "name": "Low",
+          "lower": 0.1,
+          "upper": 4.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": 9.0,
+          "disposition": "expedite"
+        },
+        {
+          "name": "Critical",
+          "lower": 9.0,
+          "upper": null,
+          "disposition": "emergency"
+        }
+      ]
+    },
+    "2.0": {
+      "allowed_values": {
+        "AV": [
+          "L",
+          "A",
+          "N"
+        ],
+        "AC": [
+          "H",
+          "M",
+          "L"
+        ],
+        "Au": [
+          "M",
+          "S",
+          "N"
+        ],
+        "C": [
+          "N",
+          "P",
+          "C"
+        ],
+        "I": [
+          "N",
+          "P",
+          "C"
+        ],
+        "A": [
+          "N",
+          "P",
+          "C"
+        ]
+      },
+      "bands": [
+        {
+          "name": "Low",
+          "lower": 0.0,
+          "upper": 4.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": null,
+          "disposition": "emergency"
+        }
+      ]
+    }
+  }
+}

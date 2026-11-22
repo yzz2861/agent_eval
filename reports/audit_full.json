@@ -1,0 +1,6042 @@
+{
+  "policy": "risk-board-base-policy",
+  "description": "Base metric policy with explicit dispositions per band.",
+  "versions": [
+    {
+      "version": "3.1",
+      "metric_universe": {
+        "AV": [
+          "N",
+          "A",
+          "L",
+          "P"
+        ],
+        "AC": [
+          "L",
+          "H"
+        ],
+        "PR": [
+          "N",
+          "L",
+          "H"
+        ],
+        "UI": [
+          "N",
+          "R"
+        ],
+        "S": [
+          "C",
+          "U"
+        ],
+        "C": [
+          "H",
+          "L",
+          "N"
+        ],
+        "I": [
+          "H",
+          "L",
+          "N"
+        ],
+        "A": [
+          "H",
+          "L",
+          "N"
+        ]
+      },
+      "legal_universe_size": 2592,
+      "policy_covered_size": 2592,
+      "policy_uncovered_size": 0,
+      "coverage_ratio": 1.0,
+      "bands": [
+        {
+          "name": "None",
+          "lower": 0.0,
+          "upper": 0.1,
+          "disposition": "triage",
+          "vectors": 96
+        },
+        {
+          "name": "Low",
+          "lower": 0.1,
+          "upper": 4.0,
+          "disposition": "routine-ticket",
+          "vectors": 416
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket",
+          "vectors": 1464
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": 9.0,
+          "disposition": "expedite",
+          "vectors": 555
+        },
+        {
+          "name": "Critical",
+          "lower": 9.0,
+          "upper": null,
+          "disposition": "emergency",
+          "vectors": 61
+        }
+      ],
+      "adjacency": {
+        "single_fact_edges": 18144,
+        "cross_band_edges": 6574,
+        "band_skipping_edges": 376,
+        "connected_components": 1,
+        "cross_band_components": 1
+      },
+      "cross_band_components": [
+        {
+          "component_id": 0,
+          "vectors": 2592,
+          "bands": [
+            "Critical",
+            "High",
+            "Low",
+            "Medium",
+            "None"
+          ]
+        }
+      ],
+      "band_skipping_witnesses": [
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:L",
+            "score": 9.9,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:L",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:L",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:L",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:L",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 8.6,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:L",
+            "score": 9.9,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:L",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:N",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:N",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:H",
+            "score": 9.9,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:H",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:H",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:H",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:L",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:L",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:L",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 8.6,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:H",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:H",
+            "score": 9.3,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 8.6,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "score": 9.8,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "score": 6.8,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:L/A:H",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 7.5,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
+            "score": 9.4,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:H/A:H",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "PR:N->H",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 7.5,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 7.5,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:L",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:L",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:L",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:L",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:L",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:L",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 7.7,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:H/A:L",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:L/I:H/A:L",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:H/A:L",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:L",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "AV:N->P",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:H",
+            "score": 9.1,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N",
+            "score": 6.4,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 7.7,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 7.7,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:L/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:L",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "S:C->U",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:L",
+            "score": 9.0,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "S:C->U",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:L/A:H",
+            "score": 9.0,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:L/A:H",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "S:C->U",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:H/A:H",
+            "score": 9.0,
+            "band": "Critical"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:H/A:H",
+            "score": 6.7,
+            "band": "Medium"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:L/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:L",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:L",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:L/I:H/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:L/I:N/A:H",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:H/A:L",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:L/A:H",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 3.5,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:L",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:L",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:L/I:H/A:N",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:H",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:L",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:L",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:H",
+            "score": 7.4,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 6.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:L->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:L",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:L",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:L/I:H/A:N",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:H",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:L",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:L",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:H",
+            "score": 7.1,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N",
+            "score": 3.6,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 6.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:L",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:H/A:N",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:H",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:L",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:L",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H",
+            "score": 7.3,
+            "band": "High"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+            "score": 3.8,
+            "band": "Low"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 6.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 6.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 6.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.5,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.4,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 5.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 5.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.3,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.1,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:L/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:N/I:H/A:N",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "score": 4.9,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.2,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:H",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:N/I:H/A:N",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:H",
+            "score": 4.8,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "score": 4.0,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:N/I:H/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:H",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:L/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:H/I:N/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:N/I:H/A:N",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:H",
+            "score": 4.7,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:N/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "C:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:H/I:N/A:N",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "I:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:N/I:H/A:N",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        },
+        {
+          "fact": "A:H->N",
+          "from": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:H",
+            "score": 4.6,
+            "band": "Medium"
+          },
+          "to": {
+            "vector": "CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:C/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "None"
+          }
+        }
+      ],
+      "boundary_witnesses": [
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "C:N->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.0,
+              "fact": "PR:N->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N",
+              "score": 4.1,
+              "fact": "UI:N->R"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": "S:C->U"
+            }
+          ],
+          "from_band": "None",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "C:N->L"
+            }
+          ],
+          "from_band": "None",
+          "to_band": "Medium",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:N->H"
+            }
+          ],
+          "from_band": "None",
+          "to_band": "High",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:N->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+              "score": 10.0,
+              "fact": "I:N->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": "A:N->H"
+            }
+          ],
+          "from_band": "None",
+          "to_band": "Critical",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+              "score": 4.3,
+              "fact": "PR:L->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "score": 5.3,
+              "fact": "UI:R->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "S:U->C"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "C:L->N"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "None",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+              "score": 4.3,
+              "fact": "PR:L->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "score": 5.3,
+              "fact": "UI:R->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "S:U->C"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "Medium",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+              "score": 4.3,
+              "fact": "PR:L->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "score": 5.3,
+              "fact": "UI:R->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "S:U->C"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:L->H"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "High",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "distance": 6,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+              "score": 4.3,
+              "fact": "PR:L->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "score": 5.3,
+              "fact": "UI:R->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "S:U->C"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:L->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+              "score": 10.0,
+              "fact": "I:N->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": "A:N->H"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "Critical",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "C:L->N"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "None",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.0,
+              "fact": "PR:N->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N",
+              "score": 4.1,
+              "fact": "UI:N->R"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": "S:C->U"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:L->H"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "High",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "C:L->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+              "score": 10.0,
+              "fact": "I:N->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": "A:N->H"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "Critical",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "C:H->N"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "None",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+              "score": 7.7,
+              "fact": "PR:N->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+              "score": 6.8,
+              "fact": "UI:N->R"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:N/A:N",
+              "score": 5.7,
+              "fact": "S:C->U"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": "C:H->L"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "distance": 1,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "C:H->L"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "Medium",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "distance": 2,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+              "score": 10.0,
+              "fact": "I:N->H"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": "A:N->H"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "Critical",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H",
+              "score": 10.0,
+              "fact": "C:H->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+              "score": 8.6,
+              "fact": "I:H->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "A:H->N"
+            }
+          ],
+          "from_band": "Critical",
+          "to_band": "None",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+          "distance": 6,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+              "score": 9.9,
+              "fact": "PR:N->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:H",
+              "score": 9.0,
+              "fact": "UI:N->R"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H",
+              "score": 8.0,
+              "fact": "S:C->U"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:H/A:H",
+              "score": 7.6,
+              "fact": "C:H->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:H",
+              "score": 6.3,
+              "fact": "I:H->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:L/I:N/A:N",
+              "score": 3.5,
+              "fact": "A:H->N"
+            }
+          ],
+          "from_band": "Critical",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+          "distance": 3,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:H",
+              "score": 10.0,
+              "fact": "C:H->L"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:H",
+              "score": 9.3,
+              "fact": "I:H->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+              "score": 5.8,
+              "fact": "A:H->N"
+            }
+          ],
+          "from_band": "Critical",
+          "to_band": "Medium",
+          "reachable": true
+        },
+        {
+          "start": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+          "goal": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+          "distance": 2,
+          "chain": [
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+              "score": 10.0,
+              "fact": null
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:H",
+              "score": 10.0,
+              "fact": "I:H->N"
+            },
+            {
+              "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+              "score": 8.6,
+              "fact": "A:H->N"
+            }
+          ],
+          "from_band": "Critical",
+          "to_band": "High",
+          "reachable": true
+        }
+      ],
+      "blocked_adjacencies": [],
+      "uncovered_examples": []
+    },
+    {
+      "version": "2.0",
+      "metric_universe": {
+        "AV": [
+          "L",
+          "A",
+          "N"
+        ],
+        "AC": [
+          "H",
+          "M",
+          "L"
+        ],
+        "Au": [
+          "M",
+          "S",
+          "N"
+        ],
+        "C": [
+          "N",
+          "P",
+          "C"
+        ],
+        "I": [
+          "N",
+          "P",
+          "C"
+        ],
+        "A": [
+          "N",
+          "P",
+          "C"
+        ]
+      },
+      "legal_universe_size": 729,
+      "policy_covered_size": 729,
+      "policy_uncovered_size": 0,
+      "coverage_ratio": 1.0,
+      "bands": [
+        {
+          "name": "Low",
+          "lower": 0.0,
+          "upper": 4.0,
+          "disposition": "routine-ticket",
+          "vectors": 161
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket",
+          "vectors": 441
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": null,
+          "disposition": "emergency",
+          "vectors": 127
+        }
+      ],
+      "adjacency": {
+        "single_fact_edges": 4374,
+        "cross_band_edges": 1428,
+        "band_skipping_edges": 12,
+        "connected_components": 1,
+        "cross_band_components": 1
+      },
+      "cross_band_components": [
+        {
+          "component_id": 0,
+          "vectors": 729,
+          "bands": [
+            "High",
+            "Low",
+            "Medium"
+          ]
+        }
+      ],
+      "band_skipping_witnesses": [
+        {
+          "fact": "C:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:N/A:P",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:C/I:N/A:P",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "I:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:N/A:P",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:C/A:P",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "C:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:P/A:N",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:C/I:P/A:N",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "A:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:P/A:N",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:N/I:P/A:C",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "I:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:P/I:N/A:N",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:P/I:C/A:N",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "A:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:S/C:P/I:N/A:N",
+            "score": 3.5,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:S/C:P/I:N/A:C",
+            "score": 7.0,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "C:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:N/C:C/I:N/A:N",
+            "score": 7.1,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "I:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:N/C:N/I:C/A:N",
+            "score": 7.1,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "A:N->C",
+          "from": {
+            "vector": "AV:N/AC:M/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:M/Au:N/C:N/I:N/A:C",
+            "score": 7.1,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "C:N->C",
+          "from": {
+            "vector": "AV:N/AC:L/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:L/Au:N/C:C/I:N/A:N",
+            "score": 7.8,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "I:N->C",
+          "from": {
+            "vector": "AV:N/AC:L/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:L/Au:N/C:N/I:C/A:N",
+            "score": 7.8,
+            "band": "High"
+          }
+        },
+        {
+          "fact": "A:N->C",
+          "from": {
+            "vector": "AV:N/AC:L/Au:N/C:N/I:N/A:N",
+            "score": 0.0,
+            "band": "Low"
+          },
+          "to": {
+            "vector": "AV:N/AC:L/Au:N/C:N/I:N/A:C",
+            "score": 7.8,
+            "band": "High"
+          }
+        }
+      ],
+      "boundary_witnesses": [
+        {
+          "start": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+          "goal": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+          "distance": 2,
+          "chain": [
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:P/A:N",
+              "score": 0.8,
+              "fact": "I:N->P"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+              "score": 4.4,
+              "fact": "A:N->C"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "Medium",
+          "reachable": true
+        },
+        {
+          "start": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+          "goal": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+          "distance": 5,
+          "chain": [
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:L/Au:M/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "AC:H->L"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "Au:M->N"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:N/A:N",
+              "score": 4.9,
+              "fact": "C:N->C"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:C/A:N",
+              "score": 6.6,
+              "fact": "I:N->C"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+              "score": 7.2,
+              "fact": "A:N->C"
+            }
+          ],
+          "from_band": "Low",
+          "to_band": "High",
+          "reachable": true
+        },
+        {
+          "start": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+          "goal": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+          "distance": 2,
+          "chain": [
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+              "score": 4.4,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:C",
+              "score": 3.7,
+              "fact": "I:P->N"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "A:C->N"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+          "goal": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+              "score": 4.4,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:L/Au:M/C:N/I:P/A:C",
+              "score": 5.0,
+              "fact": "AC:H->L"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:N/I:P/A:C",
+              "score": 5.6,
+              "fact": "Au:M->N"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:P/A:C",
+              "score": 6.8,
+              "fact": "C:N->C"
+            },
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+              "score": 7.2,
+              "fact": "I:P->C"
+            }
+          ],
+          "from_band": "Medium",
+          "to_band": "High",
+          "reachable": true
+        },
+        {
+          "start": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+          "goal": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+          "distance": 5,
+          "chain": [
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+              "score": 7.2,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:H/Au:N/C:C/I:C/A:C",
+              "score": 6.2,
+              "fact": "AC:L->H"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:C/I:C/A:C",
+              "score": 5.9,
+              "fact": "Au:N->M"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:C/A:C",
+              "score": 5.3,
+              "fact": "C:C->N"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:C",
+              "score": 3.7,
+              "fact": "I:C->N"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:N/A:N",
+              "score": 0.0,
+              "fact": "A:C->N"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "Low",
+          "reachable": true
+        },
+        {
+          "start": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+          "goal": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+          "distance": 4,
+          "chain": [
+            {
+              "vector": "AV:L/AC:L/Au:N/C:C/I:C/A:C",
+              "score": 7.2,
+              "fact": null
+            },
+            {
+              "vector": "AV:L/AC:H/Au:N/C:C/I:C/A:C",
+              "score": 6.2,
+              "fact": "AC:L->H"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:C/I:C/A:C",
+              "score": 5.9,
+              "fact": "Au:N->M"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:C/A:C",
+              "score": 5.3,
+              "fact": "C:C->N"
+            },
+            {
+              "vector": "AV:L/AC:H/Au:M/C:N/I:P/A:C",
+              "score": 4.4,
+              "fact": "I:C->P"
+            }
+          ],
+          "from_band": "High",
+          "to_band": "Medium",
+          "reachable": true
+        }
+      ],
+      "blocked_adjacencies": [],
+      "uncovered_examples": []
+    }
+  ],
+  "verdicts": [
+    {
+      "version": "3.1",
+      "status": "needs-review",
+      "findings": [
+        "376 single-fact edges skip over a band"
+      ]
+    },
+    {
+      "version": "2.0",
+      "status": "needs-review",
+      "findings": [
+        "12 single-fact edges skip over a band"
+      ]
+    }
+  ]
+}

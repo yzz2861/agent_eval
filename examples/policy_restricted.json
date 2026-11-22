@@ -1,0 +1,123 @@
+{
+  "name": "risk-board-restricted-policy",
+  "description": "Board only voted on network-reachable, low-complexity vectors; everything else must be flagged, not assumed approved.",
+  "versions": {
+    "3.1": {
+      "allowed_values": {
+        "AV": [
+          "N"
+        ],
+        "AC": [
+          "L"
+        ],
+        "PR": [
+          "N",
+          "L"
+        ],
+        "UI": [
+          "N",
+          "R"
+        ],
+        "S": [
+          "U",
+          "C"
+        ],
+        "C": [
+          "N",
+          "L",
+          "H"
+        ],
+        "I": [
+          "N",
+          "L",
+          "H"
+        ],
+        "A": [
+          "N",
+          "L",
+          "H"
+        ]
+      },
+      "bands": [
+        {
+          "name": "None",
+          "lower": 0.0,
+          "upper": 0.1,
+          "disposition": "triage"
+        },
+        {
+          "name": "Low",
+          "lower": 0.1,
+          "upper": 4.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": 9.0,
+          "disposition": "expedite"
+        },
+        {
+          "name": "Critical",
+          "lower": 9.0,
+          "upper": null,
+          "disposition": "emergency"
+        }
+      ]
+    },
+    "2.0": {
+      "allowed_values": {
+        "AV": [
+          "N"
+        ],
+        "AC": [
+          "L"
+        ],
+        "Au": [
+          "N"
+        ],
+        "C": [
+          "N",
+          "P",
+          "C"
+        ],
+        "I": [
+          "N",
+          "P",
+          "C"
+        ],
+        "A": [
+          "N",
+          "P",
+          "C"
+        ]
+      },
+      "bands": [
+        {
+          "name": "Low",
+          "lower": 0.0,
+          "upper": 4.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "Medium",
+          "lower": 4.0,
+          "upper": 7.0,
+          "disposition": "routine-ticket"
+        },
+        {
+          "name": "High",
+          "lower": 7.0,
+          "upper": null,
+          "disposition": "emergency"
+        }
+      ]
+    }
+  }
+}
