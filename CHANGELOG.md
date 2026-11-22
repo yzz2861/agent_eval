@@ -1,3 +1,14 @@
+Unreleased
+----------
+
+* Add a read-only trust impact preview for merged JKS/JCEKS trust images.
+  Selection contracts distinguish whole-store and alias selection, report
+  unselectable aliases, group duplicate public certificates by SHA-256, and
+  keep a missing prior selection record unresolved instead of assuming trust.
+  Private and secret key entries are never decrypted or included.
+* Add a shared-certificate example that identifies an application moving from
+  one local authorization to multiple trusted certificate objects.
+
 # PyJKS CHANGELOG
 
 Broadly speaking, the PyJKS has been stable since 2017. The JKS

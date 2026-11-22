@@ -101,6 +101,17 @@ class AbstractKeystore(object):
             keystore_bytes = self.saves(store_password)
             file.write(keystore_bytes)
 
+    def preview_trust_impact(self, contracts, **kwargs):
+        """
+        Read-only convenience wrapper around
+        :func:`jks.trust_impact.preview_trust_impact`.
+
+        Only public trusted-certificate entries are inspected; this wrapper
+        does not decrypt or expose private/secret key material.
+        """
+        from .trust_impact import preview_trust_impact
+        return preview_trust_impact(contracts, self, **kwargs)
+
     @classmethod
     def _read_utf(cls, data, pos, kind=None):
         """

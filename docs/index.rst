@@ -46,6 +46,7 @@ Contents:
    examples
    concepts
    jks
+   trust_impact
    bks
    exceptions
 

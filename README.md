@@ -95,3 +95,45 @@ def jksfile2context(jks_file, passphrase, key_alias, key_password=None):
     return ctx
 
 ```
+
+
+## Read-only trust impact preview
+
+When several Java trust stores are merged into one read-only image, legacy
+applications can either select aliases or accept the whole store.  The
+`jks.trust_impact` module previews which applications gain public certificate
+trust without decrypting any private material:
+
+```python
+import jks
+
+contracts = {
+    "reporting": {
+        "selection": "all",
+        "baseline": {"certificates": [shared_sha256]},
+    },
+    "billing": {
+        "aliases": ["billing-root"],
+        "baseline": {"aliases": ["billing-root"],
+                     "certificates": [billing_sha256]},
+    },
+}
+
+preview = jks.preview_trust_impact(contracts, "merged-truststore.jks")
+print(preview.to_json())
+```
+
+Contracts distinguish `all`, `aliases`, `none` and an explicit `unknown`.  A
+requested alias that is absent is reported in `missing_aliases`; aliases that
+belong to private/secret entries are reported in `non_public_aliases` and are
+never read.  Duplicate public certificates are grouped by SHA-256 so reports can
+separate entry/alias count from distinct certificate count.  A missing real
+selection record leaves `expanded` as `None` instead of assuming all or none.
+
+The shared-certificate example shows the transitional case directly:
+
+```python
+preview, facts = jks.shared_certificate_example()
+assert facts["expanded_application"] == "default-store"
+assert facts["transition"] == "local_authorization_to_multiple_trust_objects"
+```
