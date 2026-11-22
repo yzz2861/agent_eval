@@ -193,3 +193,37 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+### Comparing unwind information
+
+`elftools.dwarf.cfi_compare` compares the decoded CFI rules from an
+artifact and an external debug file. The inputs are explicit: a `FrameFile`
+for each side and a right-to-left address map. The report includes file
+sizes and SHA-256 digests, the chosen sections, the mapped FDE pairs, and
+contiguous half-open instruction intervals marked `same`, `different`,
+`incomparable`, `left_only`, or `right_only`.
+
+Register-offset, val-offset, register, same-value, undefined, and
+register-plus-offset CFA rules are compared directly. DWARF expressions are
+never interpreted as equal; intervals containing them are `incomparable`
+and keep the raw expression bytes plus the FDE, CIE, and decoded-table line
+provenance.
+
+``` python
+from elftools.dwarf.cfi_compare import (
+    AddressMap, FrameFile, FramePair, compare_frame_files)
+
+report = compare_frame_files(FramePair(
+    left=FrameFile("app.elf", ".eh_frame"),
+    right=FrameFile("app.debug", ".debug_frame"),
+    right_to_left=AddressMap(0),
+))
+for interval in report.intervals:
+    print(hex(interval.start), hex(interval.end), interval.status)
+```
+
+The same comparison is available as `scripts/cfi_compare.py`:
+
+``` text
+python scripts/cfi_compare.py app.elf app.debug --right-offset 0x1000
+```
