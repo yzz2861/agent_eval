@@ -1,0 +1,895 @@
+{
+  "findings": [
+    {
+      "conclusion": "WRITE_EXPOSED",
+      "external_base": "System.Object",
+      "external_write_accessor": true,
+      "implementation": {
+        "declaring_type": "MetadataSamples.BaseWriter",
+        "inherited": true,
+        "method": {
+          "file_offset": "0x398",
+          "raw": {
+            "Flags": "0x9E6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xD1",
+            "ParamList_Index": "0x1",
+            "Rva": "0x23EE",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 5,
+          "table": "MethodDef",
+          "token": "0x06000005"
+        },
+        "method_flags": [
+          "public",
+          "final",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "specialname"
+        ],
+        "property_link": {
+          "linked": true,
+          "method_semantics": {
+            "file_offset": "0x474",
+            "raw": {
+              "Association_CodedIndex": "0x7",
+              "Method_Index": "0x5",
+              "Semantics": "0x1"
+            },
+            "rid": 5,
+            "table": "MethodSemantics",
+            "token": "0x18000005"
+          },
+          "property": {
+            "file_offset": "0x44A",
+            "raw": {
+              "Flags": "0x200",
+              "Name_StringIndex": "0xDB",
+              "Type_BlobIndex": "0x15"
+            },
+            "rid": 3,
+            "table": "Property",
+            "token": "0x17000003"
+          },
+          "property_map": {
+            "file_offset": "0x42E",
+            "raw": {
+              "Parent_Index": "0x3",
+              "PropertyList_Index": "0x3"
+            },
+            "rid": 3,
+            "table": "PropertyMap",
+            "token": "0x15000003"
+          }
+        },
+        "route_kind": "implicit"
+      },
+      "implementation_method": {
+        "file_offset": "0x398",
+        "raw": {
+          "Flags": "0x9E6",
+          "ImplFlags": "0x0",
+          "Name_StringIndex": "0xD1",
+          "ParamList_Index": "0x1",
+          "Rva": "0x23EE",
+          "Signature_BlobIndex": "0x5"
+        },
+        "rid": 5,
+        "table": "MethodDef",
+        "token": "0x06000005"
+      },
+      "implementation_method_flags": [
+        "public",
+        "final",
+        "virtual",
+        "hidebysig",
+        "newslot",
+        "specialname"
+      ],
+      "implementation_route": "inherited-implicit",
+      "inheritance_path": [
+        "MetadataSamples.InheritedWriteFacade",
+        "MetadataSamples.BaseWriter"
+      ],
+      "interface": "MetadataSamples.Contracts.IValueWriter",
+      "interface_getter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x36E",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xC7",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x1"
+          },
+          "rid": 2,
+          "table": "MethodDef",
+          "token": "0x06000002"
+        },
+        "method_name": "get_Value",
+        "method_rid": 2,
+        "method_semantics": {
+          "file_offset": "0x462",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x2",
+            "Semantics": "0x2"
+          },
+          "rid": 2,
+          "table": "MethodSemantics",
+          "token": "0x18000002"
+        }
+      },
+      "interface_has_setter": true,
+      "interface_impl": {
+        "file_offset": "0x40C",
+        "raw": {
+          "Class_Index": "0x3",
+          "Interface_CodedIndex": "0x8"
+        },
+        "rid": 2,
+        "table": "InterfaceImpl",
+        "token": "0x09000002"
+      },
+      "interface_impl_class": "MetadataSamples.BaseWriter",
+      "interface_impl_inherited": true,
+      "interface_kind": "TypeDef",
+      "interface_property": {
+        "file_offset": "0x444",
+        "raw": {
+          "Flags": "0x200",
+          "Name_StringIndex": "0xDB",
+          "Type_BlobIndex": "0x15"
+        },
+        "rid": 2,
+        "table": "Property",
+        "token": "0x17000002"
+      },
+      "interface_property_map": {
+        "file_offset": "0x42A",
+        "raw": {
+          "Parent_Index": "0x2",
+          "PropertyList_Index": "0x2"
+        },
+        "rid": 2,
+        "table": "PropertyMap",
+        "token": "0x15000002"
+      },
+      "interface_property_signature": "int32 ()",
+      "interface_row": {
+        "file_offset": "0x31A",
+        "raw": {
+          "Extends_CodedIndex": "0x0",
+          "FieldList_Index": "0x1",
+          "Flags": "0xA1",
+          "MethodList_Index": "0x2",
+          "TypeName_StringIndex": "0x6A",
+          "TypeNamespace_StringIndex": "0x50"
+        },
+        "rid": 2,
+        "table": "TypeDef",
+        "token": "0x02000002"
+      },
+      "interface_setter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x37C",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xD1",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 3,
+          "table": "MethodDef",
+          "token": "0x06000003"
+        },
+        "method_name": "set_Value",
+        "method_rid": 3,
+        "method_semantics": {
+          "file_offset": "0x468",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x3",
+            "Semantics": "0x1"
+          },
+          "rid": 3,
+          "table": "MethodSemantics",
+          "token": "0x18000003"
+        }
+      },
+      "interface_setter_signature": "instance void (int32)",
+      "partial_reasons": [],
+      "property": "Value",
+      "same_name_methods": [
+        {
+          "declaring_type": "MetadataSamples.BaseWriter",
+          "flags": [
+            "public",
+            "final",
+            "virtual",
+            "hidebysig",
+            "newslot",
+            "specialname"
+          ],
+          "inherited": true,
+          "method": {
+            "file_offset": "0x398",
+            "raw": {
+              "Flags": "0x9E6",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23EE",
+              "Signature_BlobIndex": "0x5"
+            },
+            "rid": 5,
+            "table": "MethodDef",
+            "token": "0x06000005"
+          },
+          "name": "set_Value",
+          "reason": "MethodDef is the concrete body selected for the interface setter",
+          "relation": "mapped_implementation",
+          "rva": "0x23EE",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": true,
+          "signature": "instance void (int32)"
+        }
+      ],
+      "target_type": "MetadataSamples.InheritedWriteFacade",
+      "target_type_flags": "0x00100101",
+      "target_type_row": {
+        "file_offset": "0x336",
+        "raw": {
+          "Extends_CodedIndex": "0xC",
+          "FieldList_Index": "0x1",
+          "Flags": "0x100101",
+          "MethodList_Index": "0x6",
+          "TypeName_StringIndex": "0x92",
+          "TypeNamespace_StringIndex": "0x82"
+        },
+        "rid": 4,
+        "table": "TypeDef",
+        "token": "0x02000004"
+      },
+      "target_type_sealed": true
+    },
+    {
+      "conclusion": "WRITE_EXPOSED",
+      "external_write_accessor": true,
+      "implementation": {
+        "declaring_type": "MetadataSamples.WriteFacade",
+        "inherited": false,
+        "method": {
+          "file_offset": "0x3D0",
+          "raw": {
+            "Flags": "0x9E6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xD1",
+            "ParamList_Index": "0x1",
+            "Rva": "0x23F6",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 9,
+          "table": "MethodDef",
+          "token": "0x06000009"
+        },
+        "method_flags": [
+          "public",
+          "final",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "specialname"
+        ],
+        "property_link": {
+          "linked": true,
+          "method_semantics": {
+            "file_offset": "0x480",
+            "raw": {
+              "Association_CodedIndex": "0x9",
+              "Method_Index": "0x9",
+              "Semantics": "0x1"
+            },
+            "rid": 7,
+            "table": "MethodSemantics",
+            "token": "0x18000007"
+          },
+          "property": {
+            "file_offset": "0x450",
+            "raw": {
+              "Flags": "0x200",
+              "Name_StringIndex": "0xDB",
+              "Type_BlobIndex": "0x15"
+            },
+            "rid": 4,
+            "table": "Property",
+            "token": "0x17000004"
+          },
+          "property_map": {
+            "file_offset": "0x436",
+            "raw": {
+              "Parent_Index": "0x5",
+              "PropertyList_Index": "0x4"
+            },
+            "rid": 5,
+            "table": "PropertyMap",
+            "token": "0x15000005"
+          }
+        },
+        "route_kind": "implicit"
+      },
+      "implementation_method": {
+        "file_offset": "0x3D0",
+        "raw": {
+          "Flags": "0x9E6",
+          "ImplFlags": "0x0",
+          "Name_StringIndex": "0xD1",
+          "ParamList_Index": "0x1",
+          "Rva": "0x23F6",
+          "Signature_BlobIndex": "0x5"
+        },
+        "rid": 9,
+        "table": "MethodDef",
+        "token": "0x06000009"
+      },
+      "implementation_method_flags": [
+        "public",
+        "final",
+        "virtual",
+        "hidebysig",
+        "newslot",
+        "specialname"
+      ],
+      "implementation_route": "implicit",
+      "interface": "MetadataSamples.Contracts.IValueWriter",
+      "interface_getter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x36E",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xC7",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x1"
+          },
+          "rid": 2,
+          "table": "MethodDef",
+          "token": "0x06000002"
+        },
+        "method_name": "get_Value",
+        "method_rid": 2,
+        "method_semantics": {
+          "file_offset": "0x462",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x2",
+            "Semantics": "0x2"
+          },
+          "rid": 2,
+          "table": "MethodSemantics",
+          "token": "0x18000002"
+        }
+      },
+      "interface_has_setter": true,
+      "interface_impl": {
+        "file_offset": "0x414",
+        "raw": {
+          "Class_Index": "0x5",
+          "Interface_CodedIndex": "0x8"
+        },
+        "rid": 4,
+        "table": "InterfaceImpl",
+        "token": "0x09000004"
+      },
+      "interface_impl_class": "MetadataSamples.WriteFacade",
+      "interface_impl_inherited": false,
+      "interface_kind": "TypeDef",
+      "interface_property": {
+        "file_offset": "0x444",
+        "raw": {
+          "Flags": "0x200",
+          "Name_StringIndex": "0xDB",
+          "Type_BlobIndex": "0x15"
+        },
+        "rid": 2,
+        "table": "Property",
+        "token": "0x17000002"
+      },
+      "interface_property_map": {
+        "file_offset": "0x42A",
+        "raw": {
+          "Parent_Index": "0x2",
+          "PropertyList_Index": "0x2"
+        },
+        "rid": 2,
+        "table": "PropertyMap",
+        "token": "0x15000002"
+      },
+      "interface_property_signature": "int32 ()",
+      "interface_row": {
+        "file_offset": "0x31A",
+        "raw": {
+          "Extends_CodedIndex": "0x0",
+          "FieldList_Index": "0x1",
+          "Flags": "0xA1",
+          "MethodList_Index": "0x2",
+          "TypeName_StringIndex": "0x6A",
+          "TypeNamespace_StringIndex": "0x50"
+        },
+        "rid": 2,
+        "table": "TypeDef",
+        "token": "0x02000002"
+      },
+      "interface_setter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x37C",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xD1",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 3,
+          "table": "MethodDef",
+          "token": "0x06000003"
+        },
+        "method_name": "set_Value",
+        "method_rid": 3,
+        "method_semantics": {
+          "file_offset": "0x468",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x3",
+            "Semantics": "0x1"
+          },
+          "rid": 3,
+          "table": "MethodSemantics",
+          "token": "0x18000003"
+        }
+      },
+      "interface_setter_signature": "instance void (int32)",
+      "partial_reasons": [],
+      "property": "Value",
+      "same_name_methods": [
+        {
+          "declaring_type": "MetadataSamples.WriteFacade",
+          "flags": [
+            "public",
+            "static",
+            "hidebysig"
+          ],
+          "inherited": false,
+          "method": {
+            "file_offset": "0x3A6",
+            "raw": {
+              "Flags": "0x96",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23F0",
+              "Signature_BlobIndex": "0xA"
+            },
+            "rid": 6,
+            "table": "MethodDef",
+            "token": "0x06000006"
+          },
+          "name": "set_Value",
+          "reason": "same method name/prefix, but a different signature and no interface mapping",
+          "relation": "unrelated_same_name",
+          "rva": "0x23F0",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": false,
+          "signature": "static void (string)"
+        },
+        {
+          "declaring_type": "MetadataSamples.WriteFacade",
+          "flags": [
+            "private",
+            "hidebysig"
+          ],
+          "inherited": false,
+          "method": {
+            "file_offset": "0x3B4",
+            "raw": {
+              "Flags": "0x81",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23F2",
+              "Signature_BlobIndex": "0xF"
+            },
+            "rid": 7,
+            "table": "MethodDef",
+            "token": "0x06000007"
+          },
+          "name": "set_Value",
+          "reason": "same method name/prefix, but a different signature and no interface mapping",
+          "relation": "unrelated_same_name",
+          "rva": "0x23F2",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": false,
+          "signature": "instance void (int32, bool)"
+        },
+        {
+          "declaring_type": "MetadataSamples.WriteFacade",
+          "flags": [
+            "public",
+            "final",
+            "virtual",
+            "hidebysig",
+            "newslot",
+            "specialname"
+          ],
+          "inherited": false,
+          "method": {
+            "file_offset": "0x3D0",
+            "raw": {
+              "Flags": "0x9E6",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23F6",
+              "Signature_BlobIndex": "0x5"
+            },
+            "rid": 9,
+            "table": "MethodDef",
+            "token": "0x06000009"
+          },
+          "name": "set_Value",
+          "reason": "MethodDef is the concrete body selected for the interface setter",
+          "relation": "mapped_implementation",
+          "rva": "0x23F6",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": true,
+          "signature": "instance void (int32)"
+        }
+      ],
+      "target_type": "MetadataSamples.WriteFacade",
+      "target_type_flags": "0x00100101",
+      "target_type_row": {
+        "file_offset": "0x344",
+        "raw": {
+          "Extends_CodedIndex": "0x5",
+          "FieldList_Index": "0x1",
+          "Flags": "0x100101",
+          "MethodList_Index": "0x6",
+          "TypeName_StringIndex": "0xA7",
+          "TypeNamespace_StringIndex": "0x82"
+        },
+        "rid": 5,
+        "table": "TypeDef",
+        "token": "0x02000005"
+      },
+      "target_type_sealed": true
+    },
+    {
+      "conclusion": "WRITE_EXPOSED",
+      "external_write_accessor": true,
+      "implementation": {
+        "body_kind": "MethodDef",
+        "body_method_flags": [
+          "private",
+          "final",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "specialname"
+        ],
+        "body_method_owner": "MetadataSamples.ExplicitWriteFacade",
+        "declaration_kind": "MemberRef",
+        "declaration_memberref": {
+          "file_offset": "0x420",
+          "raw": {
+            "Class_CodedIndex": "0x10",
+            "Name_StringIndex": "0xD1",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 1,
+          "table": "MemberRef",
+          "token": "0x0A000001"
+        },
+        "declaration_method": null,
+        "declaration_name": "set_Value",
+        "declaration_parent": "MetadataSamples.Contracts.IValueWriter",
+        "declaration_signature": "instance void (int32)",
+        "declaring_type": "MetadataSamples.ExplicitWriteFacade",
+        "inherited": false,
+        "methodimpl": {
+          "file_offset": "0x48C",
+          "raw": {
+            "Class_Index": "0x6",
+            "MethodBody_CodedIndex": "0x14",
+            "MethodDeclaration_CodedIndex": "0x3"
+          },
+          "rid": 1,
+          "table": "MethodImpl",
+          "token": "0x19000001"
+        },
+        "property_link": {
+          "explicit_methodimpl": true,
+          "linked": false,
+          "reason": "MethodImpl maps the interface setter directly; a class Property/MethodSemantics row is not required for this route"
+        },
+        "route_kind": "explicit"
+      },
+      "implementation_method": {
+        "file_offset": "0x3DE",
+        "raw": {
+          "Flags": "0x9E1",
+          "ImplFlags": "0x0",
+          "Name_StringIndex": "0xD1",
+          "ParamList_Index": "0x1",
+          "Rva": "0x23F8",
+          "Signature_BlobIndex": "0x5"
+        },
+        "rid": 10,
+        "table": "MethodDef",
+        "token": "0x0600000A"
+      },
+      "implementation_method_flags": [
+        "private",
+        "final",
+        "virtual",
+        "hidebysig",
+        "newslot",
+        "specialname"
+      ],
+      "implementation_route": "explicit",
+      "interface": "MetadataSamples.Contracts.IValueWriter",
+      "interface_getter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x36E",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xC7",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x1"
+          },
+          "rid": 2,
+          "table": "MethodDef",
+          "token": "0x06000002"
+        },
+        "method_name": "get_Value",
+        "method_rid": 2,
+        "method_semantics": {
+          "file_offset": "0x462",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x2",
+            "Semantics": "0x2"
+          },
+          "rid": 2,
+          "table": "MethodSemantics",
+          "token": "0x18000002"
+        }
+      },
+      "interface_has_setter": true,
+      "interface_impl": {
+        "file_offset": "0x41C",
+        "raw": {
+          "Class_Index": "0x6",
+          "Interface_CodedIndex": "0x8"
+        },
+        "rid": 6,
+        "table": "InterfaceImpl",
+        "token": "0x09000006"
+      },
+      "interface_impl_class": "MetadataSamples.ExplicitWriteFacade",
+      "interface_impl_inherited": false,
+      "interface_kind": "TypeDef",
+      "interface_property": {
+        "file_offset": "0x444",
+        "raw": {
+          "Flags": "0x200",
+          "Name_StringIndex": "0xDB",
+          "Type_BlobIndex": "0x15"
+        },
+        "rid": 2,
+        "table": "Property",
+        "token": "0x17000002"
+      },
+      "interface_property_map": {
+        "file_offset": "0x42A",
+        "raw": {
+          "Parent_Index": "0x2",
+          "PropertyList_Index": "0x2"
+        },
+        "rid": 2,
+        "table": "PropertyMap",
+        "token": "0x15000002"
+      },
+      "interface_property_signature": "int32 ()",
+      "interface_row": {
+        "file_offset": "0x31A",
+        "raw": {
+          "Extends_CodedIndex": "0x0",
+          "FieldList_Index": "0x1",
+          "Flags": "0xA1",
+          "MethodList_Index": "0x2",
+          "TypeName_StringIndex": "0x6A",
+          "TypeNamespace_StringIndex": "0x50"
+        },
+        "rid": 2,
+        "table": "TypeDef",
+        "token": "0x02000002"
+      },
+      "interface_setter": {
+        "flags": [
+          "public",
+          "virtual",
+          "hidebysig",
+          "newslot",
+          "abstract",
+          "specialname"
+        ],
+        "method": {
+          "file_offset": "0x37C",
+          "raw": {
+            "Flags": "0xDC6",
+            "ImplFlags": "0x0",
+            "Name_StringIndex": "0xD1",
+            "ParamList_Index": "0x1",
+            "Rva": "0x0",
+            "Signature_BlobIndex": "0x5"
+          },
+          "rid": 3,
+          "table": "MethodDef",
+          "token": "0x06000003"
+        },
+        "method_name": "set_Value",
+        "method_rid": 3,
+        "method_semantics": {
+          "file_offset": "0x468",
+          "raw": {
+            "Association_CodedIndex": "0x5",
+            "Method_Index": "0x3",
+            "Semantics": "0x1"
+          },
+          "rid": 3,
+          "table": "MethodSemantics",
+          "token": "0x18000003"
+        }
+      },
+      "interface_setter_signature": "instance void (int32)",
+      "partial_reasons": [],
+      "property": "Value",
+      "same_name_methods": [
+        {
+          "declaring_type": "MetadataSamples.ExplicitWriteFacade",
+          "flags": [
+            "private",
+            "final",
+            "virtual",
+            "hidebysig",
+            "newslot",
+            "specialname"
+          ],
+          "inherited": false,
+          "method": {
+            "file_offset": "0x3DE",
+            "raw": {
+              "Flags": "0x9E1",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23F8",
+              "Signature_BlobIndex": "0x5"
+            },
+            "rid": 10,
+            "table": "MethodDef",
+            "token": "0x0600000A"
+          },
+          "name": "set_Value",
+          "reason": "MethodDef is the concrete body selected for the interface setter",
+          "relation": "mapped_implementation",
+          "rva": "0x23F8",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": true,
+          "signature": "instance void (int32)"
+        },
+        {
+          "declaring_type": "MetadataSamples.ExplicitWriteFacade",
+          "flags": [
+            "public",
+            "static",
+            "hidebysig"
+          ],
+          "inherited": false,
+          "method": {
+            "file_offset": "0x3EC",
+            "raw": {
+              "Flags": "0x96",
+              "ImplFlags": "0x0",
+              "Name_StringIndex": "0xD1",
+              "ParamList_Index": "0x1",
+              "Rva": "0x23FA",
+              "Signature_BlobIndex": "0xA"
+            },
+            "rid": 11,
+            "table": "MethodDef",
+            "token": "0x0600000B"
+          },
+          "name": "set_Value",
+          "reason": "same method name/prefix, but a different signature and no interface mapping",
+          "relation": "unrelated_same_name",
+          "rva": "0x23FA",
+          "same_name_as_interface_setter": true,
+          "same_signature_as_interface_setter": false,
+          "signature": "static void (string)"
+        }
+      ],
+      "target_type": "MetadataSamples.ExplicitWriteFacade",
+      "target_type_flags": "0x00100101",
+      "target_type_row": {
+        "file_offset": "0x352",
+        "raw": {
+          "Extends_CodedIndex": "0x5",
+          "FieldList_Index": "0x1",
+          "Flags": "0x100101",
+          "MethodList_Index": "0xA",
+          "TypeName_StringIndex": "0xB3",
+          "TypeNamespace_StringIndex": "0x82"
+        },
+        "rid": 6,
+        "table": "TypeDef",
+        "token": "0x02000006"
+      },
+      "target_type_sealed": true
+    }
+  ],
+  "mode": "dnfile metadata-only; assembly not loaded",
+  "source": "samples/write-overloads.dll",
+  "warnings": [
+    "Byte 0x00 makes up 60.8724% of the file's contents. This may indicate truncation / malformation."
+  ]
+}
