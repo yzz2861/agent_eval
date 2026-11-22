@@ -112,6 +112,20 @@ class Evtx(object):
                 yield record
 
     @ensure_contexted
+    def coverage_ledger(self, evidence=None, requirements=None, render=True, source=None):
+        """Inventory this open log into a read-only review coverage ledger.
+
+        The file is not modified.  The returned ledger owns its inventory
+        and can accept receipts from reviewers or from a previous run.
+        """
+        from .Ledger import CoverageLedger, FieldRequirements
+
+        scope = evidence or self._filename
+        ledger = CoverageLedger(requirements or FieldRequirements(scope, ()))
+        ledger.scan_evidence(scope, self, source=source, render=render)
+        return ledger
+
+    @ensure_contexted
     def get_record(self, record_num):
         """
         Get a Record by record number.

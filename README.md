@@ -42,6 +42,48 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Review coverage ledger
+----------------------
+Cases often split overlapping EVTX ranges across reviewers.  The
+`Evtx.Ledger` module (also importable as `Evtx.Coverage`) adds a read-only
+coverage ledger next to the parser.  It inventories each evidence scope by
+real record position (record number, absolute file offset, log timestamp)
+and only counts receipts that are still reusable.
+
+A receipt is bound to the field requirement set that was active when it was
+filed and to the real positions it reviewed.  An old receipt is reused only
+while the active field requirements are still covered and the bound offsets,
+timestamps and content digests still match.  Otherwise it remains visible as
+a stale receipt with an explicit reason.  Records whose metadata, structure
+or XML content cannot be read stay unreviewed with an anomaly reason even if
+a receipt exists.
+
+Reviewed log-time ranges from different exhibits are merged as a union, so
+overlapping wall-clock intervals are never added together.  Record counts
+remain per evidence scope because two exhibits can hold different original
+records that happen to cover the same interval.
+
+    import Evtx.Evtx as evtx
+    from Evtx import CoverageLedger, FieldRequirements
+
+    requirements = FieldRequirements("review-v1", ["EventID", "TimeCreated"])
+    ledger = CoverageLedger(requirements)
+
+    with evtx.Evtx("Security.evtx") as log:
+        ledger.scan_evidence("EX-001", log)
+
+    ledger.issue_receipt("EX-001", "alice", 1, 100)
+    ledger.trace("EX-001", record_num=42)
+    print(ledger.to_json())
+
+Receipts can be reloaded with `ledger.load_receipts(path)` or from the
+`receipts` array produced by `ledger.to_dict()`.  The command line entry
+`evtx_review_coverage` scans one or more files, imports receipts and prints
+either JSON or a textual ledger:
+
+    evtx_review_coverage --receipts receipts.json Security.evtx System.evtx
+    evtx_review_coverage --evidence EX-001=Security.evtx --format text
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:
