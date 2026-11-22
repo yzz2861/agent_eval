@@ -4997,6 +4997,244 @@ class PE:
 
         return resource
 
+    @staticmethod
+    def _match_resource_entry(entry, identifier):
+        """Check whether a resource directory entry matches an identifier.
+
+        Integer identifiers match the entry's id, strings match the
+        entry's name.
+        """
+        if isinstance(identifier, int):
+            return entry.id == identifier
+        return entry.name is not None and str(entry.name) == identifier
+
+    def verify_resource(self, resource_type, name=None, lang=None, source=None):
+        """Read-only verification of a single resource.
+
+        Locates the resource addressed by 'resource_type', 'name' and 'lang'
+        (a LANGID) and returns the package entry produced by
+        verify_resource_packages() for it.
+        """
+        report = self.verify_resource_packages(
+            resource_type, name=name, packages=[{"lang": lang}], source=source
+        )
+        return report["packages"][0]
+
+    def verify_resource_packages(
+        self, resource_type, name=None, packages=(), source=None
+    ):
+        """Read-only verification binding registered packages to PE resources.
+
+        For every package in 'packages' the resource addressed by
+        'resource_type', 'name' and the package's language is located and
+        the data visible in the PE is recorded as that package's evidence.
+
+        The check is read-only: the PE's data is never modified. Every
+        registered package gets its own evidence record, even when several
+        packages carry identical version strings, and a missing or corrupt
+        directory for one language does not remove the evidence collected
+        for any other language.
+
+        'resource_type' may be a numeric resource type id, a RESOURCE_TYPE
+        name (e.g. "RT_VERSION") or a custom string type name. 'name' may be
+        a numeric resource id or a string; if None, the first name entry
+        under the type is used. Each package may be a LANGID integer or a
+        mapping with a 'lang' entry (a LANGID) plus any caller-registered
+        fields (e.g. 'product', 'version'); the package is echoed back as
+        'package' in the report and its 'version' value, if present, is
+        surfaced as 'version_string'. 'source' is an optional
+        caller-supplied label (such as a build or file name) recorded in
+        the report so auditors can trace every confirmation back to the
+        material it came from.
+
+        Returns a report dictionary with the keys:
+
+            source:         the 'source' argument, as given
+            resource_type:  the 'resource_type' argument, as given
+            resource_name:  the 'name' argument, as given
+            version_info:   the version strings visible in the PE, if parsed
+            packages:       one entry per registered package, in order
+
+        Every package entry contains:
+
+            package:        the registered package, as given
+            lang:           the LANGID that was looked up
+            version_string: the registered 'version' value, if any
+            status:         "confirmed", "missing" or "error"
+            evidence:       None unless the resource was found; otherwise a
+                            dictionary with the layer-by-layer file offsets
+                            of the type, name and language directory entries
+                            ("layers") and the data entry offset, data RVA,
+                            data file offset, size and SHA-256 of the visible
+                            data, allowing auditors to jump from the report
+                            back to the confirmed material. If reading the
+                            data fails ("error" status) the layers resolved
+                            up to the failure are kept.
+            errors:         descriptions of any problems found
+        """
+
+        if isinstance(resource_type, str) and resource_type in RESOURCE_TYPE:
+            type_identifier = RESOURCE_TYPE[resource_type]
+        else:
+            type_identifier = resource_type
+
+        if isinstance(packages, (dict, int)):
+            packages = [packages]
+
+        # Ensure the resources are parsed; parsing is lazy for PEs loaded
+        # with fast_load=True. Parsing only reads data, it never modifies it.
+        if not hasattr(self, "DIRECTORY_ENTRY_RESOURCE"):
+            self.parse_data_directories(
+                directories=[DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]]
+            )
+
+        version_info = {}
+        for finfo in getattr(self, "FileInfo", []):
+            for string_file_info in finfo:
+                for string_table in getattr(string_file_info, "StringTable", []):
+                    for key, value in string_table.entries.items():
+                        if isinstance(key, bytes):
+                            key = key.decode("utf-8", "backslashreplace")
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8", "backslashreplace")
+                        version_info[key] = value
+
+        type_entry = None
+        if hasattr(self, "DIRECTORY_ENTRY_RESOURCE"):
+            for entry in self.DIRECTORY_ENTRY_RESOURCE.entries:
+                if self._match_resource_entry(entry, type_identifier):
+                    type_entry = entry
+                    break
+
+        name_entry = None
+        if type_entry is not None and hasattr(type_entry, "directory"):
+            if name is None:
+                if type_entry.directory.entries:
+                    name_entry = type_entry.directory.entries[0]
+            else:
+                for entry in type_entry.directory.entries:
+                    if self._match_resource_entry(entry, name):
+                        name_entry = entry
+                        break
+
+        report = {
+            "source": source,
+            "resource_type": resource_type,
+            "resource_name": name,
+            "version_info": version_info,
+            "packages": [],
+        }
+
+        for package in packages:
+            report["packages"].append(
+                self._verify_resource_package(package, type_entry, name_entry)
+            )
+
+        return report
+
+    def _verify_resource_package(self, package, type_entry, name_entry):
+        """Verify one registered package against the located resource entries.
+
+        Builds an independent report entry for the package; failures are
+        recorded in the entry itself and never propagated to other packages.
+        """
+
+        if isinstance(package, int):
+            registered = {"lang": package}
+        else:
+            registered = dict(package)
+        lang = registered.get("lang")
+
+        result = {
+            "package": registered,
+            "lang": lang,
+            "version_string": registered.get("version"),
+            "status": "missing",
+            "evidence": None,
+            "errors": [],
+        }
+
+        try:
+            if type_entry is None:
+                result["errors"].append("resource type not found")
+                return result
+            if name_entry is None:
+                result["errors"].append("resource name not found")
+                return result
+
+            layers = [
+                {
+                    "level": "type",
+                    "id": type_entry.id,
+                    "entry_offset": type_entry.struct.get_file_offset(),
+                },
+                {
+                    "level": "name",
+                    "id": name_entry.id,
+                    "entry_offset": name_entry.struct.get_file_offset(),
+                },
+            ]
+
+            lang_entry = None
+            if hasattr(name_entry, "directory"):
+                leaves = [
+                    entry
+                    for entry in name_entry.directory.entries
+                    if hasattr(entry, "data")
+                ]
+                if lang is None:
+                    lang_entry = leaves[0] if leaves else None
+                else:
+                    # Prefer an exact LANGID match; fall back to a primary
+                    # language id match.
+                    for leaf in leaves:
+                        if leaf.id == lang:
+                            lang_entry = leaf
+                            break
+                    if lang_entry is None and lang <= 0x3FF:
+                        for leaf in leaves:
+                            if leaf.data.lang == lang:
+                                lang_entry = leaf
+                                break
+
+            if lang_entry is None:
+                if lang is None:
+                    result["errors"].append("resource has no language entries")
+                else:
+                    result["errors"].append(f"resource language not found: {lang:#x}")
+                return result
+
+            layers.append(
+                {
+                    "level": "lang",
+                    "id": lang_entry.id,
+                    "lang": lang_entry.data.lang,
+                    "sublang": lang_entry.data.sublang,
+                    "entry_offset": lang_entry.struct.get_file_offset(),
+                }
+            )
+
+            data_struct = lang_entry.data.struct
+            evidence = {
+                "layers": layers,
+                "data_entry_offset": data_struct.get_file_offset(),
+                "data_rva": data_struct.OffsetToData,
+                "size": data_struct.Size,
+            }
+            result["evidence"] = evidence
+
+            data = self.get_data(data_struct.OffsetToData, data_struct.Size)
+            evidence["data_offset"] = self.get_offset_from_rva(
+                data_struct.OffsetToData
+            )
+            evidence["sha256"] = sha256(data).hexdigest()
+            result["status"] = "confirmed"
+        except PEFormatError as exc:
+            result["status"] = "error"
+            result["errors"].append(str(exc))
+
+        return result
+
     def parse_version_information(self, version_struct):
         """Parse version information structure.
 

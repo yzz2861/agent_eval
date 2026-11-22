@@ -780,6 +780,164 @@ class TestPEFile(unittest.TestCase):
         pe = pefile.PE(POCS_TESTS_DIR / "tinydrivXP.sys")
         self.assertTrue(pe.verify_checksum())
 
+    def test_verify_resource_packages_binds_each_registered_language(self):
+        """Every registered package gets its own source, however identical the records.
+
+        Two languages are registered with the same product name and version
+        string. Each synthetic fixture keeps only one language's resource
+        path complete; the other language's data entry points outside the
+        image. Verification must confirm the complete path, keep the broken
+        directory from erasing that evidence, and let an auditor jump from
+        the report's offsets back to the confirmed bytes.
+        """
+
+        record = [
+            {"lang": 0x0409, "product": "Contoso App", "version": "1.2.3.4"},
+            {"lang": 0x0804, "product": "Contoso App", "version": "1.2.3.4"},
+        ]
+
+        for complete_lang in _PACKAGE_LANGS:
+            with self.subTest(complete_lang=complete_lang):
+                data = _create_localized_package_pe(complete_lang)
+                pe = pefile.PE(data=data, fast_load=True)
+                original = pe.write()
+
+                report = pe.verify_resource_packages(
+                    _PACKAGE_RESOURCE_TYPE,
+                    name=_PACKAGE_RESOURCE_NAME,
+                    packages=record,
+                    source=f"fixture-complete-{complete_lang:04x}",
+                )
+
+                # The verification is read-only.
+                self.assertEqual(pe.write(), original)
+
+                self.assertEqual(
+                    report["source"], f"fixture-complete-{complete_lang:04x}"
+                )
+                self.assertEqual(report["resource_type"], _PACKAGE_RESOURCE_TYPE)
+                # The version strings visible in the PE are bound into the report.
+                self.assertEqual(report["version_info"]["ProductName"], "Contoso App")
+                self.assertEqual(report["version_info"]["FileVersion"], "1.2.3.4")
+
+                self.assertEqual(len(report["packages"]), 2)
+                by_lang = {package["lang"]: package for package in report["packages"]}
+                confirmed = by_lang[complete_lang]
+                broken = by_lang[
+                    next(lang for lang in _PACKAGE_LANGS if lang != complete_lang)
+                ]
+
+                # Identical version strings still get their own sources.
+                self.assertEqual(confirmed["version_string"], "1.2.3.4")
+                self.assertEqual(broken["version_string"], "1.2.3.4")
+                self.assertIsNot(confirmed["package"], broken["package"])
+                self.assertIsNot(confirmed["evidence"], broken["evidence"])
+
+                # The broken directory did not make the other language
+                # lose its evidence.
+                self.assertEqual(broken["status"], "error")
+                self.assertTrue(broken["errors"])
+                self.assertEqual(confirmed["status"], "confirmed")
+                self.assertEqual(confirmed["errors"], [])
+
+                evidence = confirmed["evidence"]
+                payload = _PACKAGE_PAYLOADS[complete_lang]
+                self.assertEqual(evidence["size"], len(payload))
+                self.assertEqual(evidence["sha256"], sha256(payload).hexdigest())
+
+                # The auditor can jump from the report, layer by layer,
+                # back to the confirmed material.
+                layers = evidence["layers"]
+                self.assertEqual(
+                    [layer["level"] for layer in layers], ["type", "name", "lang"]
+                )
+                type_name, type_target = struct.unpack_from(
+                    "<II", data, layers[0]["entry_offset"]
+                )
+                self.assertEqual(type_name, _PACKAGE_RESOURCE_TYPE)
+                self.assertEqual(layers[0]["id"], _PACKAGE_RESOURCE_TYPE)
+                self.assertTrue(type_target & 0x80000000)
+                name_name, name_target = struct.unpack_from(
+                    "<II", data, layers[1]["entry_offset"]
+                )
+                self.assertEqual(name_name, _PACKAGE_RESOURCE_NAME)
+                self.assertEqual(layers[1]["id"], _PACKAGE_RESOURCE_NAME)
+                self.assertTrue(name_target & 0x80000000)
+                lang_name, lang_target = struct.unpack_from(
+                    "<II", data, layers[2]["entry_offset"]
+                )
+                self.assertEqual(lang_name, complete_lang)
+                self.assertEqual(layers[2]["id"], complete_lang)
+                self.assertFalse(lang_target & 0x80000000)
+
+                # The language entry points at the very data entry the
+                # report recorded, which in turn points at the payload.
+                rsrc_file_offset = evidence["data_offset"] - (
+                    evidence["data_rva"] - _RSRC_VA
+                )
+                self.assertEqual(
+                    rsrc_file_offset + lang_target, evidence["data_entry_offset"]
+                )
+                data_rva, size, _, _ = struct.unpack_from(
+                    "<IIII", data, evidence["data_entry_offset"]
+                )
+                self.assertEqual(data_rva, evidence["data_rva"])
+                self.assertEqual(size, evidence["size"])
+                self.assertEqual(
+                    data[evidence["data_offset"] : evidence["data_offset"] + size],
+                    payload,
+                )
+
+    def test_verify_resource_missing_and_broken_paths(self):
+        """Missing types, names and languages are reported per resource."""
+
+        pe = pefile.PE(data=_create_localized_package_pe(0x0409))
+
+        confirmed = pe.verify_resource(100, name=1, lang=0x0409)
+        self.assertEqual(confirmed["status"], "confirmed")
+        self.assertEqual(confirmed["lang"], 0x0409)
+
+        # The registered language whose data entry is broken.
+        broken = pe.verify_resource(100, name=1, lang=0x0804)
+        self.assertEqual(broken["status"], "error")
+        self.assertTrue(broken["errors"])
+        # The layers resolved before the failure are kept for the auditor.
+        self.assertEqual(
+            [layer["level"] for layer in broken["evidence"]["layers"]],
+            ["type", "name", "lang"],
+        )
+        self.assertNotIn("sha256", broken["evidence"])
+
+        # A language with no entry at all.
+        missing_lang = pe.verify_resource(100, name=1, lang=0x0411)
+        self.assertEqual(missing_lang["status"], "missing")
+        self.assertIsNone(missing_lang["evidence"])
+
+        # Unknown type and unknown name.
+        self.assertEqual(
+            pe.verify_resource(0x0409, name=1, lang=0x0409)["status"], "missing"
+        )
+        self.assertEqual(
+            pe.verify_resource(100, name=2, lang=0x0409)["status"], "missing"
+        )
+
+    def test_verify_resource_version_type_by_name(self):
+        """Resource types can be addressed by their RESOURCE_TYPE name."""
+
+        pe = pefile.PE(data=_create_localized_package_pe(0x0409))
+
+        result = pe.verify_resource("RT_VERSION", name=1, lang=0x0409)
+        self.assertEqual(result["status"], "confirmed")
+        self.assertEqual(
+            result["evidence"]["sha256"],
+            sha256(_build_version_info(_PACKAGE_VERSION_STRINGS)).hexdigest(),
+        )
+
+        # A primary language id matches the full LANGID entry.
+        primary = pe.verify_resource(100, name=1, lang=0x09)
+        self.assertEqual(primary["status"], "confirmed")
+        self.assertEqual(primary["evidence"]["layers"][2]["id"], 0x0409)
+
 
 def _low_alignment_resource_pe():
     """Minimal PE32 with SectionAlignment == FileAlignment == 0x10 and a single
@@ -887,3 +1045,234 @@ def _create_pe(virtual_size, size_of_raw_data):
     # Fill raw section data with a sentinel byte so leakage is obvious
     section_data = b"\xCC" * size_of_raw_data
     return bytes(headers) + section_data
+
+
+_RSRC_VA = 0x1000
+_RSRC_RAW = 0x400
+
+_PACKAGE_RESOURCE_TYPE = 100
+_PACKAGE_RESOURCE_NAME = 1
+_PACKAGE_LANGS = (0x0409, 0x0804)  # en-US, zh-CN
+_PACKAGE_PAYLOADS = {
+    0x0409: b"ContosoApp-locale-en-US-1.2.3.4",
+    0x0804: b"ContosoApp-locale-zh-CN-1.2.3.4",
+}
+_PACKAGE_VERSION_STRINGS = {
+    "ProductName": "Contoso App",
+    "FileVersion": "1.2.3.4",
+    "ProductVersion": "1.2.3.4",
+}
+
+
+def _build_version_info(strings, lang=0x0409, codepage=0x04B0):
+    """Build a minimal, valid VS_VERSIONINFO blob with a single StringTable."""
+
+    def utf16z(text):
+        return text.encode("utf-16-le") + b"\x00\x00"
+
+    def pad4(blob):
+        return blob + b"\x00" * (-len(blob) % 4)
+
+    entries = b""
+    for key, value in strings.items():
+        entry = struct.pack("<HHH", 0, len(value) + 1, 1) + utf16z(key)
+        entry = pad4(entry) + utf16z(value)
+        entry = pad4(entry)
+        entries += struct.pack("<H", len(entry)) + entry[2:]
+
+    table = struct.pack("<HHH", 0, 0, 1) + utf16z(f"{lang:04x}{codepage:04x}")
+    table = pad4(table) + entries
+    table = struct.pack("<H", len(table)) + table[2:]
+
+    string_file_info = struct.pack("<HHH", 0, 0, 1) + utf16z("StringFileInfo")
+    string_file_info = pad4(string_file_info) + table
+    string_file_info = struct.pack("<H", len(string_file_info)) + string_file_info[2:]
+
+    fixed_file_info = struct.pack(
+        "<13I",
+        0xFEEF04BD,  # Signature
+        0x00010000,  # StrucVersion
+        0x00010002,  # FileVersionMS
+        0x00030004,  # FileVersionLS
+        0x00010002,  # ProductVersionMS
+        0x00030004,  # ProductVersionLS
+        0x3F,  # FileFlagsMask
+        0,  # FileFlags
+        4,  # FileOS
+        2,  # FileType
+        0,  # FileSubtype
+        0,  # FileDateMS
+        0,  # FileDateLS
+    )
+    blob = struct.pack("<HHH", 0, len(fixed_file_info), 0) + utf16z("VS_VERSION_INFO")
+    blob = pad4(blob)
+    blob += fixed_file_info + string_file_info
+    return struct.pack("<H", len(blob)) + blob[2:]
+
+
+class _ResourceDir:
+    """A resource directory node: a list of (id, child) entries."""
+
+    def __init__(self):
+        self.entries = []
+
+
+class _ResourceData:
+    """A resource leaf; a None payload produces a broken data entry."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+
+def _build_resource_section(root, section_va):
+    """Serialize a resource directory tree into .rsrc section bytes."""
+
+    offset = 0
+
+    def layout(dir_node):
+        nonlocal offset
+        dir_node.offset = offset
+        offset += 16 + 8 * len(dir_node.entries)
+        for _, child in dir_node.entries:
+            if isinstance(child, _ResourceDir):
+                layout(child)
+        for _, child in dir_node.entries:
+            if isinstance(child, _ResourceData):
+                child.entry_offset = offset
+                offset += 16
+        for _, child in dir_node.entries:
+            if isinstance(child, _ResourceData) and child.payload is not None:
+                child.data_offset = offset
+                offset += len(child.payload)
+                offset += -offset % 4
+
+    layout(root)
+
+    section = bytearray(offset)
+
+    def emit(dir_node):
+        struct.pack_into(
+            "<IIHHHH", section, dir_node.offset, 0, 0, 0, 0, 0, len(dir_node.entries)
+        )
+        for index, (entry_id, child) in enumerate(dir_node.entries):
+            entry_offset = dir_node.offset + 16 + 8 * index
+            if isinstance(child, _ResourceDir):
+                struct.pack_into(
+                    "<II", section, entry_offset, entry_id, 0x80000000 | child.offset
+                )
+            else:
+                struct.pack_into(
+                    "<II", section, entry_offset, entry_id, child.entry_offset
+                )
+        for _, child in dir_node.entries:
+            if isinstance(child, _ResourceDir):
+                emit(child)
+            elif child.payload is None:
+                # A broken data entry pointing outside the image.
+                struct.pack_into(
+                    "<IIII", section, child.entry_offset, 0x7FFF0000, 0x30, 0, 0
+                )
+            else:
+                struct.pack_into(
+                    "<IIII",
+                    section,
+                    child.entry_offset,
+                    section_va + child.data_offset,
+                    len(child.payload),
+                    0,
+                    0,
+                )
+                section[child.data_offset : child.data_offset + len(child.payload)] = (
+                    child.payload
+                )
+
+    emit(root)
+    return bytes(section)
+
+
+def _create_pe_with_resources(resource_section):
+    """Build a minimal PE32 whose only data directory is the .rsrc section."""
+
+    raw_size = (len(resource_section) + 0x1FF) & ~0x1FF
+    size_of_image = _RSRC_VA + ((len(resource_section) + 0xFFF) & ~0xFFF)
+
+    dos_header = bytearray(64)
+    dos_header[0:2] = b"MZ"
+    dos_header[60:64] = struct.pack("<I", 64)
+
+    file_header = (
+        struct.pack("<H", 0x014C)  # Machine = I386
+        + struct.pack("<H", 1)  # NumberOfSections
+        + struct.pack("<III", 0, 0, 0)
+        + struct.pack("<H", 0xE0)  # SizeOfOptionalHeader
+        + struct.pack("<H", 0x0102)  # Characteristics
+    )
+
+    opt_header = (
+        struct.pack("<H", 0x010B)  # Magic PE32
+        + struct.pack("<BB", 14, 0)  # LinkerVersion
+        + struct.pack("<III", 0, 0, 0)  # Sizes of code/data
+        + struct.pack("<I", _RSRC_VA)  # AddressOfEntryPoint
+        + struct.pack("<II", _RSRC_VA, 0)  # BaseOfCode, BaseOfData
+        + struct.pack("<I", 0x400000)  # ImageBase
+        + struct.pack("<II", 0x1000, 0x200)  # SectionAlignment, FileAlignment
+        + struct.pack("<HHHHHH", 6, 0, 0, 0, 6, 0)  # OS/Image/Subsystem versions
+        + struct.pack("<I", 0)  # Win32VersionValue
+        + struct.pack("<I", size_of_image)
+        + struct.pack("<I", 0x200)  # SizeOfHeaders
+        + struct.pack("<I", 0)  # CheckSum
+        + struct.pack("<H", 2)  # Subsystem GUI
+        + struct.pack("<H", 0x8100)  # DllCharacteristics
+        + struct.pack("<IIII", 0x100000, 0x1000, 0x100000, 0x1000)
+        + struct.pack("<II", 0, 16)  # LoaderFlags, NumberOfRvaAndSizes
+        + b"\x00" * 16  # DataDirectory[0..1]
+        + struct.pack("<II", _RSRC_VA, len(resource_section))  # resource directory
+        + b"\x00" * (128 - 24)  # DataDirectory[3..15]
+    )
+    assert len(opt_header) == 0xE0
+
+    section_header = (
+        b".rsrc\x00\x00\x00"  # Name
+        + struct.pack("<I", len(resource_section))  # VirtualSize
+        + struct.pack("<I", _RSRC_VA)  # VirtualAddress
+        + struct.pack("<I", raw_size)  # SizeOfRawData
+        + struct.pack("<I", _RSRC_RAW)  # PointerToRawData
+        + struct.pack("<IIHHI", 0, 0, 0, 0, 0x40000040)
+    )
+
+    headers = (
+        bytes(dos_header) + b"PE\x00\x00" + file_header + opt_header + section_header
+    )
+    return headers.ljust(_RSRC_RAW, b"\x00") + resource_section.ljust(raw_size, b"\x00")
+
+
+def _create_localized_package_pe(complete_lang):
+    """Build a synthetic PE keeping one localization package path complete.
+
+    The resource tree records two languages (en-US and zh-CN) under the same
+    custom type/name, plus an RT_VERSION resource whose product name and
+    version strings are the same ones the release record carries for both
+    languages. Only 'complete_lang' gets a working data entry; the other
+    language's data entry points outside the image.
+    """
+
+    version_lang_dir = _ResourceDir()
+    version_lang_dir.entries.append(
+        (0x0409, _ResourceData(_build_version_info(_PACKAGE_VERSION_STRINGS)))
+    )
+    version_name_dir = _ResourceDir()
+    version_name_dir.entries.append((1, version_lang_dir))
+
+    package_lang_dir = _ResourceDir()
+    for lang, payload in _PACKAGE_PAYLOADS.items():
+        package_lang_dir.entries.append(
+            (lang, _ResourceData(payload if lang == complete_lang else None))
+        )
+    package_name_dir = _ResourceDir()
+    package_name_dir.entries.append((_PACKAGE_RESOURCE_NAME, package_lang_dir))
+
+    root = _ResourceDir()
+    root.entries.append((16, version_name_dir))  # RT_VERSION
+    root.entries.append((_PACKAGE_RESOURCE_TYPE, package_name_dir))
+
+    return _create_pe_with_resources(_build_resource_section(root, _RSRC_VA))
