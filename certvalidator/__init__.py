@@ -6,6 +6,7 @@ from asn1crypto.x509 import Certificate
 
 from .context import ValidationContext
 from .errors import ValidationError, PathBuildingError, InvalidCertificateError
+from .revocation_plan import RevocationEvidencePlan, plan_revocation_evidence
 from .validate import validate_path, validate_tls_hostname, validate_usage
 from .version import __version__, __version_info__
 from ._errors import pretty_message
@@ -16,7 +17,9 @@ __all__ = [
     '__version__',
     '__version_info__',
     'CertificateValidator',
+    'RevocationEvidencePlan',
     'ValidationContext',
+    'plan_revocation_evidence',
 ]
 
 

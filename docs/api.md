@@ -200,3 +200,66 @@
 >
 > > A list of newly-fetched asn1crypto.x509.Certificate objects that were
 > > obtained from OCSP responses and CRLs
+
+### `plan_revocation_evidence()` function
+
+> Creates an offline plan for gathering revocation evidence for a batch of
+> certificates. The plan is based on the certificates already validated in
+> the validation context, the certificates and time periods covered by
+> cached CRLs and OCSP responses, and a disclosure policy controlling which
+> certificate identities may be disclosed to which issuing services. No
+> network requests are made.
+>
+> > ```python
+> > def plan_revocation_evidence(validation_context, certs, moment=None, disclosure_policy=None):
+> >     """
+> >     :param validation_context:
+> >         A certvalidator.context.ValidationContext object containing the
+> >         validated certificates and cached CRLs and OCSP responses
+> >
+> >     :param certs:
+> >         A list of asn1crypto.x509.Certificate objects to plan revocation
+> >         evidence gathering for
+> >
+> >     :param moment:
+> >         None or a datetime.datetime object with a tzinfo value to plan
+> >         for. If None, the moment of the validation context is used.
+> >
+> >     :param disclosure_policy:
+> >         None or a dict with keys being unicode strings of service URLs
+> >         (OCSP responder or CRL distribution point URLs), and values being
+> >         lists of certificate identities that may be disclosed to that
+> >         service. Each identity may be an asn1crypto.x509.Certificate
+> >         object, or the SHA-1 fingerprint of the certificate as a byte
+> >         string or unicode string of hex characters, optionally separated
+> >         into pairs by spaces or colons. If None, no certificate identity
+> >         may be disclosed to any service.
+> >
+> >     :return:
+> >         A certvalidator.revocation_plan.RevocationEvidencePlan object
+> >     """
+> > ```
+
+### `RevocationEvidencePlan()` class
+
+> ##### `.moment` attribute
+>
+> > A datetime.datetime object the plan was created for
+>
+> ##### `.covered` attribute
+>
+> > A list of asn1crypto.x509.Certificate objects that require no query -
+> > either already validated in the validation context, or covered by a
+> > cached CRL or OCSP response for the plan moment
+>
+> ##### `.to_fetch` attribute
+>
+> > A list of tuples of (asn1crypto.x509.Certificate, list of unicode
+> > strings) - certificates that require a query, along with the service
+> > URLs the disclosure policy permits the certificate identity to be
+> > disclosed to
+>
+> ##### `.suspended` attribute
+>
+> > A list of asn1crypto.x509.Certificate objects that require a query but
+> > currently have no permitted channel
