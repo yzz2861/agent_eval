@@ -153,6 +153,65 @@ using the ``basic_parse`` function:
                     if event == 'map_key' and value == 'name')
 
 
+Forensic observation evidence
+-----------------------------
+
+When only a few values must travel with a ticket,
+``extract_evidence`` performs one pass over the existing ``ijson.parse`` event
+stream and returns a JSON-safe evidence bundle.
+The rest of the source document stays in place.
+
+.. code-block:: python
+
+    import ijson
+
+    paths = [
+        {"id": "pressure", "path": "observations[1].value"},
+        {"id": "first", "path": "duplicate.sample#0"},
+        {"id": "second", "path": "duplicate.sample#1"},
+    ]
+    bundle = ijson.extract_evidence(open("source.json", "rb"), paths)
+
+Each observation carries the value, a typed path, the physical position of the
+value in its parent, and three checksums: the path commitment, the sibling
+order commitment, and the value commitment.
+Every observation also carries the root commitment of the complete upstream
+event stream.
+Sibling values are not copied into the bundle; only their rolling commitment
+is carried.
+
+Paths keep object keys and array indices distinct.
+``arr[1]`` is an array position, while a plain word such as ``item`` is always an
+object key, even when that key is literally named ``item``.
+A duplicate key is selected by its physical occurrence: ``dup.k#1`` is the
+second ``k`` member of object ``dup``.
+The canonical spelling is ``$["dup"]["k"]#1``.
+The object segment records ``kind``/``type`` as ``key``/``object`` and includes
+an occurrence; the array segment records ``index``/``array``.
+
+Verification needs the root commitment and paths from a source the caller
+already trusts, not the copies embedded in the evidence file:
+
+.. code-block:: python
+
+    result = ijson.verify_evidence(
+        open("source.json", "rb"),
+        bundle,
+        root=bundle.root,
+        selections=[item["path"] for item in paths],
+    )
+    assert result.ok
+
+Numeric equivalence is part of the contract.
+``numbers="decimal"`` (the default) treats ``1``, ``1.0``, and ``1e0`` as
+equivalent; ``"exact"`` keeps the parser representation distinct; and
+``"binary64"`` compares through IEEE-754 doubles.
+The convention is recorded in the bundle and re-evaluated during verification.
+The ``examples/forensic_evidence`` directory contains a small source document,
+an evidence bundle, and two tamper variants.
+Replacing a path violates the path commitment; swapping two duplicate-key
+positions violates the order commitment.
+
 Command line
 ------------
 

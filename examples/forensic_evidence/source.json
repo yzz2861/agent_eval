@@ -1,0 +1,11 @@
+{
+  "case_id": "CASE-2026-11-23",
+  "observations": [
+    {"kind": "temperature", "value": 21.5},
+    {"kind": "pressure", "value": 1.013e2}
+  ],
+  "duplicate": {
+    "sample": "first-reading",
+    "sample": "second-reading"
+  }
+}

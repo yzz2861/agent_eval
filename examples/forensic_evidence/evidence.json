@@ -1,0 +1,269 @@
+{
+  "format": "ijson-evidence/1",
+  "algorithm": "sha256",
+  "root": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+  "root_commitment": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+  "number_equivalence": "decimal",
+  "selection_commitment": "sha256:f7d65dc2d2ed1910b5fe9972dead4fdb4e15e12b8d8f632401ad4995a869f3d6",
+  "manifest": {
+    "format": "ijson-evidence/1",
+    "algorithm": "sha256",
+    "root": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+    "root_commitment": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+    "number_equivalence": "decimal",
+    "selection_commitment": "sha256:f7d65dc2d2ed1910b5fe9972dead4fdb4e15e12b8d8f632401ad4995a869f3d6"
+  },
+  "selections": [
+    {
+      "index": 0,
+      "id": "pressure",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "observations",
+          "occurrence": 0
+        },
+        {
+          "kind": "index",
+          "type": "array",
+          "index": 1
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "value",
+          "occurrence": 0
+        }
+      ],
+      "path_string": "$[\"observations\"][1][\"value\"]",
+      "found": true,
+      "path_commitment": "sha256:30ac017a2a27e625f52c83e805f09ec9d4fbb696619459c33804c062f2feb8d4"
+    },
+    {
+      "index": 1,
+      "id": "duplicate-first",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "sample",
+          "occurrence": 0
+        }
+      ],
+      "path_string": "$[\"duplicate\"][\"sample\"]",
+      "found": true,
+      "path_commitment": "sha256:48f6fe496686e5b4e5023ff7a41086563b948136311fb04075a67e855b7dba40"
+    },
+    {
+      "index": 2,
+      "id": "duplicate-second",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "sample",
+          "occurrence": 1
+        }
+      ],
+      "path_string": "$[\"duplicate\"][\"sample\"]#1",
+      "found": true,
+      "path_commitment": "sha256:19d1b528dd07a6388525eb9cd1a98e90fb089ea8296b6eace58d3f34ea3b449d"
+    }
+  ],
+  "observations": [
+    {
+      "selection_index": 0,
+      "id": "pressure",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "observations",
+          "occurrence": 0
+        },
+        {
+          "kind": "index",
+          "type": "array",
+          "index": 1
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "value",
+          "occurrence": 0
+        }
+      ],
+      "path_string": "$[\"observations\"][1][\"value\"]",
+      "parent_path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "observations",
+          "occurrence": 0
+        },
+        {
+          "kind": "index",
+          "type": "array",
+          "index": 1
+        }
+      ],
+      "position": {
+        "kind": "key",
+        "type": "object",
+        "key": "value",
+        "occurrence": 0,
+        "order": 1
+      },
+      "value": {
+        "type": "number",
+        "representation": "decimal",
+        "value": "101.3",
+        "canonical": "dec:1013E-1",
+        "equivalence": "decimal"
+      },
+      "wire_value": {
+        "type": "number",
+        "representation": "decimal",
+        "value": "101.3",
+        "canonical": "dec:1013E-1",
+        "equivalence": "decimal"
+      },
+      "found": true,
+      "path_commitment": "sha256:30ac017a2a27e625f52c83e805f09ec9d4fbb696619459c33804c062f2feb8d4",
+      "order_commitment": "sha256:3663d2f7b949ef8200d46fd2deefccbbee70f9546e13d2b8e73c02403e5c0bb1",
+      "value_commitment": "sha256:1e6ab2eea31af6515875b2ad87f51ee48567a8e82d4f7aa1b0f92bdc623979df",
+      "sibling_prefix_commitment": "sha256:bdd5a8d148a61a3f4b735d76b362fd3476beb8bf9e618775f862bb434a841bfc",
+      "root_commitment": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+      "number_equivalence": "decimal",
+      "commitments": {
+        "path": "sha256:30ac017a2a27e625f52c83e805f09ec9d4fbb696619459c33804c062f2feb8d4",
+        "order": "sha256:3663d2f7b949ef8200d46fd2deefccbbee70f9546e13d2b8e73c02403e5c0bb1",
+        "value": "sha256:1e6ab2eea31af6515875b2ad87f51ee48567a8e82d4f7aa1b0f92bdc623979df",
+        "root": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3"
+      }
+    },
+    {
+      "selection_index": 1,
+      "id": "duplicate-first",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "sample",
+          "occurrence": 0
+        }
+      ],
+      "path_string": "$[\"duplicate\"][\"sample\"]",
+      "parent_path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        }
+      ],
+      "position": {
+        "kind": "key",
+        "type": "object",
+        "key": "sample",
+        "occurrence": 0,
+        "order": 0
+      },
+      "value": {
+        "type": "string",
+        "value": "first-reading"
+      },
+      "wire_value": {
+        "type": "string",
+        "value": "first-reading"
+      },
+      "found": true,
+      "path_commitment": "sha256:48f6fe496686e5b4e5023ff7a41086563b948136311fb04075a67e855b7dba40",
+      "order_commitment": "sha256:ac960aad75afc6a3ce93bf8d8690c0e230440a347463c58fe3d5f6c1cc8a2fe1",
+      "value_commitment": "sha256:20f69d6da136f4eae4d997c70d664f98b67fe156a5e7484155c4d8779be65407",
+      "sibling_prefix_commitment": "sha256:70363e012ca54dcf8b7d5eb04c1ec940ce804732714e2d15fbb6ec6bf29fa75e",
+      "root_commitment": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+      "number_equivalence": "decimal",
+      "commitments": {
+        "path": "sha256:48f6fe496686e5b4e5023ff7a41086563b948136311fb04075a67e855b7dba40",
+        "order": "sha256:ac960aad75afc6a3ce93bf8d8690c0e230440a347463c58fe3d5f6c1cc8a2fe1",
+        "value": "sha256:20f69d6da136f4eae4d997c70d664f98b67fe156a5e7484155c4d8779be65407",
+        "root": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3"
+      }
+    },
+    {
+      "selection_index": 2,
+      "id": "duplicate-second",
+      "path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        },
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "sample",
+          "occurrence": 1
+        }
+      ],
+      "path_string": "$[\"duplicate\"][\"sample\"]#1",
+      "parent_path": [
+        {
+          "kind": "key",
+          "type": "object",
+          "key": "duplicate",
+          "occurrence": 0
+        }
+      ],
+      "position": {
+        "kind": "key",
+        "type": "object",
+        "key": "sample",
+        "occurrence": 1,
+        "order": 1
+      },
+      "value": {
+        "type": "string",
+        "value": "second-reading"
+      },
+      "wire_value": {
+        "type": "string",
+        "value": "second-reading"
+      },
+      "found": true,
+      "path_commitment": "sha256:19d1b528dd07a6388525eb9cd1a98e90fb089ea8296b6eace58d3f34ea3b449d",
+      "order_commitment": "sha256:43e94493afe873613804d7048eea506a406387b8270a7f7cedb87aaed2c406ac",
+      "value_commitment": "sha256:2d86f4de7fbb89316e42bbf621f0be38a03f1dfce24876abdad732b7b45df3d4",
+      "sibling_prefix_commitment": "sha256:498569aaa2cf96267734de76dddd98bd633c88db6d9bfad3bc59e8d68d5adb88",
+      "root_commitment": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3",
+      "number_equivalence": "decimal",
+      "commitments": {
+        "path": "sha256:19d1b528dd07a6388525eb9cd1a98e90fb089ea8296b6eace58d3f34ea3b449d",
+        "order": "sha256:43e94493afe873613804d7048eea506a406387b8270a7f7cedb87aaed2c406ac",
+        "value": "sha256:2d86f4de7fbb89316e42bbf621f0be38a03f1dfce24876abdad732b7b45df3d4",
+        "root": "sha256:a87f47cb351d6e0b1dcc7adcae1e6d8bdf7a35fe406d040103ab98fb64e850b3"
+      }
+    }
+  ]
+}

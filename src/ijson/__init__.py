@@ -58,3 +58,37 @@ items_async = backend.items_async
 kvitems_async = backend.kvitems_async
 backend_name = backend.backend_name
 backend = backend.backend
+
+from ijson.evidence import (
+    EvidenceBundle,
+    EvidenceError,
+    EvidenceVerificationError,
+    IndexSegment,
+    KeySegment,
+    Observation,
+    Selection,
+    SelectionEvidence,
+    SelectionNotFound,
+    VerificationResult,
+    Violation,
+    canonical_number,
+    check_evidence,
+    extract,
+    extract_evidence,
+    extract_observed,
+    extract_observations,
+    format_path,
+    make_evidence,
+    numbers_equal,
+    parse_path,
+    path_commitment,
+    path_to_dicts,
+    root_commitment,
+    selection_commitment,
+    verify,
+    verify_evidence,
+    verify_observed,
+    verify_observations,
+    verify_observation,
+    value_commitment,
+)
