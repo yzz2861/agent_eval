@@ -67,6 +67,29 @@ for alias, sk in ks.secret_keys.items():
 ```
 
 
+Preflight certificate de-duplication
+------------------------------------
+
+When several keystores share public certificates, a migration plan may store
+each certificate object once and keep per-entry references.  Use
+``jks.cert_dedup`` to verify that both the certificate objects and the exact
+chain positions (including order and repeated occurrences) can still be
+reconstructed.  A set of certificates is enough for the object check, but not
+for slot recovery.
+
+```python
+from jks.cert_dedup import DedupPlan, preflight_certificate_dedup
+
+report = preflight_certificate_dedup(visible_chains, DedupPlan(
+    certificates={"pub-a": cert_a, "pub-b": cert_b},
+    chains={"mykey": ["pub-a", "pub-b", "pub-a"]},
+))
+print(report.objects_ok, report.slots_ok)
+```
+
+The command-line replay is available with ``python -m jks.cert_dedup --demo``.
+
+
 Transforming an encrypted JKS/JCEKS file into an OpenSSL context:
 ```python
 import OpenSSL

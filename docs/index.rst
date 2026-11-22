@@ -47,6 +47,7 @@ Contents:
    concepts
    jks
    bks
+   cert_dedup
    exceptions
 
 
