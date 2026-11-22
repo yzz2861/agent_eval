@@ -37,8 +37,12 @@ from signxml import (
     SignatureConstructionMethod,
     SignatureMethod,
     SignatureReference,
+    ReceiptPolicy,
+    ReceiptRole,
+    content_digest,
     SigningRequest,
     VerifyResult,
+    XMLReceiptVerifier,
     XMLSignatureProcessor,
     XMLSigner,
     XMLVerifier,
@@ -55,6 +59,9 @@ from signxml.xades import (
     XAdESVerifier,
     XAdESVerifyResult,
 )
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import receipt_samples  # noqa: E402
 
 
 class XMLSignerWithSHA1(XMLSigner):
@@ -1937,6 +1944,220 @@ class TestXAdES(unittest.TestCase, LoadExampleKeys):
                     break
             else:
                 XAdESVerifier().verify(doc, **kwargs)
+
+
+class TestReceiptVerifier(unittest.TestCase):
+    @staticmethod
+    def _policy(*, seats=None, scopes=None, kinds=None, required=("revision",)):
+        return ReceiptPolicy(
+            roles=(
+                ReceiptRole(
+                    "reviewer",
+                    seats or {"CN=reviewer-a", "CN=reviewer-b"},
+                    scopes=scopes or {"legal-review"},
+                    document_kinds=kinds,
+                ),
+            ),
+            required_roles={kind: ("reviewer",) for kind in required},
+        )
+
+    @staticmethod
+    def _codes(items):
+        return {item.code for item in items}
+
+    def _build_revision_receipt(
+        self, *, receipt_scope="legal-review", reviewer_name="reviewer-a", document_scope="legal-review"
+    ):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        reviewer = receipt_samples.make_party(reviewer_name)
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        revision, _ = receipt_samples._add_document(
+            "revision",
+            "revision-a",
+            "Revision A",
+            predecessor=original,
+            sequence=2,
+            scope=document_scope,
+        )
+        receipt = receipt_samples._add_receipt("receipt-a", revision, role="reviewer", scope=receipt_scope)
+        return [
+            receipt_samples._sign_and_verify(original, author),
+            receipt_samples._sign_and_verify(revision, editor),
+            receipt_samples._sign_and_verify(receipt, reviewer),
+        ]
+
+    def test_parallel_revisions_remain_distinct_and_input_order_is_not_evidence(self):
+        samples = receipt_samples.build_parallel_revision_samples()
+        verifier = XMLReceiptVerifier(samples.policy)
+        forward = verifier.verify(samples.results)
+        backward = verifier.verify(tuple(reversed(samples.results)))
+
+        self.assertTrue(forward.accepted)
+        self.assertEqual(forward.accepted_documents, ("original-1", "revision-a", "revision-b"))
+        self.assertEqual(forward.as_dict(), backward.as_dict())
+        self.assertEqual(forward.receipt("receipt-a").target_object_id, "revision-a")
+        self.assertEqual(forward.receipt("receipt-b").target_object_id, "revision-b")
+        self.assertEqual(forward.document("revision-a").receipts, ("receipt-a",))
+        self.assertEqual(forward.document("revision-b").receipts, ("receipt-b",))
+
+    def test_exchanged_review_material_leaves_the_bound_revision_signable(self):
+        samples = receipt_samples.build_parallel_revision_samples()
+        result = XMLReceiptVerifier(samples.policy).verify(
+            (samples.original, samples.revision_a, samples.revision_b, samples.receipt_a)
+        )
+
+        self.assertTrue(result.document("revision-a").accepted)
+        self.assertFalse(result.document("revision-b").accepted)
+        self.assertIn("revision-a", result.accepted_documents)
+        self.assertNotIn("revision-b", result.accepted_documents)
+        report = result.format()
+        self.assertIn("receipt-a -> revision-a", report)
+        self.assertIn("missing_receipt", report)
+
+    def test_receipt_for_an_absent_revision_is_not_silently_reassigned(self):
+        samples = receipt_samples.build_parallel_revision_samples()
+        result = XMLReceiptVerifier(samples.policy).verify((samples.original, samples.revision_b, samples.receipt_a))
+
+        receipt = result.receipt("receipt-a")
+        self.assertFalse(receipt.accepted)
+        self.assertIn("receipt_unknown_target", self._codes(receipt.issues))
+        self.assertFalse(result.document("revision-b").accepted)
+        self.assertIn("missing_receipt", self._codes(result.document("revision-b").issues))
+
+    def test_missing_predecessor_is_reported_as_its_own_category(self):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        revision, _ = receipt_samples._add_document("revision", "revision-a", "Revision A")
+        result = XMLReceiptVerifier(self._policy(required=())).verify(
+            (
+                receipt_samples._sign_and_verify(original, author),
+                receipt_samples._sign_and_verify(revision, editor),
+            )
+        )
+
+        self.assertFalse(result.document("revision-a").accepted)
+        self.assertIn("missing_predecessor", self._codes(result.document("revision-a").issues))
+        self.assertIn("missing_predecessor", self._codes(result.issues))
+
+    def test_dangling_predecessor_reference_is_missing_predecessor(self):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        revision, predecessor = receipt_samples._add_document(
+            "revision", "revision-a", "Revision A", predecessor=original, sequence=2
+        )
+        predecessor.set("Ref", "original-that-was-not-supplied")
+        result = XMLReceiptVerifier(self._policy(required=())).verify(
+            (
+                receipt_samples._sign_and_verify(original, author),
+                receipt_samples._sign_and_verify(revision, editor),
+            )
+        )
+
+        self.assertFalse(result.document("revision-a").accepted)
+        self.assertIn("missing_predecessor", self._codes(result.document("revision-a").issues))
+
+    def test_contradictory_sequence_is_out_of_order_not_missing_predecessor(self):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original", sequence=1)
+        first, _ = receipt_samples._add_document(
+            "revision", "revision-a", "Revision A", predecessor=original, sequence=2
+        )
+        second, _ = receipt_samples._add_document("revision", "revision-b", "Revision B", predecessor=first, sequence=2)
+        result = XMLReceiptVerifier(self._policy(required=())).verify(
+            (
+                receipt_samples._sign_and_verify(original, author),
+                receipt_samples._sign_and_verify(first, editor),
+                receipt_samples._sign_and_verify(second, editor),
+            )
+        )
+
+        codes = self._codes(result.document("revision-b").issues)
+        self.assertIn("out_of_order", codes)
+        self.assertNotIn("missing_predecessor", codes)
+        self.assertIn("out_of_order", self._codes(result.issues))
+
+    def test_receipt_signer_must_hold_the_declared_role(self):
+        results = self._build_revision_receipt(reviewer_name="mallory")
+        result = XMLReceiptVerifier(self._policy(seats={"CN=reviewer-a"})).verify(results)
+
+        receipt = result.receipt("receipt-a")
+        self.assertFalse(receipt.accepted)
+        self.assertIn("role_mismatch", self._codes(receipt.issues))
+        self.assertFalse(result.document("revision-a").accepted)
+        self.assertIn("role_mismatch", self._codes(result.document("revision-a").issues))
+        self.assertIn("role_mismatch", self._codes(result.issues))
+
+    def test_receipt_scope_must_be_applicable_to_the_role_and_target(self):
+        results = self._build_revision_receipt(receipt_scope="finance")
+        result = XMLReceiptVerifier(self._policy()).verify(results)
+
+        receipt = result.receipt("receipt-a")
+        self.assertFalse(receipt.accepted)
+        self.assertIn("scope_mismatch", self._codes(receipt.issues))
+        self.assertIn("scope_mismatch", self._codes(result.issues))
+        self.assertFalse(result.document("revision-a").accepted)
+
+    def test_receipt_digest_prevents_reassigning_it_to_the_other_revision(self):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        reviewer = receipt_samples.make_party("reviewer-a")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        revision, _ = receipt_samples._add_document(
+            "revision", "revision-a", "Revision A", predecessor=original, sequence=2, scope="legal-review"
+        )
+        receipt = receipt_samples._element("Receipt", Id="receipt-a")
+        etree.SubElement(receipt, receipt_samples._q("Decision")).text = "Approved"
+        etree.SubElement(
+            receipt,
+            receipt_samples._q("ReceiptDeclaration"),
+            Role="reviewer",
+            Scope="legal-review",
+            Target="revision-a",
+            DigestMethod="sha256",
+            Digest=content_digest(original, "sha256"),
+        )
+        result = XMLReceiptVerifier(self._policy()).verify(
+            (
+                receipt_samples._sign_and_verify(original, author),
+                receipt_samples._sign_and_verify(revision, editor),
+                receipt_samples._sign_and_verify(receipt, reviewer),
+            )
+        )
+
+        self.assertFalse(result.receipt("receipt-a").accepted)
+        self.assertIn("receipt_target_mismatch", self._codes(result.receipt("receipt-a").issues))
+
+    def test_content_declaration_digest_is_checked_against_the_signed_content(self):
+        author = receipt_samples.make_party("legal-author")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        original.find(".//" + receipt_samples._q("Body")).text = "Tampered after commitment"
+        result = XMLReceiptVerifier(self._policy(required=())).verify(
+            (receipt_samples._sign_and_verify(original, author),)
+        )
+
+        self.assertFalse(result.document("original-1").accepted)
+        self.assertIn("commitment_mismatch", self._codes(result.document("original-1").issues))
+
+    def test_predecessor_digest_detects_a_changed_original(self):
+        author = receipt_samples.make_party("legal-author")
+        editor = receipt_samples.make_party("editor-a")
+        original, _ = receipt_samples._add_document("original", "original-1", "Original")
+        revision, _ = receipt_samples._add_document(
+            "revision", "revision-a", "Revision A", predecessor=original, sequence=2
+        )
+        original.find(".//" + receipt_samples._q("Body")).text = "Changed before signing"
+        result = XMLReceiptVerifier(self._policy(required=())).verify(
+            (
+                receipt_samples._sign_and_verify(original, author),
+                receipt_samples._sign_and_verify(revision, editor),
+            )
+        )
+
+        self.assertIn("predecessor_mismatch", self._codes(result.document("revision-a").issues))
 
 
 if __name__ == "__main__":

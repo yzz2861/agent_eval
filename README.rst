@@ -256,6 +256,67 @@ references for more information:
 * `XML Signatures with Python ElementTree <https://technotes.shemyak.com/posts/xml-signatures-with-python-elementtree>`_
 
 
+Offline reconciliation of originals, revisions, and review receipts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Verifying an XML signature proves that a key signed a byte sequence. It does not prove that a revision names the
+right predecessor, or that a review receipt was filed next to the revision it actually approves. Use
+:class:`signxml.XMLReceiptVerifier` after normal verification to reconcile a set of already-verified objects:
+
+.. code-block:: python
+
+    from signxml import ReceiptPolicy, ReceiptRole, XMLReceiptVerifier
+
+    policy = ReceiptPolicy(
+        roles=(
+            ReceiptRole(
+                "reviewer",
+                {"CN=reviewer-a", "CN=reviewer-b"},
+                scopes={"legal-review"},
+                document_kinds={"revision"},
+            ),
+        ),
+        required_roles={"revision": ("reviewer",)},
+    )
+    result = XMLReceiptVerifier(policy).verify(verified_results)
+    print(result.format())          # Signable: original-1, revision-a, revision-b
+    result.raise_for_rejection()
+
+The verifier consumes :class:`signxml.VerifyResult` objects returned by :meth:`signxml.XMLVerifier.verify`; it does
+not verify signatures or make a new trust decision. The signed objects use declarations like these::
+
+    <Original Id="original-1">
+      <Body>...</Body>
+      <ContentDeclaration Kind="original" Object="original-1"
+                          DigestMethod="sha256" Digest="..."/>
+    </Original>
+
+    <Revision Id="revision-a">
+      <Body>...</Body>
+      <ContentDeclaration Kind="revision" Object="revision-a"
+                          DigestMethod="sha256" Digest="...">
+        <Predecessor Ref="original-1" DigestMethod="sha256" Digest="..."/>
+      </ContentDeclaration>
+    </Revision>
+
+    <Receipt Id="receipt-a">
+      <Decision>Approved</Decision>
+      <ReceiptDeclaration Role="reviewer" Scope="legal-review"
+                          Target="revision-a" DigestMethod="sha256" Digest="..."/>
+    </Receipt>
+
+``Digest`` on a document is the digest of the document content with declarations and XMLDSig signatures removed.
+``Digest`` on a receipt is the digest of the approved target. All of these values are inside the signed object, so
+changing a predecessor, target, role, scope, or digest invalidates the XML signature. The check follows signed
+identifiers rather than sibling or input order, which means one original may have several parallel revisions, each
+reviewed by a different person.
+
+:class:`signxml.ReceiptVerificationResult` provides per-document status and stable diagnostic codes. In particular,
+``missing_predecessor``, ``out_of_order``, and ``role_mismatch`` are reported separately, while
+``receipt_target_mismatch`` identifies a receipt that was filed with the wrong revision. ``accepted_documents`` (also
+available as ``signable_object_ids``) lists the objects that remain signable, and ``format()`` prints both the
+document status and the target that every receipt actually approves. The parallel-revision example and an exchanged
+review-material scenario are in ``test/receipt_samples.py``.
+
 XAdES signatures
 ~~~~~~~~~~~~~~~~
 `XAdES ("XML Advanced Electronic Signatures") <https://en.wikipedia.org/wiki/XAdES>`_ is a standard for attaching

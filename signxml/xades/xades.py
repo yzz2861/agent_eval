@@ -90,7 +90,7 @@ class XAdESVerifyResult(VerifyResult):
     A subclass of :class:`signxml.VerifyResult`. See VerifyResult for attribute semantics not covered here.
     """
 
-    signed_properties: _Element
+    signed_properties: _Element | None = None
     "The XAdES SignedProperties element that was verified as signed by the signature"
 
 
@@ -465,6 +465,7 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
                     signed_xml=verify_result.signed_xml,
                     signature_xml=verify_result.signature_xml,
                     signature_key=verify_result.signature_key,
+                    signing_certificate=verify_result.signing_certificate,
                     signed_properties=self._verify_signed_properties(verify_result),
                 )
                 break

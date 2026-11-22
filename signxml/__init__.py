@@ -7,6 +7,22 @@ from .algorithms import CanonicalizationMethod, DigestAlgorithm, SignatureConstr
 from .exceptions import InvalidCertificate, InvalidDigest, InvalidInput, InvalidSignature
 from .external import ExternalSigningKey, SigningRequest
 from .processor import XMLSignatureProcessor
+from .receipts import (
+    DocumentStatus,
+    ReceiptCheckResult,
+    ReceiptIssue,
+    ReceiptPolicy,
+    ReceiptRejected,
+    ReceiptResult,
+    ReceiptRole,
+    ReceiptStatus,
+    ReceiptVerificationResult,
+    ReceiptVerifier,
+    XMLReceiptVerifier,
+    content_digest,
+    signer_identity,
+    verify_receipts,
+)
 from .signer import SignatureReference, XMLSigner
 from .util import namespaces
 from .verifier import SignatureConfiguration, VerifyResult, XMLVerifier

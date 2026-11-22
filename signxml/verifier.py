@@ -132,6 +132,9 @@ class VerifyResult:
     signature_key: bytes
     "The cryptographic key that was used to verify the signature, in PEM format (for asymmetric keys) or raw secret bytes (for HMAC keys)"
 
+    signing_certificate: x509.Certificate | None = None
+    "The X.509 certificate whose public key verified the signature, when X.509 verification was used"
+
 
 class XMLVerifier(XMLSignatureProcessor):
     """
@@ -557,6 +560,7 @@ class XMLVerifier(XMLSignatureProcessor):
         signed_info_c14n = self._c14n(
             signed_info, algorithm=c14n_algorithm, inclusive_ns_prefixes=inclusive_ns_prefixes
         )
+        signing_cert: x509.Certificate | None = None
 
         if x509_data is not None or self.config.require_x509:
             if self.x509_cert is None:
@@ -661,7 +665,14 @@ class XMLVerifier(XMLSignatureProcessor):
             root_to_verify = self._fromstring(self._tostring(root)) if len(references) > 1 else root
             verify_results.append(
                 self._verify_reference(
-                    reference, idx, root_to_verify, uri_resolver, c14n_algorithm, signature, key_used
+                    reference,
+                    idx,
+                    root_to_verify,
+                    uri_resolver,
+                    c14n_algorithm,
+                    signature,
+                    key_used,
+                    signing_certificate=signing_cert,
                 )
             )
 
@@ -684,6 +695,7 @@ class XMLVerifier(XMLSignatureProcessor):
         c14n_algorithm,
         signature,
         signature_key_used,
+        signing_certificate=None,
     ):
         signature_ref = self._get_signature(root)
         transforms = self._find(reference, "Transforms", require=False)
@@ -720,7 +732,13 @@ class XMLVerifier(XMLSignatureProcessor):
             signature_key = signature_key_used
         else:
             signature_key = signature_key_used.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        return VerifyResult(payload_c14n, payload_c14n_xml, signature, signature_key=signature_key)
+        return VerifyResult(
+            payload_c14n,
+            payload_c14n_xml,
+            signature,
+            signature_key=signature_key,
+            signing_certificate=signing_certificate,
+        )
 
     def validate_schema(self, signature):
         last_exception = None
