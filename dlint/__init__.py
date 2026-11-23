@@ -5,6 +5,7 @@ from __future__ import (
     unicode_literals,
 )
 
+from . import audit  # noqa F401
 from . import linters  # noqa F401
 from . import multi  # noqa F401
 from . import namespace  # noqa F401
