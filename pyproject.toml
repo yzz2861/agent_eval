@@ -62,6 +62,8 @@ evtx_info = "evtx_scripts.evtx_info:main"
 evtx_record_structure = "evtx_scripts.evtx_record_structure:main"
 evtx_structure = "evtx_scripts.evtx_structure:main"
 evtx_templates = "evtx_scripts.evtx_templates:main"
+evtx_review_coverage = "evtx_scripts.evtx_review_coverage:main"
+evtx_coverage = "evtx_scripts.evtx_review_coverage:main"
 
 [tool.black]
 line-length = 120

@@ -41,6 +41,43 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 
 Working with python-evtx is really easy!
 
+Review coverage ledger
+----------------------
+When several overlapping EVTX exports are reviewed by different people, use
+`ReviewCoverageLedger` to reconcile the receipts against the actual record
+locations.  The ledger keys coverage by evidence scope and physical record
+location, so overlapping evidence or replayed receipts do not inflate the
+reviewed count.  Time coverage is reported as the union of reviewed intervals,
+not the sum of overlapping ranges.
+
+```python
+from Evtx.ReviewCoverage import ReviewCoverageLedger
+
+ledger = ReviewCoverageLedger()
+ledger.add_evidence("evidence/system.evtx", evidence_id="EX-001")
+ledger.add_receipts("evidence/receipts.json")
+
+print(ledger.summary["status"])          # unreviewed / partial / handover_ready
+print(ledger.summary["reviewed_records"])
+print(ledger.trace_receipt("R-17"))      # every receipt is traceable
+```
+
+Records whose XML cannot be decoded remain in `unreviewed` with a
+`record_content_error` reason.  Legacy receipt fields are reused only when the
+receipt's evidence, record, timestamp, and content bindings still match the
+current record.  The same report is available from the read-only reader:
+
+```python
+with evtx.Evtx("evidence/system.evtx") as log:
+    ledger = log.review_coverage(receipts)
+```
+
+The `evtx_review_coverage` command emits the ledger as JSON:
+
+```console
+evtx_review_coverage evidence/*.evtx --receipts evidence/receipts.json
+```
+
 
 Installation
 ------------
@@ -71,4 +108,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-

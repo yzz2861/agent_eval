@@ -128,6 +128,46 @@ class Evtx(object):
     def get_file_header(self):
         return self._fh
 
+    @ensure_contexted
+    def review_coverage(self, receipts=None, evidence_id=None, **kwargs):
+        """
+        Build a review-coverage ledger from this read-only EVTX view.
+
+        The ledger records each record's physical location and reconciles the
+        supplied review receipts against those locations.  Overlapping
+        receipts and overlapping evidence files therefore do not inflate the
+        reviewed count.
+
+        @type receipts:  mapping, sequence, or path
+        @param receipts: One or more receipt documents.  Plain dictionaries,
+          JSON strings, and JSON file paths are accepted.
+        @type evidence_id:  str
+        @param evidence_id: Optional exhibit/scope identifier.  Defaults to the
+          path used to open this EVTX file.
+        @rtype: Evtx.ReviewCoverage.ReviewCoverageLedger
+        @return: A ledger that can be summarized, traced, or serialized.
+        """
+        from .ReviewCoverage import ReviewCoverageLedger
+
+        ledger = ReviewCoverageLedger(**kwargs)
+        ledger.add_evidence(self, evidence_id=evidence_id or self._filename)
+        if receipts is not None:
+            ledger.add_receipts(receipts)
+        return ledger
+
+    @ensure_contexted
+    def coverage_records(self, receipts=None, evidence_id=None, **kwargs):
+        """Alias for :meth:`review_coverage` provided for readable call sites."""
+        return self.review_coverage(receipts=receipts, evidence_id=evidence_id, **kwargs)
+
+    @ensure_contexted
+    def coverage_ledger(self, receipts=None, evidence_id=None, **kwargs):
+        return self.review_coverage(receipts=receipts, evidence_id=evidence_id, **kwargs)
+
+    @ensure_contexted
+    def review_ledger(self, receipts=None, evidence_id=None, **kwargs):
+        return self.review_coverage(receipts=receipts, evidence_id=evidence_id, **kwargs)
+
 
 class FileHeader(Block):
     def __init__(self, buf, offset):
@@ -260,6 +300,27 @@ class FileHeader(Block):
                 if record.record_num() == record_num:
                     return record
         return None
+
+    def review_coverage(self, receipts=None, evidence_id=None, **kwargs):
+        """
+        Build a review-coverage ledger from this file header's record view.
+
+        This is useful when the caller already has an mmap and a FileHeader,
+        rather than a live :class:`Evtx` context manager.
+        """
+        from .ReviewCoverage import ReviewCoverageLedger
+
+        ledger = ReviewCoverageLedger(**kwargs)
+        ledger.add_evidence(self, evidence_id=evidence_id)
+        if receipts is not None:
+            ledger.add_receipts(receipts)
+        return ledger
+
+    def coverage_ledger(self, receipts=None, evidence_id=None, **kwargs):
+        return self.review_coverage(receipts=receipts, evidence_id=evidence_id, **kwargs)
+
+    def review_ledger(self, receipts=None, evidence_id=None, **kwargs):
+        return self.review_coverage(receipts=receipts, evidence_id=evidence_id, **kwargs)
 
 
 class Template(object):
