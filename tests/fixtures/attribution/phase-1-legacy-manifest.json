@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "phase": "legacy",
+  "as_of": "2026-11-20T00:00:00Z",
+  "artifacts": [
+    {
+      "id": "product-old-1.0.0",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "stop_ship_at": "2026-12-31T00:00:00Z",
+      "components": ["shared-runtime"]
+    },
+    {
+      "id": "product-new-2.0.0",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "components": ["shared-runtime"]
+    }
+  ],
+  "components": [
+    {
+      "id": "shared-runtime",
+      "paths": ["src/shared/runtime.py"],
+      "revision": "git:aaaaaaa",
+      "maintainer": "team-platform",
+      "legacy_owner": "team-legacy"
+    },
+    {
+      "id": "legacy-crypto",
+      "paths": ["legacy/plugin/crypto.py"],
+      "revision": "git:bbbbbbb",
+      "maintainer": "team-legacy"
+    }
+  ],
+  "legacy_attribution": [
+    {
+      "filename": "legacy/plugin/crypto.py",
+      "artifact": "product-old-1.0.0",
+      "owner": "team-legacy",
+      "proof": {"ticket": "RISK-17"}
+    }
+  ]
+}

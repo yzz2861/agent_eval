@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-11-20T12:00:00Z",
+  "errors": [],
+  "results": [
+    {
+      "filename": "/build/product-old/src/shared/runtime.py",
+      "test_id": "B101",
+      "test_name": "assert_used",
+      "line_number": 42,
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "Use of assert detected.",
+      "issue_cwe": {"id": 703, "link": "https://cwe.mitre.org/data/definitions/703.html"}
+    },
+    {
+      "filename": "/build/product-new/src/shared/runtime.py",
+      "test_id": "B101",
+      "test_name": "assert_used",
+      "line_number": 42,
+      "issue_severity": "HIGH",
+      "issue_confidence": "HIGH",
+      "issue_text": "Use of assert detected.",
+      "issue_cwe": {"id": 703, "link": "https://cwe.mitre.org/data/definitions/703.html"}
+    },
+    {
+      "filename": "legacy/plugin/crypto.py",
+      "test_id": "B303",
+      "test_name": "hashlib",
+      "line_number": 9,
+      "issue_severity": "MEDIUM",
+      "issue_confidence": "HIGH",
+      "issue_text": "Use of insecure MD4 hash function.",
+      "issue_cwe": {"id": 327, "link": "https://cwe.mitre.org/data/definitions/327.html"}
+    },
+    {
+      "filename": "legacy/plugin/crypto_utils.py",
+      "test_id": "B324",
+      "test_name": "hashlib_new_insecure_functions",
+      "line_number": 15,
+      "issue_severity": "LOW",
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Use of weak SHA1 hash for security.",
+      "issue_cwe": {"id": 327, "link": "https://cwe.mitre.org/data/definitions/327.html"}
+    }
+  ]
+}
