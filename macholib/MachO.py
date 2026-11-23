@@ -24,6 +24,7 @@ from .mach_o import (
     LC_SEGMENT,
     LC_SEGMENT_64,
     LC_SYMTAB,
+    LC_UUID,
     MH_CIGAM,
     MH_CIGAM_64,
     MH_FILETYPE_SHORTNAMES,
@@ -474,6 +475,24 @@ class MachOHeader(object):
             if lc.cmd == LC_DYSYMTAB:
                 return cmd
         return None
+
+    def getUUIDCommands(self):
+        """Return every LC_UUID command in this header."""
+        return [cmd for lc, cmd, _data in self.commands if lc.cmd == LC_UUID]
+
+    def getUUIDCommand(self):
+        """Return the LC_UUID command, or None when there is not exactly one."""
+        commands = self.getUUIDCommands()
+        if len(commands) != 1:
+            return None
+        return commands[0]
+
+    def getUUID(self):
+        """Return the raw 16 byte UUID, or None when it is not unambiguous."""
+        command = self.getUUIDCommand()
+        if command is None:
+            return None
+        return command.uuid
 
     def get_filetype_shortname(self, filetype):
         if filetype in MH_FILETYPE_SHORTNAMES:

@@ -1,6 +1,15 @@
 Release history
 ===============
 
+Unreleased
+----------
+
+* Add ``macholib.slice_pairing``, a read-only LC_UUID/CPU pairing audit for
+  universal Mach-O files, per-architecture slices and standalone debug
+  files.  Every load command keeps its file, slice, command index and byte
+  offsets.  Add the ``macho_slice_audit`` console script and the
+  ``MachOHeader.getUUID()`` helpers.
+
 macholib 1.16.4
 ---------------
 
