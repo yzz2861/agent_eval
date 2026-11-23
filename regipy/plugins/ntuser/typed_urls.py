@@ -21,10 +21,21 @@ class TypedUrlsPlugin(Plugin):
         try:
             subkey = self.registry_hive.get_key(TYPED_URLS_KEY_PATH)
         except RegistryKeyNotFoundException as ex:
+            # The absence of the TypedURLs key is itself evidence: a
+            # supplementary hive that later adds this key must invalidate the
+            # "no typed URLs" conclusion.
+            self.evidence_key_missing(TYPED_URLS_KEY_PATH)
             logger.error(f"Could not find {self.NAME} plugin data at: {TYPED_URLS_KEY_PATH}: {ex}")
             return None
 
+        key_evidence = self.evidence_key_read(TYPED_URLS_KEY_PATH)
+        url_entries = []
+        for value in subkey.iter_values(as_json=self.as_json):
+            value_evidence = self.evidence_value_read(TYPED_URLS_KEY_PATH, value.name)
+            url_entries.append({underscore(value.name): value.value})
+            self.bind_evidence(len(url_entries) - 1, [key_evidence, value_evidence])
+
         self.entries = {
             "last_write": convert_wintime(subkey.header.last_modified, as_json=self.as_json),
-            "entries": [{underscore(x.name): x.value} for x in subkey.iter_values(as_json=self.as_json)],
+            "entries": url_entries,
         }

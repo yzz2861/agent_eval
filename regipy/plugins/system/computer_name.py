@@ -19,15 +19,21 @@ class ComputerNamePlugin(Plugin):
         logger.debug("Started Computer Name Plugin...")
 
         for subkey_path in self.registry_hive.get_control_sets(COMPUTER_NAME_PATH):
-            subkey = self.registry_hive.get_key(subkey_path)
-
-            try:
-                self.entries.append(
-                    {
-                        "name": subkey.get_value("ComputerName", as_json=self.as_json),
-                        "timestamp": convert_wintime(subkey.header.last_modified, as_json=self.as_json),
-                    }
-                )
-            except RegistryValueNotFoundException:
-                logger.exception("Could not get computer name")
-                continue
+            with self.evidence_scope() as scope:
+                subkey = self.registry_hive.get_key(subkey_path)
+                self.evidence_key_read(subkey_path)
+                try:
+                    computer_name = subkey.get_value("ComputerName", as_json=self.as_json)
+                    self.evidence_value_read(subkey_path, "ComputerName")
+                except RegistryValueNotFoundException:
+                    # The missing value participates in the conclusion.
+                    self.evidence_value_missing(subkey_path, "ComputerName")
+                    logger.exception("Could not get computer name")
+                    continue
+            self.entries.append(
+                {
+                    "name": computer_name,
+                    "timestamp": convert_wintime(subkey.header.last_modified, as_json=self.as_json),
+                }
+            )
+            self.bind_evidence(len(self.entries) - 1, scope)
