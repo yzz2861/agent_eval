@@ -292,3 +292,17 @@ def evtx_template_readable_view(root_node, cache=None):
     for c in root_node.template().children():
         rec(c, acc)
     return "".join(acc)
+
+
+def __getattr__(name):
+    """
+    Lazily expose the scoped browsing API from this view module.
+
+    Keeping the import lazy avoids a cycle between :mod:`Evtx.Evtx` and
+    :mod:`Evtx.Browser` while preserving the historical import location.
+    """
+    from . import Browser
+
+    if name in Browser.__all__:
+        return getattr(Browser, name)
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

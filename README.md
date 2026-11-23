@@ -42,6 +42,61 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Scoped Event Browsing
+---------------------
+`Evtx.Browser.EventBrowser` exposes an inclusive range of EVTX record numbers
+while keeping record contents, fields, and summaries independently visible.
+Cursors are authenticated, opaque, and bound to one browser's archive, role,
+range, and policy generation. A cursor from another overlapping role window or
+from before a range change is rejected.
+
+The source provenance returned with each page is not subject to field
+redaction. It identifies the original record numbers and byte offsets, allowing
+an investigation lead to map a forwarded fragment back to the archive without
+gaining access to fields that were not disclosed.
+
+    from Evtx.Browser import EventBrowser
+
+    with_key = "shared-receipt-key"
+    duty = EventBrowser(
+        "System.evtx",
+        first_record=12049,
+        last_record=12057,
+        role="duty",
+        page_size=4,
+        field_visibility=("EventID", "Provider.Name", "TimeCreated.SystemTime"),
+        summary_visibility=("total_count", "first_record_number", "last_record_number"),
+        signing_key=with_key,
+    )
+    lead = EventBrowser(
+        "System.evtx",
+        first_record=12054,
+        last_record=12062,
+        role="lead",
+        page_size=4,
+        signing_key=with_key,
+    )
+
+    page = duty.page()
+    assert page.source_range == (12049, 12052)
+    assert page.provenance.scope_first_offset is not None
+    next_page = duty.page(cursor=page.next_cursor)
+
+    # Receipts remain verifiable after the browser moves to a new range.
+    old_page = duty.page()
+    old_receipt = old_page.receipt
+    duty.set_range(12100, 12104)
+    assert duty.verify(old_receipt)
+
+    # Overlapping views have different query state even with the same key.
+    try:
+        lead.page(cursor=page.next_cursor)
+    except Exception:
+        pass  # InvalidCursor: the cursor belongs to the duty scope.
+
+Use a stable `signing_key` when receipts must be verified by another process.
+The default key is process-local and is suitable only for in-process verification.
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:
