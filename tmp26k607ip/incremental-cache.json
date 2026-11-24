@@ -1,0 +1,317 @@
+{
+  "config_hash": "",
+  "files": {
+    "a.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:a.py",
+            "func:a.alpha",
+            "func:b.beta",
+            "node:policy-config"
+          ],
+          "file": "a.py",
+          "line": 6,
+          "message": "Call reaches unsafe wrapper b.beta; dangerous summary origins: B307",
+          "origins": [
+            "B307"
+          ],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "b.beta",
+          "test_id": "B307",
+          "via": [
+            "b.beta"
+          ]
+        }
+      ],
+      "functions": {
+        "a.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "a.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "a.alpha": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "b.beta",
+              "column": 11,
+              "expression": "beta",
+              "keywords": {},
+              "line": 6
+            }
+          ],
+          "dependencies": [
+            "b.beta"
+          ],
+          "id": "a.alpha",
+          "is_async": false,
+          "is_dangerous": true,
+          "is_sanitizer": false,
+          "labels": [
+            "danger:B307"
+          ],
+          "line": 5,
+          "name": "alpha",
+          "origins": [
+            "B307"
+          ],
+          "qualname": "alpha",
+          "return_callees": [
+            "b.beta"
+          ],
+          "summary_hash": "fd96ab06103da6bad747b541dcf7b615264b3259b684b4bada3dea339a7f6d46"
+        }
+      },
+      "imports": {
+        "beta": "b.beta"
+      },
+      "module": "a",
+      "mtime_ns": 1795544901423251915,
+      "package": "",
+      "size": 63,
+      "source_hash": "4e5141051a6a050f740b431423b9ed3c0aa0f7b9d6c605ba21db5789f5e03458"
+    },
+    "b.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 4,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:b.py",
+            "func:a.alpha",
+            "func:b.beta",
+            "node:policy-config"
+          ],
+          "file": "b.py",
+          "line": 6,
+          "message": "Call reaches unsafe wrapper a.alpha; dangerous summary origins: B307",
+          "origins": [
+            "B307"
+          ],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "a.alpha",
+          "test_id": "B307",
+          "via": [
+            "a.alpha"
+          ]
+        },
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:b.py",
+            "func:b.beta",
+            "node:policy-config"
+          ],
+          "file": "b.py",
+          "line": 7,
+          "message": "eval sink",
+          "origins": [],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "eval",
+          "test_id": "B307",
+          "via": []
+        }
+      ],
+      "functions": {
+        "b.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "b.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "b.beta": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "a.alpha",
+              "column": 4,
+              "expression": "alpha",
+              "keywords": {},
+              "line": 6
+            },
+            {
+              "argument_callees": [],
+              "callee": "eval",
+              "column": 11,
+              "expression": "eval",
+              "keywords": {},
+              "line": 7
+            }
+          ],
+          "dependencies": [
+            "a.alpha"
+          ],
+          "id": "b.beta",
+          "is_async": false,
+          "is_dangerous": true,
+          "is_sanitizer": false,
+          "labels": [
+            "danger:B307"
+          ],
+          "line": 5,
+          "name": "beta",
+          "origins": [
+            "B307"
+          ],
+          "qualname": "beta",
+          "return_callees": [
+            "eval"
+          ],
+          "summary_hash": "09158e8c945cf55c93ff01347ca5510d6f724e4db0661e402bce50ee93aca484"
+        }
+      },
+      "imports": {
+        "alpha": "a.alpha"
+      },
+      "module": "b",
+      "mtime_ns": 1795544911424077510,
+      "package": "",
+      "size": 80,
+      "source_hash": "1eafe169444ad03bcfc4413f8afb514201789099428f35c6da493cbbd9867cff"
+    }
+  },
+  "graph": {
+    "edges": [
+      [
+        "file:a.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "file:b.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "func:a.<module>",
+        "file:a.py",
+        "source"
+      ],
+      [
+        "func:a.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:a.alpha",
+        "file:a.py",
+        "source"
+      ],
+      [
+        "func:a.alpha",
+        "func:b.beta",
+        "call"
+      ],
+      [
+        "func:a.alpha",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:b.<module>",
+        "file:b.py",
+        "source"
+      ],
+      [
+        "func:b.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:b.beta",
+        "file:b.py",
+        "source"
+      ],
+      [
+        "func:b.beta",
+        "func:a.alpha",
+        "call"
+      ],
+      [
+        "func:b.beta",
+        "node:policy-config",
+        "policy"
+      ]
+    ],
+    "nodes": {
+      "file:a.py": {
+        "file": "a.py",
+        "kind": "source",
+        "source_hash": "4e5141051a6a050f740b431423b9ed3c0aa0f7b9d6c605ba21db5789f5e03458"
+      },
+      "file:b.py": {
+        "file": "b.py",
+        "kind": "source",
+        "source_hash": "1eafe169444ad03bcfc4413f8afb514201789099428f35c6da493cbbd9867cff"
+      },
+      "func:a.<module>": {
+        "file": "a.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:a.alpha": {
+        "file": "a.py",
+        "is_dangerous": true,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "fd96ab06103da6bad747b541dcf7b615264b3259b684b4bada3dea339a7f6d46"
+      },
+      "func:b.<module>": {
+        "file": "b.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:b.beta": {
+        "file": "b.py",
+        "is_dangerous": true,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "09158e8c945cf55c93ff01347ca5510d6f724e4db0661e402bce50ee93aca484"
+      },
+      "node:policy-config": {
+        "config_hash": "",
+        "fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+        "kind": "policy",
+        "policy_version": "test-policy-v1"
+      }
+    }
+  },
+  "policy_fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+  "policy_version": "test-policy-v1",
+  "schema_version": 1
+}

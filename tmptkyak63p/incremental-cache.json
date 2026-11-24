@@ -1,0 +1,308 @@
+{
+  "config_hash": "",
+  "files": {
+    "consumer.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:consumer.py",
+            "func:consumer.use",
+            "func:lib.dangerous",
+            "node:policy-config"
+          ],
+          "file": "consumer.py",
+          "line": 6,
+          "message": "Call reaches unsafe wrapper lib.dangerous; dangerous summary origins: B307",
+          "origins": [
+            "B307"
+          ],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "lib.dangerous",
+          "test_id": "B307",
+          "via": [
+            "lib.dangerous"
+          ]
+        }
+      ],
+      "functions": {
+        "consumer.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "consumer.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "consumer.use": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "lib.dangerous",
+              "column": 11,
+              "expression": "choose",
+              "keywords": {},
+              "line": 6
+            }
+          ],
+          "dependencies": [
+            "lib.dangerous"
+          ],
+          "id": "consumer.use",
+          "is_async": false,
+          "is_dangerous": true,
+          "is_sanitizer": false,
+          "labels": [
+            "danger:B307"
+          ],
+          "line": 5,
+          "name": "use",
+          "origins": [
+            "B307"
+          ],
+          "qualname": "use",
+          "return_callees": [
+            "lib.dangerous"
+          ],
+          "summary_hash": "9edbf3ff0dbf4a66009b5ed6252d25b9ebc4a5fa3b5912bed7efc9dfbe72d65f"
+        }
+      },
+      "imports": {
+        "choose": "lib.dangerous"
+      },
+      "module": "consumer",
+      "mtime_ns": 1795544911432583808,
+      "package": "",
+      "size": 80,
+      "source_hash": "83f0efd149e4bbd9a457dd40238bb9cd6af5f66bd4c442d19716ca87761d596b"
+    },
+    "lib.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:lib.py",
+            "func:lib.dangerous",
+            "node:policy-config"
+          ],
+          "file": "lib.py",
+          "line": 7,
+          "message": "eval sink",
+          "origins": [],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "eval",
+          "test_id": "B307",
+          "via": []
+        }
+      ],
+      "functions": {
+        "lib.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "lib.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "lib.dangerous": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "eval",
+              "column": 11,
+              "expression": "eval",
+              "keywords": {},
+              "line": 7
+            }
+          ],
+          "dependencies": [],
+          "id": "lib.dangerous",
+          "is_async": false,
+          "is_dangerous": true,
+          "is_sanitizer": false,
+          "labels": [
+            "danger:B307"
+          ],
+          "line": 6,
+          "name": "dangerous",
+          "origins": [
+            "B307"
+          ],
+          "qualname": "dangerous",
+          "return_callees": [
+            "eval"
+          ],
+          "summary_hash": "7a9d9121282855f8f0df254c261eb589ab3726ff72594199b04edc511ae163ab"
+        },
+        "lib.safe": {
+          "calls": [],
+          "dependencies": [],
+          "id": "lib.safe",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 2,
+          "name": "safe",
+          "origins": [],
+          "qualname": "safe",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        }
+      },
+      "imports": {},
+      "module": "lib",
+      "mtime_ns": 1795544901431557806,
+      "package": "",
+      "size": 82,
+      "source_hash": "ce5b62cb46559908ab2c52054cc7e921668bea25923f65576f222ceb338d0db4"
+    }
+  },
+  "graph": {
+    "edges": [
+      [
+        "file:consumer.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "file:lib.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "func:consumer.<module>",
+        "file:consumer.py",
+        "source"
+      ],
+      [
+        "func:consumer.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:consumer.use",
+        "file:consumer.py",
+        "source"
+      ],
+      [
+        "func:consumer.use",
+        "func:lib.dangerous",
+        "call"
+      ],
+      [
+        "func:consumer.use",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:lib.<module>",
+        "file:lib.py",
+        "source"
+      ],
+      [
+        "func:lib.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:lib.dangerous",
+        "file:lib.py",
+        "source"
+      ],
+      [
+        "func:lib.dangerous",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:lib.safe",
+        "file:lib.py",
+        "source"
+      ],
+      [
+        "func:lib.safe",
+        "node:policy-config",
+        "policy"
+      ]
+    ],
+    "nodes": {
+      "file:consumer.py": {
+        "file": "consumer.py",
+        "kind": "source",
+        "source_hash": "83f0efd149e4bbd9a457dd40238bb9cd6af5f66bd4c442d19716ca87761d596b"
+      },
+      "file:lib.py": {
+        "file": "lib.py",
+        "kind": "source",
+        "source_hash": "ce5b62cb46559908ab2c52054cc7e921668bea25923f65576f222ceb338d0db4"
+      },
+      "func:consumer.<module>": {
+        "file": "consumer.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:consumer.use": {
+        "file": "consumer.py",
+        "is_dangerous": true,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "9edbf3ff0dbf4a66009b5ed6252d25b9ebc4a5fa3b5912bed7efc9dfbe72d65f"
+      },
+      "func:lib.<module>": {
+        "file": "lib.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:lib.dangerous": {
+        "file": "lib.py",
+        "is_dangerous": true,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "7a9d9121282855f8f0df254c261eb589ab3726ff72594199b04edc511ae163ab"
+      },
+      "func:lib.safe": {
+        "file": "lib.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "node:policy-config": {
+        "config_hash": "",
+        "fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+        "kind": "policy",
+        "policy_version": "test-policy-v1"
+      }
+    }
+  },
+  "policy_fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+  "policy_version": "test-policy-v1",
+  "schema_version": 1
+}

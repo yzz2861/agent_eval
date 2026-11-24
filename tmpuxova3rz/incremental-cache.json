@@ -1,0 +1,210 @@
+{
+  "config_hash": "",
+  "files": {
+    "caller.py": {
+      "analyzer_version": 1,
+      "findings": [],
+      "functions": {
+        "caller.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "caller.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "caller.use": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "wrapper.run",
+              "column": 4,
+              "expression": "run",
+              "keywords": {},
+              "line": 4
+            }
+          ],
+          "dependencies": [
+            "wrapper.run"
+          ],
+          "id": "caller.use",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 3,
+          "name": "use",
+          "origins": [],
+          "qualname": "use",
+          "return_callees": [],
+          "summary_hash": "08d52ee0cd362532faf8c96ebb515a103bff4f0377685455396a88b3de48936f"
+        }
+      },
+      "imports": {
+        "run": "wrapper.run"
+      },
+      "module": "caller",
+      "mtime_ns": 1795544901421709571,
+      "package": "",
+      "size": 48,
+      "source_hash": "a0083ca20946fc21ab1668a4a820ab7201f5d480a5f2e81ace0c4703795cc809"
+    },
+    "wrapper.py": {
+      "analyzer_version": 1,
+      "findings": [],
+      "functions": {
+        "wrapper.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "wrapper.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "wrapper.run": {
+          "calls": [],
+          "dependencies": [],
+          "id": "wrapper.run",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 1,
+          "name": "run",
+          "origins": [],
+          "qualname": "run",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        }
+      },
+      "imports": {},
+      "module": "wrapper",
+      "mtime_ns": 1795544901421607279,
+      "package": "",
+      "size": 25,
+      "source_hash": "61735b1b32d3b8fd5e7645bb40a0b76d43373c51becdaf7a02ca4ad79df5bac9"
+    }
+  },
+  "graph": {
+    "edges": [
+      [
+        "file:caller.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "file:wrapper.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "func:caller.<module>",
+        "file:caller.py",
+        "source"
+      ],
+      [
+        "func:caller.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:caller.use",
+        "file:caller.py",
+        "source"
+      ],
+      [
+        "func:caller.use",
+        "func:wrapper.run",
+        "call"
+      ],
+      [
+        "func:caller.use",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:wrapper.<module>",
+        "file:wrapper.py",
+        "source"
+      ],
+      [
+        "func:wrapper.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:wrapper.run",
+        "file:wrapper.py",
+        "source"
+      ],
+      [
+        "func:wrapper.run",
+        "node:policy-config",
+        "policy"
+      ]
+    ],
+    "nodes": {
+      "file:caller.py": {
+        "file": "caller.py",
+        "kind": "source",
+        "source_hash": "a0083ca20946fc21ab1668a4a820ab7201f5d480a5f2e81ace0c4703795cc809"
+      },
+      "file:wrapper.py": {
+        "file": "wrapper.py",
+        "kind": "source",
+        "source_hash": "61735b1b32d3b8fd5e7645bb40a0b76d43373c51becdaf7a02ca4ad79df5bac9"
+      },
+      "func:caller.<module>": {
+        "file": "caller.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:caller.use": {
+        "file": "caller.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "08d52ee0cd362532faf8c96ebb515a103bff4f0377685455396a88b3de48936f"
+      },
+      "func:wrapper.<module>": {
+        "file": "wrapper.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:wrapper.run": {
+        "file": "wrapper.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "node:policy-config": {
+        "config_hash": "",
+        "fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+        "kind": "policy",
+        "policy_version": "test-policy-v1"
+      }
+    }
+  },
+  "policy_fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+  "policy_version": "test-policy-v1",
+  "schema_version": 1
+}

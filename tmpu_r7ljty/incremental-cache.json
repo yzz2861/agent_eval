@@ -1,0 +1,204 @@
+{
+  "config_hash": "",
+  "files": {
+    "api.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:api.py",
+            "func:api.lookup",
+            "node:policy-config"
+          ],
+          "file": "api.py",
+          "line": 6,
+          "message": "query sink needs sanitizer",
+          "origins": [],
+          "rule_id": "T200",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "api.raw_query",
+          "test_id": "T200",
+          "via": []
+        }
+      ],
+      "functions": {
+        "api.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "api.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "api.lookup": {
+          "calls": [
+            {
+              "argument_callees": [
+                "sanitizer.clean"
+              ],
+              "callee": "api.raw_query",
+              "column": 11,
+              "expression": "raw_query",
+              "keywords": {},
+              "line": 6
+            },
+            {
+              "argument_callees": [],
+              "callee": "sanitizer.clean",
+              "column": 21,
+              "expression": "clean",
+              "keywords": {},
+              "line": 6
+            }
+          ],
+          "dependencies": [],
+          "id": "api.lookup",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 5,
+          "name": "lookup",
+          "origins": [],
+          "qualname": "lookup",
+          "return_callees": [
+            "api.raw_query",
+            "sanitizer.clean"
+          ],
+          "summary_hash": "183ca4ded9b4f9b804325df09795cea373a69441989dc9f6289f31761356781a"
+        }
+      },
+      "imports": {
+        "clean": "sanitizer.clean"
+      },
+      "module": "api",
+      "mtime_ns": 1795544901429040164,
+      "package": "",
+      "size": 85,
+      "source_hash": "34f592bfe27bba494ea6a728a572648b8a32f3ea1565d356ac20278ee2ad62e3"
+    },
+    "sanitizer.py": {
+      "analyzer_version": 1,
+      "findings": [],
+      "functions": {
+        "sanitizer.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "sanitizer.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        }
+      },
+      "imports": {},
+      "module": "sanitizer",
+      "mtime_ns": 1795544911430299282,
+      "package": "",
+      "size": 20,
+      "source_hash": "0a49b773a6c39a449e4d012e31ac3dcbce1ebf211a192432c05c50a9d82c4766"
+    }
+  },
+  "graph": {
+    "edges": [
+      [
+        "file:api.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "file:sanitizer.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "func:api.<module>",
+        "file:api.py",
+        "source"
+      ],
+      [
+        "func:api.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:api.lookup",
+        "file:api.py",
+        "source"
+      ],
+      [
+        "func:api.lookup",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:sanitizer.<module>",
+        "file:sanitizer.py",
+        "source"
+      ],
+      [
+        "func:sanitizer.<module>",
+        "node:policy-config",
+        "policy"
+      ]
+    ],
+    "nodes": {
+      "file:api.py": {
+        "file": "api.py",
+        "kind": "source",
+        "source_hash": "34f592bfe27bba494ea6a728a572648b8a32f3ea1565d356ac20278ee2ad62e3"
+      },
+      "file:sanitizer.py": {
+        "file": "sanitizer.py",
+        "kind": "source",
+        "source_hash": "0a49b773a6c39a449e4d012e31ac3dcbce1ebf211a192432c05c50a9d82c4766"
+      },
+      "func:api.<module>": {
+        "file": "api.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:api.lookup": {
+        "file": "api.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "183ca4ded9b4f9b804325df09795cea373a69441989dc9f6289f31761356781a"
+      },
+      "func:sanitizer.<module>": {
+        "file": "sanitizer.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "node:policy-config": {
+        "config_hash": "",
+        "fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+        "kind": "policy",
+        "policy_version": "test-policy-v1"
+      }
+    }
+  },
+  "policy_fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+  "policy_version": "test-policy-v1",
+  "schema_version": 1
+}

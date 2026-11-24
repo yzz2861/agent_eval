@@ -1,0 +1,141 @@
+{
+  "config_hash": "",
+  "files": {
+    "app.py": {
+      "analyzer_version": 1,
+      "findings": [
+        {
+          "column": 11,
+          "confidence": "HIGH",
+          "depends_on": [
+            "file:app.py",
+            "func:app.run",
+            "node:policy-config"
+          ],
+          "file": "app.py",
+          "line": 2,
+          "message": "eval sink",
+          "origins": [],
+          "rule_id": "B307",
+          "severity": "HIGH",
+          "source": "library",
+          "symbol": "eval",
+          "test_id": "B307",
+          "via": []
+        }
+      ],
+      "functions": {
+        "app.<module>": {
+          "calls": [],
+          "dependencies": [],
+          "id": "app.<module>",
+          "is_async": false,
+          "is_dangerous": false,
+          "is_sanitizer": false,
+          "labels": [],
+          "line": 0,
+          "name": "<module>",
+          "origins": [],
+          "qualname": "<module>",
+          "return_callees": [],
+          "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+        },
+        "app.run": {
+          "calls": [
+            {
+              "argument_callees": [],
+              "callee": "eval",
+              "column": 11,
+              "expression": "eval",
+              "keywords": {},
+              "line": 2
+            }
+          ],
+          "dependencies": [],
+          "id": "app.run",
+          "is_async": false,
+          "is_dangerous": true,
+          "is_sanitizer": false,
+          "labels": [
+            "danger:B307"
+          ],
+          "line": 1,
+          "name": "run",
+          "origins": [
+            "B307"
+          ],
+          "qualname": "run",
+          "return_callees": [
+            "eval"
+          ],
+          "summary_hash": "7e445cb6398e75a16020f0c765ee0c076ec7fd8de4e4b0aaf15d0496b653151a"
+        }
+      },
+      "imports": {},
+      "module": "app",
+      "mtime_ns": 1795544901427981490,
+      "package": "",
+      "size": 31,
+      "source_hash": "1e707b3380479ad9a81f51c20ffeaa47f8fb4bf1d72d62e1724a5d533c0132e7"
+    }
+  },
+  "graph": {
+    "edges": [
+      [
+        "file:app.py",
+        "node:policy-config",
+        "policy-config"
+      ],
+      [
+        "func:app.<module>",
+        "file:app.py",
+        "source"
+      ],
+      [
+        "func:app.<module>",
+        "node:policy-config",
+        "policy"
+      ],
+      [
+        "func:app.run",
+        "file:app.py",
+        "source"
+      ],
+      [
+        "func:app.run",
+        "node:policy-config",
+        "policy"
+      ]
+    ],
+    "nodes": {
+      "file:app.py": {
+        "file": "app.py",
+        "kind": "source",
+        "source_hash": "1e707b3380479ad9a81f51c20ffeaa47f8fb4bf1d72d62e1724a5d533c0132e7"
+      },
+      "func:app.<module>": {
+        "file": "app.py",
+        "is_dangerous": false,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "b36fe07db5722cdca8af6f4e561aef18c81b781740d063ac5ab9518028c7be03"
+      },
+      "func:app.run": {
+        "file": "app.py",
+        "is_dangerous": true,
+        "is_sanitizer": false,
+        "kind": "function-summary",
+        "summary_hash": "7e445cb6398e75a16020f0c765ee0c076ec7fd8de4e4b0aaf15d0496b653151a"
+      },
+      "node:policy-config": {
+        "config_hash": "",
+        "fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+        "kind": "policy",
+        "policy_version": "test-policy-v1"
+      }
+    }
+  },
+  "policy_fingerprint": "fd521b489b662d9e60adf1376e4c5ca950762fbbd98e4777bd72460150d2aa8c",
+  "policy_version": "test-policy-v1",
+  "schema_version": 1
+}
