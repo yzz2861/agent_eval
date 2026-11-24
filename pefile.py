@@ -22,6 +22,7 @@ __contact__ = "ero.carrera@gmail.com"
 
 import codecs
 import copy
+import hashlib
 import math
 import mmap
 import os
@@ -120,6 +121,21 @@ IMAGE_ORDINAL_FLAG = 0x80000000
 IMAGE_ORDINAL_FLAG64 = 0x8000000000000000
 OPTIONAL_HEADER_MAGIC_PE = 0x10B
 OPTIONAL_HEADER_MAGIC_PE_PLUS = 0x20B
+# PE32 and PE32+ are the descriptive names used by the Authenticode API.
+OPTIONAL_HEADER_MAGIC_PE32 = OPTIONAL_HEADER_MAGIC_PE
+OPTIONAL_HEADER_MAGIC_PE32_PLUS = OPTIONAL_HEADER_MAGIC_PE_PLUS
+
+AUTHENTICODE_STATUS_PROVABLE = "provable"
+AUTHENTICODE_STATUS_UNPROVABLE = "unprovable"
+
+AUTHENTICODE_EXCLUSION_CHECKSUM = "checksum"
+AUTHENTICODE_EXCLUSION_SECURITY_DIRECTORY = "security_directory"
+AUTHENTICODE_EXCLUSION_CERTIFICATE_TABLE = "certificate_table"
+
+AUTHENTICODE_REGION_HEADER = "header"
+AUTHENTICODE_REGION_SECTION = "section"
+AUTHENTICODE_REGION_OVERLAY = "overlay"
+AUTHENTICODE_REGION_UNMAPPED = "unmapped"
 
 
 def two_way_dict(pairs):
@@ -149,6 +165,8 @@ DIRECTORY_ENTRY = two_way_dict(directory_entry_types)
 DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"] = DIRECTORY_ENTRY[
     "IMAGE_DIRECTORY_ENTRY_COPYRIGHT"
 ]
+SECURITY_DIRECTORY_INDEX = DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]
+
 
 image_characteristics = [
     ("IMAGE_FILE_RELOCS_STRIPPED", 0x0001),
@@ -819,6 +837,127 @@ class PEFormatError(Exception):
 
     def __str__(self):
         return repr(self.value)
+
+
+class AuthenticodeInterval:
+    """A half-open byte interval with Authenticode coverage metadata."""
+
+    def __init__(
+        self,
+        start,
+        end,
+        category=None,
+        region=None,
+        section_index=None,
+        section_name=None,
+        mapped_section_index=None,
+        mapped_section_name=None,
+        characteristics=0,
+        executable=False,
+        writable=False,
+        in_overlay=False,
+        valid=True,
+    ):
+        self.start = int(start)
+        self.end = int(end)
+        self.category = category
+        self.region = region
+        self.section_index = section_index
+        self.section_name = section_name
+        self.mapped_section_index = mapped_section_index
+        self.mapped_section_name = mapped_section_name
+        self.characteristics = int(characteristics)
+        self.executable = bool(executable)
+        self.writable = bool(writable)
+        self.in_overlay = bool(in_overlay)
+        self.valid = bool(valid)
+
+    @property
+    def length(self):
+        return max(0, self.end - self.start)
+
+    def __iter__(self):
+        yield self.start
+        yield self.end
+
+    def __repr__(self):
+        return (
+            "AuthenticodeInterval("
+            f"start={self.start}, end={self.end}, category={self.category!r}, "
+            f"region={self.region!r})"
+        )
+
+
+class AuthenticodeCoverage:
+    """Ordered Authenticode digest coverage and cross-check results."""
+
+    def __init__(self, file_size=0):
+        self.file_size = int(file_size)
+        self.status = AUTHENTICODE_STATUS_PROVABLE
+        self.provable = True
+        self.hashed_intervals = []
+        self.exclusions = []
+        self.unmapped_intervals = []
+        self.anomalies = []
+        self.reasons = []
+        self.overlay_offset = None
+        self.overlay_range = None
+        self.section_mappings = []
+        self.digest_ranges = self.hashed_intervals
+        self.covered_intervals = self.hashed_intervals
+        self.excluded_ranges = self.exclusions
+
+    def add_reason(self, reason):
+        if reason not in self.reasons:
+            self.reasons.append(reason)
+        self.status = AUTHENTICODE_STATUS_UNPROVABLE
+        self.provable = False
+        return reason
+
+    def add_anomaly(self, anomaly):
+        if anomaly not in self.anomalies:
+            self.anomalies.append(anomaly)
+        return anomaly
+
+    def classification(self, offset):
+        """Classify one byte as ``hashed``, ``excluded``, or ``unmapped``."""
+        offset = int(offset)
+        for interval in self.hashed_intervals:
+            if interval.start <= offset < interval.end:
+                return "hashed"
+        for interval in self.exclusions:
+            if interval.start <= offset < interval.end:
+                return "excluded"
+        return "unmapped"
+
+    def total_hashed_bytes(self):
+        return sum(interval.length for interval in self.hashed_intervals)
+
+    def total_excluded_bytes(self):
+        return sum(interval.length for interval in self.exclusions)
+
+    def total_unmapped_bytes(self):
+        return sum(interval.length for interval in self.unmapped_intervals)
+
+    def derived_interval(self, start, end):
+        """Return a child interval preserving region and mapping metadata."""
+        child = copy.copy(self)
+        child.start = int(start)
+        child.end = int(end)
+        return child
+
+    def to_dict(self):
+        return {
+            "status": self.status,
+            "provable": self.provable,
+            "file_size": self.file_size,
+            "hashed_intervals": [tuple(i) for i in self.hashed_intervals],
+            "exclusions": [tuple(i) for i in self.exclusions],
+            "unmapped_intervals": [tuple(i) for i in self.unmapped_intervals],
+            "anomalies": list(self.anomalies),
+            "reasons": list(self.reasons),
+            "overlay_offset": self.overlay_offset,
+        }
 
 
 class Dump:
@@ -7860,6 +7999,401 @@ class PE:
                 SUBSYSTEM_TYPE["IMAGE_SUBSYSTEM_NATIVE_WINDOWS"],
             )
         )
+
+    def get_authenticode_coverage(self):
+        """Return ordered Authenticode digest coverage and layout checks.
+
+        This analyzes digest byte coverage only. It does not parse or validate
+        the PKCS#7 signature and must not be interpreted as proof that the
+        Authenticode signature is trusted or cryptographically valid.
+        """
+        data = self.__data__
+        file_size = len(data)
+        coverage = AuthenticodeCoverage(file_size)
+
+        def u32(offset):
+            if offset < 0 or offset + 4 > file_size:
+                raise PEFormatError("u32 read outside of file")
+            return struct.unpack_from("<I", data, offset)[0]
+
+        try:
+            optional_header = self.OPTIONAL_HEADER
+            optional_offset = optional_header.get_file_offset()
+            magic = int(optional_header.Magic)
+            if magic not in (
+                OPTIONAL_HEADER_MAGIC_PE32,
+                OPTIONAL_HEADER_MAGIC_PE32_PLUS,
+            ):
+                coverage.add_reason(
+                    f"Unsupported optional header magic 0x{magic:04x}; "
+                    "only PE32 and PE32+ are supported"
+                )
+
+            number_of_sections = int(self.FILE_HEADER.NumberOfSections)
+            size_optional_header = int(self.FILE_HEADER.SizeOfOptionalHeader)
+            section_table_offset = optional_offset + size_optional_header
+            checksum_offset = optional_offset + 0x40
+            size_of_headers = int(getattr(optional_header, "SizeOfHeaders", 0) or 0)
+            section_table_end = section_table_offset + 40 * number_of_sections
+            header_end = max(0, size_of_headers, section_table_end)
+
+            if checksum_offset < 0 or checksum_offset + 4 > file_size:
+                coverage.add_reason(
+                    "OptionalHeader.CheckSum field is outside the file"
+                )
+            if header_end > file_size:
+                coverage.add_reason("PE header/section table extent is outside the file")
+
+            security_offset = None
+            cert_offset = 0
+            cert_size = 0
+            directories = getattr(optional_header, "DATA_DIRECTORY", [])
+            if len(directories) > SECURITY_DIRECTORY_INDEX:
+                security_directory = directories[SECURITY_DIRECTORY_INDEX]
+                security_offset = security_directory.get_file_offset()
+                cert_offset = int(security_directory.VirtualAddress)
+                cert_size = int(security_directory.Size)
+            else:
+                number_of_rva = int(
+                    getattr(optional_header, "NumberOfRvaAndSizes", 0) or 0
+                )
+                if number_of_rva > SECURITY_DIRECTORY_INDEX:
+                    security_offset = (
+                        optional_offset
+                        + optional_header.sizeof()
+                        + 8 * SECURITY_DIRECTORY_INDEX
+                    )
+                    if security_offset + 8 <= file_size:
+                        cert_offset = u32(security_offset)
+                        cert_size = u32(security_offset + 4)
+
+            if security_offset is not None and not (
+                0 <= security_offset and security_offset + 8 <= file_size
+            ):
+                coverage.add_reason(
+                    "IMAGE_DIRECTORY_ENTRY_SECURITY field is outside the file"
+                )
+
+            raw_sections = []
+            for section_index in range(number_of_sections):
+                entry_offset = section_table_offset + 40 * section_index
+                try:
+                    raw_size = u32(entry_offset + 16)
+                    pointer = u32(entry_offset + 20)
+                    characteristics = u32(entry_offset + 36)
+                    section_name = (
+                        data[entry_offset:entry_offset + 8]
+                        .split(bytes((0,)), 1)[0]
+                        .decode("ascii", "replace")
+                    )
+                except PEFormatError:
+                    coverage.add_reason(
+                        f"section header {section_index} is truncated outside the file"
+                    )
+                    continue
+
+                end = pointer + raw_size
+                section_info = {
+                    "index": section_index,
+                    "name": section_name,
+                    "pointer": pointer,
+                    "raw_size": raw_size,
+                    "end": end,
+                    "characteristics": characteristics,
+                    "executable": bool(
+                        characteristics & SECTION_CHARACTERISTICS["IMAGE_SCN_MEM_EXECUTE"]
+                    ),
+                    "writable": bool(
+                        characteristics & SECTION_CHARACTERISTICS["IMAGE_SCN_MEM_WRITE"]
+                    ),
+                }
+                raw_sections.append(section_info)
+                coverage.section_mappings.append(section_info)
+                if raw_size and end > file_size:
+                    coverage.add_reason(
+                        f"section {section_name or section_index} raw data is outside the file"
+                    )
+
+            raw_sections.sort(key=lambda section: (
+                section["pointer"],
+                section["end"],
+                section["index"],
+            ))
+            covered_section_end = 0
+            for section in raw_sections:
+                if not section["raw_size"]:
+                    continue
+                if section["pointer"] < covered_section_end:
+                    coverage.add_reason(
+                        "raw section ranges overlap at "
+                        f"{section['name'] or section['index']}"
+                    )
+                covered_section_end = max(covered_section_end, section["end"])
+
+            hashed_bases = [
+                AuthenticodeInterval(0, header_end, region=AUTHENTICODE_REGION_HEADER)
+            ]
+            for section in raw_sections:
+                if section["raw_size"] <= 0:
+                    continue
+                hashed_bases.append(
+                    AuthenticodeInterval(
+                        section["pointer"],
+                        section["end"],
+                        region=AUTHENTICODE_REGION_SECTION,
+                        section_index=section["index"],
+                        section_name=section["name"],
+                        mapped_section_index=section["index"],
+                        mapped_section_name=section["name"],
+                        characteristics=section["characteristics"],
+                        executable=section["executable"],
+                        writable=section["writable"],
+                    )
+                )
+
+            section_ends = [
+                section["end"]
+                for section in raw_sections
+                if section["raw_size"] > 0
+            ]
+            trailing_start = max([header_end] + section_ends + [0])
+
+            pe_overlay_offset = None
+            try:
+                pe_overlay_offset = self.get_overlay_data_start_offset()
+            except Exception:
+                pe_overlay_offset = None
+            coverage.pefile_overlay_offset = pe_overlay_offset
+            coverage.overlay_offset = pe_overlay_offset
+            if coverage.overlay_offset is None and trailing_start < file_size:
+                coverage.overlay_offset = trailing_start
+
+            if trailing_start < file_size:
+                hashed_bases.append(
+                    AuthenticodeInterval(
+                        trailing_start,
+                        file_size,
+                        region=AUTHENTICODE_REGION_OVERLAY,
+                    )
+                )
+            if coverage.overlay_offset is not None and coverage.overlay_offset < file_size:
+                coverage.overlay_range = AuthenticodeInterval(
+                    coverage.overlay_offset,
+                    file_size,
+                    region=AUTHENTICODE_REGION_OVERLAY,
+                )
+
+            structural_ranges = [(0, min(file_size, max(0, header_end)))]
+            for section in raw_sections:
+                start = max(0, section["pointer"])
+                end = min(file_size, section["end"])
+                if section["raw_size"] > 0 and end > start:
+                    structural_ranges.append((start, end))
+            if trailing_start < file_size:
+                structural_ranges.append((trailing_start, file_size))
+            structural_ranges.sort()
+
+            merged_structural_ranges = []
+            for start, end in structural_ranges:
+                if end <= start:
+                    continue
+                if not merged_structural_ranges or start > merged_structural_ranges[-1][1]:
+                    merged_structural_ranges.append([start, end])
+                else:
+                    merged_structural_ranges[-1][1] = max(
+                        merged_structural_ranges[-1][1], end
+                    )
+
+            cursor = 0
+            for start, end in merged_structural_ranges:
+                if start > cursor:
+                    coverage.unmapped_intervals.append(
+                        AuthenticodeInterval(
+                            cursor,
+                            start,
+                            region=AUTHENTICODE_REGION_UNMAPPED,
+                        )
+                    )
+                cursor = max(cursor, end)
+            if cursor < file_size:
+                coverage.unmapped_intervals.append(
+                    AuthenticodeInterval(
+                        cursor,
+                        file_size,
+                        region=AUTHENTICODE_REGION_UNMAPPED,
+                    )
+                )
+
+            has_certificate_table = cert_offset != 0 or cert_size != 0
+            if has_certificate_table:
+                if (cert_offset == 0) != (cert_size == 0):
+                    coverage.add_reason(
+                        "Contradictory security directory: exactly one of "
+                        "VirtualAddress/Size is zero"
+                    )
+                if (
+                    cert_offset < 0
+                    or cert_size < 0
+                    or cert_offset + cert_size > file_size
+                ):
+                    coverage.add_reason(
+                        "IMAGE_DIRECTORY_ENTRY_SECURITY certificate table range "
+                        "is outside the file"
+                    )
+                if cert_size and cert_size < 8:
+                    coverage.add_reason(
+                        "Certificate table Size is too small for a "
+                        "WIN_CERTIFICATE header"
+                    )
+                if cert_offset % 8:
+                    coverage.add_anomaly(
+                        "Certificate table file offset "
+                        f"{cert_offset:#x} is not 8-byte aligned"
+                    )
+
+            def map_exclusion(start, end):
+                best_section = None
+                best_overlap = 0
+                for section in raw_sections:
+                    overlap = max(
+                        0,
+                        min(end, section["end"]) - max(start, section["pointer"]),
+                    )
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        best_section = section
+
+                in_overlay = False
+                if coverage.overlay_offset is not None:
+                    overlay_overlap = max(
+                        0,
+                        min(end, file_size)
+                        - max(start, coverage.overlay_offset),
+                    )
+                    in_overlay = overlay_overlap > 0
+                return best_section, in_overlay
+
+            exclusion_specs = [
+                (
+                    AUTHENTICODE_EXCLUSION_CHECKSUM,
+                    checksum_offset,
+                    checksum_offset + 4,
+                )
+            ]
+            if security_offset is not None:
+                exclusion_specs.append(
+                    (
+                        AUTHENTICODE_EXCLUSION_SECURITY_DIRECTORY,
+                        security_offset,
+                        security_offset + 8,
+                    )
+                )
+            if has_certificate_table:
+                exclusion_specs.append(
+                    (
+                        AUTHENTICODE_EXCLUSION_CERTIFICATE_TABLE,
+                        cert_offset,
+                        cert_offset + cert_size,
+                    )
+                )
+
+            for category, start, end in exclusion_specs:
+                section, in_overlay = map_exclusion(start, end)
+                exclusion = AuthenticodeInterval(
+                    start,
+                    end,
+                    category=category,
+                    region=category,
+                    in_overlay=in_overlay,
+                )
+                if section is not None:
+                    exclusion.section_index = section["index"]
+                    exclusion.section_name = section["name"]
+                    exclusion.mapped_section_index = section["index"]
+                    exclusion.mapped_section_name = section["name"]
+                    exclusion.characteristics = section["characteristics"]
+                    exclusion.executable = section["executable"]
+                    exclusion.writable = section["writable"]
+                    coverage.add_reason(
+                        f"{category} exclusion overlaps raw section "
+                        f"{section['name'] or section['index']}; "
+                        "digest coverage cannot be proven"
+                    )
+                    if section["executable"]:
+                        coverage.add_anomaly(
+                            f"{category} exclusion at {start:#x}-{end:#x} lies in "
+                            f"executable section {section['name']!r}"
+                        )
+                coverage.exclusions.append(exclusion)
+
+            for index, left in enumerate(coverage.exclusions):
+                for right in coverage.exclusions[index + 1:]:
+                    overlap = max(
+                        0,
+                        min(left.end, right.end) - max(left.start, right.start)
+                    )
+                    if overlap > 0:
+                        coverage.add_reason(
+                            f"Exclusion ranges overlap: {left.category} and "
+                            f"{right.category}"
+                        )
+
+            for base in hashed_bases:
+                cursor = base.start
+                for exclusion in sorted(
+                    coverage.exclusions, key=lambda item: (item.start, item.end)
+                ):
+                    if exclusion.end <= cursor:
+                        continue
+                    if exclusion.start >= base.end:
+                        break
+                    clipped_start = max(cursor, exclusion.start)
+                    if clipped_start > cursor:
+                        child = copy.copy(base)
+                        child.start = cursor
+                        child.end = clipped_start
+                        coverage.hashed_intervals.append(child)
+                    cursor = max(cursor, min(base.end, exclusion.end))
+                if cursor < base.end:
+                    child = copy.copy(base)
+                    child.start = cursor
+                    child.end = base.end
+                    coverage.hashed_intervals.append(child)
+
+            coverage.hashed_intervals.sort(key=lambda item: (item.start, item.end))
+            return coverage
+        except Exception as exc:
+            coverage.add_reason(f"Authenticode coverage layout is unreadable: {exc}")
+            return coverage
+
+    def compute_authenticode_digest(self, algorithm=None):
+        """Compute the Authenticode byte-range digest.
+
+        This only reproduces the digest input; it performs no certificate
+        chain, timestamp, or trust validation. A computable digest therefore
+        does not mean the embedded signature is valid.
+        """
+        coverage = self.get_authenticode_coverage()
+        if not coverage.provable:
+            details = "; ".join(coverage.reasons) or "unknown layout contradiction"
+            raise PEFormatError(
+                "Refusing to compute Authenticode digest for unprovable "
+                f"layout: {details}"
+            )
+
+        if algorithm is None:
+            hasher = sha256()
+        elif isinstance(algorithm, str):
+            hasher = hashlib.new(algorithm)
+        elif hasattr(algorithm, "update"):
+            hasher = algorithm
+        else:
+            hasher = algorithm()
+
+        data = self.__data__
+        for interval in coverage.hashed_intervals:
+            hasher.update(data[interval.start:interval.end])
+        return hasher.digest()
 
     def get_overlay_data_start_offset(self):
         """Get the offset of data appended to the file and not contained within
