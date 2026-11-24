@@ -21,5 +21,19 @@ __all__ = [
     'Registry',
     'RegistryParse',
     'RegistryLog',
-    'SettingsParse'
+    'SettingsParse',
+    'GenerationalDiff',
 ]
+
+from . import GenerationalDiff
+from .GenerationalDiff import (
+    compare_hives,
+    generational_diff,
+    diff_hives,
+    compare_generations,
+    HiveGeneration,
+    HiveDiff,
+    Change,
+    Candidate,
+    ByteEvidence,
+)
