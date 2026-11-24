@@ -22,6 +22,7 @@ __contact__ = "ero.carrera@gmail.com"
 
 import codecs
 import copy
+import hashlib
 import math
 import mmap
 import os
@@ -36,6 +37,20 @@ from hashlib import md5, sha1, sha256, sha512
 from typing import Union
 
 import ordlookup
+
+from authenticode_coverage import (
+    AUTHENTICODE_COVERAGE_PROVABLE,
+    AUTHENTICODE_COVERAGE_UNPROVABLE,
+    AUTHENTICODE_COVERAGE_UNSUPPORTED,
+    AuthenticodeCoverage,
+    AuthenticodeCoverageAnalyzer,
+    AuthenticodeCoverageError,
+    AuthenticodeCoverageRange,
+    analyze_authenticode_coverage,
+    compute_authenticode_digest,
+    get_authenticode_coverage,
+    get_authenticode_digest_hex,
+)
 
 codecs.register_error("backslashreplace_", codecs.lookup_error("backslashreplace"))
 
@@ -2355,6 +2370,8 @@ def is_valid_function_name(
 
 class PE:
     """A Portable Executable representation.
+
+    Authenticode coverage API marker.
 
     This class provides access to most of the information in a PE file.
 
@@ -7730,6 +7747,9 @@ class PE:
                     and load_config.GuardMemcpyFunctionPointer
                 ):
                     load_config.GuardMemcpyFunctionPointer += relocation_difference
+
+    def get_authenticode_coverage(self):
+        return analyze_authenticode_coverage(self)
 
     def verify_checksum(self):
         return self.OPTIONAL_HEADER.CheckSum == self.generate_checksum()
