@@ -6,13 +6,23 @@
 from tuf.api.metadata import TargetFile
 from tuf.ngclient.config import UpdaterConfig
 from tuf.ngclient.fetcher import FetcherInterface
+from tuf.ngclient.release_set import (
+    ReleaseManifest,
+    ReleasePlan,
+    ReleaseSetError,
+    ReleaseSetResolver,
+)
 from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
 __all__ = [  # noqa: PLE0604
     FetcherInterface.__name__,
-    Urllib3Fetcher.__name__,
+    ReleaseManifest.__name__,
+    ReleasePlan.__name__,
+    ReleaseSetError.__name__,
+    ReleaseSetResolver.__name__,
     TargetFile.__name__,
     Updater.__name__,
     UpdaterConfig.__name__,
+    Urllib3Fetcher.__name__,
 ]
