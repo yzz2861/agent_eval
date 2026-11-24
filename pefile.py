@@ -37,6 +37,17 @@ from typing import Union
 
 import ordlookup
 
+from memory_compare import (
+    ComparisonFinding,
+    MemoryComparisonResult,
+    MemoryFragment,
+    compare_memory,
+    compare_memory_image,
+    compare_memory_images,
+    compare_pe_memory,
+    compare_pe_to_memory,
+)
+
 codecs.register_error("backslashreplace_", codecs.lookup_error("backslashreplace"))
 
 
@@ -7968,6 +7979,22 @@ class PE:
                 self.SectionAlignment_Warning = True
 
         return cache_adjust_SectionAlignment(val, section_alignment, file_alignment)
+
+
+def _pe_compare_memory(
+    self, memory_fragments=None, actual_image_base=None, **kwargs
+):
+    """Compare sparse memory fragments against this parsed PE."""
+    if actual_image_base is None:
+        actual_image_base = self.OPTIONAL_HEADER.ImageBase
+    return compare_memory_image(
+        self, memory_fragments, actual_image_base, **kwargs
+    )
+
+
+PE.compare_memory = _pe_compare_memory
+PE.compare_memory_image = _pe_compare_memory
+PE.compare_to_memory = _pe_compare_memory
 
 
 def main():
