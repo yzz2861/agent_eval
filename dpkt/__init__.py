@@ -23,6 +23,8 @@ from . import diameter
 from . import dns
 from . import dtp
 from . import esp
+from . import evidence
+from . import evidence_projection
 from . import ethernet
 from . import gre
 from . import gzip
@@ -50,6 +52,7 @@ from . import pim
 from . import pmap
 from . import ppp
 from . import pppoe
+from . import projection
 from . import qq
 from . import radiotap
 from . import radius
