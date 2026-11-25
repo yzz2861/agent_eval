@@ -9,6 +9,16 @@ You can read the full docs at https://pypdf.readthedocs.io/.
 
 from ._configuration import Configuration, apply_configuration, get_configuration, overwrite_configuration
 from ._crypt_providers import crypt_provider
+from ._disclosure import (
+    AnnotationStatement,
+    DisclosureReport,
+    DisclosureScope,
+    ReconciliationResult,
+    SkippedAnnotation,
+    SkipReason,
+    collect_annotation_statements,
+    reconcile_statements,
+)
 from ._doc_common import DocumentInformation
 from ._encryption import PasswordType
 from ._page import PageObject, Transformation
@@ -32,7 +42,10 @@ _debug_versions = (
 )
 
 __all__ = [
+    "AnnotationStatement",
     "Configuration",
+    "DisclosureReport",
+    "DisclosureScope",
     "DocumentInformation",
     "ImageType",
     "ObjectDeletionFlag",
@@ -42,12 +55,17 @@ __all__ = [
     "PasswordType",
     "PdfReader",
     "PdfWriter",
+    "ReconciliationResult",
+    "SkipReason",
+    "SkippedAnnotation",
     "Transformation",
     "__version__",
     "_debug_versions",
     "apply_configuration",
+    "collect_annotation_statements",
     "get_configuration",
     "mult",
     "overwrite_configuration",
     "parse_filename_page_ranges",
+    "reconcile_statements",
 ]
