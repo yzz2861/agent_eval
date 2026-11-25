@@ -2150,6 +2150,36 @@ class OleFileIO:
         return self.root.name
 
     def getproperties(self, filename, convert_time=False, no_conversion=None):
+        """Compatibility wrapper; forensic callers should use get_property_set_view()."""
+        return self._getproperties_legacy(filename, convert_time=convert_time,
+                                         no_conversion=no_conversion)
+
+    def get_property_set_view(self, filename, convert_time=True):
+        """
+        Return a provenance-preserving read-only view of all sections in a
+        property set stream.
+
+        Unlike :meth:`getproperties`, this method does not collapse repeated
+        property IDs or dictionary display names.  It preserves each section's
+        FMTID/offset, name dictionary, raw type tag, decoded value status and
+        physical source locator, plus queryable parsing issues.
+        """
+        from .propertyview import parse_property_set
+        streampath = filename
+        if not isinstance(streampath, (list, tuple)):
+            path_for_report = (streampath,)
+        else:
+            path_for_report = tuple(streampath)
+        data = self.openstream(filename).read()
+        return parse_property_set(data, stream_path=path_for_report,
+                                  convert_time=convert_time)
+
+    #: Forensic/audit-friendly aliases.
+    get_forensic_property_view = get_property_set_view
+    get_forensic_properties = get_property_set_view
+    get_property_evidence = get_property_set_view
+
+    def _getproperties_legacy(self, filename, convert_time=False, no_conversion=None):
         """
         Return properties described in substream.
 

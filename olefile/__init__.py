@@ -25,4 +25,22 @@ from .olefile import *
 # import metadata not covered by *:
 from .olefile import __version__, __author__, __date__, __all__
 
+from .propertyview import (
+    FMTID_DOCUMENT_SUMMARY_INFORMATION,
+    FMTID_SUMMARY_INFORMATION,
+    FMTID_USER_DEFINED_PROPERTIES,
+    PhysicalSource,
+    PropertyDictionary,
+    PropertyEvidence,
+    PropertyNameEntry,
+    PropertySectionView,
+    PropertySetView,
+    PropertyViewIssue,
+    decode_property_text,
+    parse_property_set,
+    property_type_name,
+    read_property_set,
+    standard_property_names,
+)
 
+from .propertyview import *  # exposes descriptive aliases listed in __all__
