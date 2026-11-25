@@ -61,7 +61,19 @@ class Char(bytes, BaseType):
         if count == 0:
             return type.__call__(cls, b"")
 
-        data = stream.read(-1 if count == EOF else count)
+        from dissect.cstruct.trace import _ElementAttributor, current_tracer
+
+        tracer = current_tracer(stream)
+        attributor = (
+            _ElementAttributor(tracer, cls.__name__, 1) if tracer is not None and count not in (0, EOF) else None
+        )
+        if attributor is not None:
+            attributor.__enter__()
+        try:
+            data = stream.read(-1 if count == EOF else count)
+        finally:
+            if attributor is not None:
+                attributor.__exit__(None, None, None)
         if count != EOF and len(data) != count:
             raise EOFError(f"Read {len(data)} bytes, but expected {count}")
 

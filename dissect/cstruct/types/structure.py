@@ -23,6 +23,7 @@ from dissect.cstruct.types.base import (
     BaseType,
     MetaType,
     _is_buffer_type,
+    _trace_stream,
 )
 from dissect.cstruct.types.enum import EnumMetaType
 from dissect.cstruct.types.pointer import Pointer
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from dissect.cstruct.cstruct import Endianness
+    from dissect.cstruct.trace import SourceTracer
 
 
 class Field:
@@ -80,10 +82,10 @@ class StructureMetaType(MetaType):
             # Fast paths for the most common cases
             obj = args[0]
             if type(obj) in _BUFFER_TYPES:
-                return cls._read(io.BytesIO(obj), endian=cls.__cs__.endian)
+                return cls._read(_trace_stream(io.BytesIO(obj)), endian=cls.__cs__.endian)
 
             if hasattr(obj, "read") and not isinstance(obj, cls):
-                return cls._read(obj, endian=cls.__cs__.endian)
+                return cls._read(_trace_stream(obj), endian=cls.__cs__.endian)
 
         if not args and not kwargs:
             obj = type.__call__(cls)
@@ -239,8 +241,11 @@ class StructureMetaType(MetaType):
         return offset, alignment
 
     def _read(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> Self:  # type: ignore
+        from dissect.cstruct.trace import NodeKind, bit_span, current_tracer, field_traceable
+
         bit_buffer = None
         struct_start = stream.tell()
+        tracer = current_tracer(stream)
 
         result = {}
         sizes = {}
@@ -248,12 +253,10 @@ class StructureMetaType(MetaType):
             offset = stream.tell()
 
             if field.offset is not None and offset != struct_start + field.offset:
-                # Field is at a specific offset, either aligned or added that way
                 offset = struct_start + field.offset
                 stream.seek(offset)
 
             if cls.__align__ and field.offset is None:
-                # Previous field was dynamically sized and we need to align
                 offset += -offset & (field.alignment - 1)
                 stream.seek(offset)
 
@@ -261,10 +264,32 @@ class StructureMetaType(MetaType):
                 if bit_buffer is None:
                     bit_buffer = BitBuffer(stream, endian=endian)
 
+                if tracer is not None:
+                    field_scope = tracer.scope(field._name, NodeKind.FIELD, field.type.__name__)
+                    field_scope.__enter__()
+                else:
+                    field_scope = None
+
                 if isinstance(field.type, EnumMetaType):
                     value = field.type(bit_buffer.read(field.type.__type__, field.bits))
                 else:
                     value = bit_buffer.read(field.type, field.bits)
+
+                if tracer is not None and bit_buffer.last_span is not None:
+                    backing = bit_buffer._type
+                    little = endian == "<"
+                    span = bit_span(
+                        bit_buffer.last_span[0],
+                        bit_buffer.last_span[1],
+                        bit_buffer.consumed_low - field.bits,
+                        field.bits,
+                        backing.__size__ * 8,
+                        little,
+                    )
+                    tracer.record_bits(span, span.bit_start, span.bit_end)
+                    tracer.current.bit_width = field.bits
+                    if field_scope is not None:
+                        field_scope.__exit__(None, None, None)
 
                 result[field._name] = value
                 continue
@@ -272,18 +297,24 @@ class StructureMetaType(MetaType):
             if bit_buffer is not None:
                 bit_buffer.reset()
 
-            value = field.type._read(stream, context=result, endian=endian)
+            if tracer is not None:
+                with tracer.scope(field._name, NodeKind.FIELD, field.type.__name__):
+                    if not field_traceable(field.type):
+                        from dissect.cstruct.trace import declare_unresolved
+
+                        declare_unresolved(tracer, field.type.__name__)
+                    _link_field_dependencies(tracer, field, result)
+                    value = field.type._read(stream, context=result, endian=endian)
+            else:
+                value = field.type._read(stream, context=result, endian=endian)
 
             result[field._name] = value
             if field.type.__dynamic__:
                 sizes[field._name] = stream.tell() - offset
 
         if cls.__align__:
-            # Align the stream
             stream.seek(-stream.tell() & (cls.__alignment__ - 1), io.SEEK_CUR)
 
-        # Using type.__call__ directly calls the __init__ method of the class
-        # This is faster than calling cls() and bypasses the metaclass __call__ method
         obj = type.__call__(cls, **result)
         obj.__dynamic_sizes__ = sizes
         return obj
@@ -499,6 +530,32 @@ class StructureMetaType(MetaType):
         return cls.__lookup__
 
 
+def _link_field_dependencies(tracer: SourceTracer, field: Field, context: dict[str, Any]) -> None:
+    """Associate a dynamic field with the already-read fields that decide its length or branch."""
+    from dissect.cstruct.expression import Expression
+    from dissect.cstruct.trace import attach_dependencies, expression_identifiers
+    from dissect.cstruct.types.base import BaseArray
+
+    expressions = []
+    field_type = field.type
+    while issubclass(field_type, BaseArray):
+        if isinstance(field_type.__num_entries__, Expression):
+            expressions.append(field_type.__num_entries__)
+        field_type = getattr(field_type, "__type__", field_type)
+        if not issubclass(field_type, BaseArray):
+            break
+
+    def resolver(head: str) -> str | None:
+        for ancestor in reversed(tracer._stack):
+            for child in ancestor.children:
+                if child.name == head:
+                    return child.path
+        return None
+
+    for expression in expressions:
+        attach_dependencies(tracer, expression_identifiers(expression), resolver)
+
+
 class Structure(BaseType, metaclass=StructureMetaType):
     """Base class for cstruct structure type classes.
 
@@ -632,12 +689,23 @@ class UnionMetaType(StructureMetaType):
         result = {}
         sizes = {}
 
+        from dissect.cstruct.trace import TracingStream
+        from dissect.cstruct.trace import current_tracer as _cur
+
         if cls.__size__ is None:
             offset = stream.tell()
             buf = stream
+        elif isinstance(stream, TracingStream):
+            # Reuse the tracing wrapper so member reads keep their absolute offsets and attribution
+            offset = 0
+            buf = stream
         else:
             offset = 0
-            buf = io.BytesIO(stream.read(cls.__size__))
+            raw = stream.read(cls.__size__)
+            buf = io.BytesIO(raw)
+            tracer = _cur(stream)
+            if tracer is not None:
+                buf = TracingStream(buf, tracer)
 
         for field in cls.__fields__:
             field_type = field.type
@@ -647,7 +715,19 @@ class UnionMetaType(StructureMetaType):
                 start = field.offset
 
             buf.seek(offset + start)
-            value = field_type._read(buf, context=result, endian=endian)
+            from dissect.cstruct.trace import NodeKind, field_traceable
+            from dissect.cstruct.trace import current_tracer as _current_tracer
+
+            field_tracer = _current_tracer(buf)
+            if field_tracer is None:
+                value = field_type._read(buf, context=result, endian=endian)
+            else:
+                with field_tracer.scope(field._name, NodeKind.FIELD, field_type.__name__):
+                    if not field_traceable(field_type):
+                        from dissect.cstruct.trace import declare_unresolved
+
+                        declare_unresolved(field_tracer, field_type.__name__)
+                    value = field_type._read(buf, context=result, endian=endian)
 
             result[field._name] = value
             if field.type.__dynamic__:
@@ -656,46 +736,53 @@ class UnionMetaType(StructureMetaType):
         return result, sizes
 
     def _read(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> Self:  # type: ignore
-        if cls.__size__ is None:
-            start = stream.tell()
-            result, sizes = cls._read_fields(stream, context=context, endian=endian)
-            size = stream.tell() - start
-            stream.seek(start)
-            buf = stream.read(size)
-        elif "__init__" in cls.__dict__ and cls.__new__ is object.__new__:
-            # Fast path for static unions
-            buf = stream.read(cls.__size__)
-            result, sizes = cls._read_fields(io.BytesIO(buf), endian=endian)
+        from dissect.cstruct.trace import NodeKind, TracingStream, current_tracer
 
-            obj: Union = object.__new__(cls)
-            obj.__dict__.update(result)
+        tracer = current_tracer(stream)
+        union_scope = tracer.scope(cls.__name__, NodeKind.UNION, cls.__name__) if tracer is not None else None
+        if union_scope is not None:
+            union_scope.__enter__()
+        try:
+            if cls.__size__ is None:
+                start = stream.tell()
+                result, sizes = cls._read_fields(stream, context=context, endian=endian)
+                size = stream.tell() - start
+                stream.seek(start)
+                buf = stream.read(size)
+            elif "__init__" in cls.__dict__ and cls.__new__ is object.__new__:
+                start = stream.tell()
+                buf = stream.read(cls.__size__)
+                inner = io.BytesIO(buf)
+                if tracer is not None:
+                    inner = TracingStream(inner, tracer, base_offset=start)
+                result, sizes = cls._read_fields(inner, endian=endian)
+
+                obj = object.__new__(cls)
+                obj.__dict__.update(result)
+                object.__setattr__(obj, "__dynamic_sizes__", sizes)
+                object.__setattr__(obj, "_buf", buf)
+                object.__setattr__(obj, "_endian", endian)
+                obj._proxify()
+                return obj
+            else:
+                start = stream.tell()
+                result = {}
+                sizes = {}
+                buf = stream.read(cls.__size__)
+
+            obj = type.__call__(cls, **result)
             object.__setattr__(obj, "__dynamic_sizes__", sizes)
             object.__setattr__(obj, "_buf", buf)
             object.__setattr__(obj, "_endian", endian)
+
+            if cls.__size__ is not None:
+                obj._update()
+
             obj._proxify()
             return obj
-        else:
-            result = {}
-            sizes = {}
-            buf = stream.read(cls.__size__)
-
-        # Create the object and set the values
-        # Using type.__call__ directly calls the __init__ method of the class
-        # This is faster than calling cls() and bypasses the metaclass __call__ method
-        # It also makes it easier to differentiate between user-initialization of the class
-        # and initialization from a stream read
-        obj: Union = type.__call__(cls, **result)
-        object.__setattr__(obj, "__dynamic_sizes__", sizes)
-        object.__setattr__(obj, "_buf", buf)
-        object.__setattr__(obj, "_endian", endian)
-
-        if cls.__size__ is not None:
-            obj._update()
-
-        # Proxify any nested structures
-        obj._proxify()
-
-        return obj
+        finally:
+            if union_scope is not None:
+                union_scope.__exit__(None, None, None)
 
     def _write_field(cls) -> Field | None:
         """Return the field to write a union by, its largest field and preferably not an anonymous structure."""

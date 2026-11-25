@@ -62,13 +62,30 @@ class Packed(BaseType, Generic[T], metaclass=PackedMetaType):
     def _read_array(
         cls, stream: BinaryIO, count: int, *, context: dict[str, Any] | None = None, endian: Endianness
     ) -> list[Self]:
+        from dissect.cstruct.trace import _ElementAttributor, current_tracer
+
+        tracer = current_tracer(stream)
         if count == EOF:
-            data = stream.read()
+            attributor = _ElementAttributor(tracer, cls.__name__, cls.__size__) if tracer is not None else None
+            if attributor is not None:
+                attributor.__enter__()
+            try:
+                data = stream.read()
+            finally:
+                if attributor is not None:
+                    attributor.__exit__(None, None, None)
             length = len(data)
             count = length // cls.__size__
         else:
             length = cls.__size__ * count
-            data = stream.read(length)
+            attributor = _ElementAttributor(tracer, cls.__name__, cls.__size__) if tracer is not None else None
+            if attributor is not None:
+                attributor.__enter__()
+            try:
+                data = stream.read(length)
+            finally:
+                if attributor is not None:
+                    attributor.__exit__(None, None, None)
 
         fmt = _struct(endian, f"{count}{cls.__fmt__}")
 

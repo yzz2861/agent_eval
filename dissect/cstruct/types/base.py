@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, TypeVar
 
 from dissect.cstruct.exception import ArraySizeError
 from dissect.cstruct.expression import Expression
+from dissect.cstruct.trace import TracingStream, current_tracer
 from dissect.cstruct.util import classproperty, normalize_endianness
 
 if TYPE_CHECKING:
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from dissect.cstruct.cstruct import AllowedEndianness, Endianness, cstruct
+    from dissect.cstruct.trace import SourceTracer
 
 
 EOF = -0xE0F  # Negative counts are illegal anyway, so abuse that for our EOF sentinel
@@ -49,10 +51,10 @@ class MetaType(type):
                 if len(obj) == cls.__size__ and isinstance(obj, bytes) and issubclass(cls, bytes):
                     # Shortcut for char/bytes type
                     return type.__call__(cls, obj)
-                return cls._read(BytesIO(obj), endian=cls.__cs__.endian)
+                return cls._read(_trace_stream(BytesIO(obj)), endian=cls.__cs__.endian)
 
             if hasattr(obj, "read") and not isinstance(obj, cls):
-                return cls._read(obj, endian=cls.__cs__.endian)
+                return cls._read(_trace_stream(obj), endian=cls.__cs__.endian)
 
             if not _is_buffer_type(obj):
                 # E.g. initializing with a value
@@ -63,7 +65,7 @@ class MetaType(type):
                 endian = (
                     normalize_endianness(endian) if (endian := kwargs.get("endian")) is not None else cls.__cs__.endian
                 )
-                return cls._read(obj, endian=endian)
+                return cls._read(_trace_stream(obj), endian=endian)
 
             if isinstance(obj, bytes) and len(obj) == cls.__size__ and issubclass(cls, bytes):
                 # Shortcut for char/bytes type
@@ -110,7 +112,7 @@ class MetaType(type):
             The parsed value of this type.
         """
         endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
-        return cls._read(BytesIO(data), endian=endian)
+        return cls._read(_trace_stream(BytesIO(data)), endian=endian)
 
     def read(cls, obj: BinaryIO | bytes | memoryview | bytearray, *, endian: AllowedEndianness | None = None) -> Self:  # type: ignore
         """Parse the given data.
@@ -130,7 +132,7 @@ class MetaType(type):
             raise TypeError("Invalid object type")
 
         endian = normalize_endianness(endian) if endian is not None else cls.__cs__.endian
-        return cls._read(obj, endian=endian)
+        return cls._read(_trace_stream(obj), endian=endian)
 
     def write(cls, stream: BinaryIO, value: Any, *, endian: AllowedEndianness | None = None) -> int:
         """Write a value to a writable file-like object.
@@ -189,17 +191,28 @@ class MetaType(type):
             context: Optional reading context.
             endian: The endianness to use when parsing (little, big, network, <, >, !, @ or =).
         """
+        from dissect.cstruct.trace import NodeKind, current_tracer
+
+        tracer = current_tracer(stream)
         result = []
         if count == EOF:
             while not _is_eof(stream):
-                result.append(cls._read(stream, context=context, endian=endian))
+                if tracer is None:
+                    result.append(cls._read(stream, context=context, endian=endian))
+                else:
+                    with tracer.scope(cls.__name__, NodeKind.ELEMENT, cls.__name__):
+                        result.append(cls._read(stream, context=context, endian=endian))
             return result
 
         # This is purposefully a simple loop
         # PyPy will pre-allocate the list for a list comprehension ahead of time, which will cause huge allocations in
         # case wrong count is read, instead of causing an EOFError when trying to read the type.
         for _ in range(count):
-            result.append(cls._read(stream, context=context, endian=endian))  # noqa: PERF401
+            if tracer is None:
+                result.append(cls._read(stream, context=context, endian=endian))
+            else:
+                with tracer.scope(cls.__name__, NodeKind.ELEMENT, cls.__name__):
+                    result.append(cls._read(stream, context=context, endian=endian))
         return result
 
     def _read_0(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> list[Self]:
@@ -324,7 +337,14 @@ def _instance_write(self: BaseType, stream: BinaryIO, *, endian: AllowedEndianne
 
 
 class BaseType(metaclass=MetaType):
-    """Base class for cstruct type classes."""
+    """Base class for cstruct type classes.
+
+    Set ``__traceable__ = False`` on a custom type to explicitly declare that the bytes backing a parsed value
+    cannot be located precisely. When source tracking is enabled such values get an unresolved provenance node
+    instead of a fabricated byte range.
+    """
+
+    __traceable__: ClassVar[bool] = True
 
     dumps = _overload(MetaType.dumps, _instance_dumps)
     write = _overload(MetaType.write, _instance_write)
@@ -364,10 +384,35 @@ class BaseArray(BaseType):
 
     @classmethod
     def _read(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> list[BaseType]:
-        if cls.__null_terminated__:
-            return cls.__type__._read_0(stream, context=context, endian=endian)
+        from dissect.cstruct.expression import Expression
+        from dissect.cstruct.trace import NodeKind, attach_dependencies, current_tracer, expression_identifiers
 
-        return cls.__type__._read_array(stream, cls._num_entries(context), context=context, endian=endian)
+        tracer = current_tracer(stream)
+        if tracer is None:
+            if cls.__null_terminated__:
+                return cls.__type__._read_0(stream, context=context, endian=endian)
+            return cls.__type__._read_array(stream, cls._num_entries(context), context=context, endian=endian)
+
+        with tracer.scope(cls.__type__.__name__ + "[]", NodeKind.ARRAY, cls.__name__):
+            num_entries = cls.__num_entries__
+            if isinstance(num_entries, Expression):
+
+                def resolver(head: str) -> str | None:
+                    for ancestor in reversed(tracer._stack):
+                        for child in ancestor.children:
+                            if child.name == head:
+                                return child.path
+                    candidate = "$." + head
+                    found = tracer.graph.find(candidate)
+                    return found.path if found is not None else None
+
+                attach_dependencies(tracer, expression_identifiers(num_entries), resolver)
+
+            if cls.__null_terminated__:
+                result = cls.__type__._read_0(stream, context=context, endian=endian)
+            else:
+                result = cls.__type__._read_array(stream, cls._num_entries(context), context=context, endian=endian)
+            return result
 
     @classmethod
     def _num_entries(cls, context: dict[str, Any] | None) -> int:
@@ -504,3 +549,18 @@ def _is_eof(stream: BinaryIO) -> bool:
 
 # As mentioned in the BaseType class, we correctly set the type here
 MetaType.__ArrayType__ = Array
+
+
+def _active_tracer() -> SourceTracer | None:
+    """Return the tracer installed on the current context, if source tracking is enabled."""
+    from dissect.cstruct.trace import _ACTIVE_TRACER
+
+    return _ACTIVE_TRACER.get()
+
+
+def _trace_stream(stream: BinaryIO) -> BinaryIO:
+    """Wrap a stream with the active tracer when source tracking is enabled and it is not wrapped yet."""
+    tracer = current_tracer(stream) or _active_tracer()
+    if tracer is not None and not isinstance(stream, TracingStream):
+        return TracingStream(stream, tracer)
+    return stream

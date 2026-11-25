@@ -284,6 +284,49 @@ assert example.magic == 1337
 assert example.data == b"arbitrary length data"
 ```
 
+### Source tracking (provenance)
+For forensics you sometimes need to know exactly which firmware bytes back a parsed field, including nested
+structures, bit fields, arrays and pointer dereferences. cstruct can record this provenance on demand with
+`trace_read`. Tracking is opt-in: the default read path is unchanged and does not pay for the bookkeeping.
+
+```python
+import io
+from dissect.cstruct import cstruct, trace_read
+
+cs = cstruct().load("""
+struct Header {
+    uint32 count;
+    uint16 items[count];
+};
+""")
+
+stream = io.BytesIO((2).to_bytes(4, "little") + b"\x11\x11\x22\x22")
+with trace_read("Header") as traced:
+    header = cs.Header(stream)
+
+graph = traced.graph
+
+# Exact byte range of a field
+graph.find("$.count").evidence()  # [ByteSpan(start=0, end=4)]
+
+# Dynamic arrays cite the field that decided their length
+items = next(node for node in graph.root.walk() if node.kind.value == "array")
+assert "$.count" in items.depends_on
+
+# Rebuild only the fields backed by complete, provable evidence
+graph.reconstruct(stream)
+
+# Serialize the whole provenance graph, including every raw read and how overlapping reads relate
+graph.to_dict()
+```
+
+Bit fields are narrowed to individual bits (even when they straddle bytes), union members and pointer aliases
+that intentionally share bytes are classified as `shared_evidence`, while unrelated repeated reads are flagged as
+`overwrite`. Truncated reads are marked `partial` and excluded from the reconstruction. A custom type that cannot
+guarantee exact byte evidence must set `__traceable__ = False`; its nodes are then explicitly reported as
+unresolved instead of getting fabricated ranges. The compiled and interpreted backends produce equivalent graphs:
+when tracking is active the compiled reader transparently delegates to the interpreted reader.
+
 ### Custom definition parsers
 Don't like the C-like definition syntax? Write your own syntax parser!
 

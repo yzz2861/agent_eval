@@ -4,6 +4,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, BinaryIO, Generic, TypeVar
 
 from dissect.cstruct.exception import NullPointerDereference
+from dissect.cstruct.trace import NodeKind, current_tracer
 from dissect.cstruct.types.base import BaseType, normalize_endianness
 from dissect.cstruct.types.char import Char
 from dissect.cstruct.types.void import Void
@@ -33,6 +34,8 @@ class Pointer(int, BaseType, Generic[T]):
         obj.__stream = stream
         obj.__context = context
         obj.__endian = endian
+        object.__setattr__(obj, "_trace_node", None)
+        object.__setattr__(obj, "_trace_deref_node", None)
         obj.dereference = cache(obj.dereference)
         return obj
 
@@ -43,18 +46,22 @@ class Pointer(int, BaseType, Generic[T]):
         return str(self.dereference())
 
     def __getattr__(self, attr: str) -> Any:
+        if attr.startswith("_trace_"):
+            raise AttributeError(attr)
         return getattr(self.dereference(), attr)
 
     @staticmethod
     def __op(op: Callable[[int, int], int]) -> Callable[[Self, int], Self]:
         def method(self: Self, other: int) -> Self:
-            return type.__call__(
+            result = type.__call__(
                 self.__class__,
                 op(self, other),
                 self.__stream,
                 context=self.__context,
                 endian=self.__endian,
             )
+            object.__setattr__(result, "_trace_node", getattr(self, "_trace_node", None))
+            return result
 
         return method
 
@@ -82,13 +89,17 @@ class Pointer(int, BaseType, Generic[T]):
 
     @classmethod
     def _read(cls, stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: Endianness) -> Self:
-        return cls.__new__(
+        pointer = cls.__new__(
             cls,
             cls.__cs__.pointer._read(stream, context=context, endian=endian),
             stream,
             context=context,
             endian=endian,
         )
+        tracer = current_tracer(stream)
+        if tracer is not None:
+            pointer._trace_node = tracer.current
+        return pointer
 
     @classmethod
     def _write(cls, stream: BinaryIO, data: int, *, endian: Endianness) -> int:
@@ -108,14 +119,28 @@ class Pointer(int, BaseType, Generic[T]):
         if issubclass(self.__type__, Void):
             return None
 
+        tracer = current_tracer(self.__stream)
         position = self.__stream.tell()
         self.__stream.seek(self)
 
-        if issubclass(self.__type__, Char):
-            # This makes the assumption that a char pointer is a null-terminated string
-            value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
+        if tracer is None:
+            if issubclass(self.__type__, Char):
+                # This makes the assumption that a char pointer is a null-terminated string
+                value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
+            else:
+                value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
         else:
-            value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+            parent = getattr(self, "_trace_node", None) or tracer.current
+            node = tracer.begin_on(parent, "dereference", NodeKind.DEREFERENCE, self.__type__.__name__ + "*")
+            try:
+                node.target_address = int(self)
+                if issubclass(self.__type__, Char):
+                    value = self.__type__._read_0(self.__stream, context=self.__context, endian=endian)
+                else:
+                    value = self.__type__._read(self.__stream, context=self.__context, endian=endian)
+                self._trace_deref_node = node
+            finally:
+                tracer.end()
 
         # Restore the stream position after reading the value
         self.__stream.seek(position)

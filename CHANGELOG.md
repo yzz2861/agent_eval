@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Optional byte-level source (provenance) tracking via `dissect.cstruct.trace.trace_read`, recording the exact
+  stream ranges of nested fields, bit fields (down to individual bits), arrays and pointer dereferences. Derived
+  array lengths and conditional branches are linked to the fields that decide them; overlapping reads are
+  classified as shared evidence (unions, pointer aliases) or unexpected overwrites, and truncated reads are marked
+  partial. Custom types opt out of precise tracking with `__traceable__ = False` and are reported as unresolved
+  instead of getting fabricated ranges. The compiled reader delegates to the interpreted reader while tracking is
+  active, so both backends produce an equivalent source graph. Tracking is opt-in and the default read path is
+  unchanged.
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
 
 ### Changed

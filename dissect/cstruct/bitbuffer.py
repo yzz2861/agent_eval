@@ -24,7 +24,10 @@ class BitBuffer:
 
             self._type = field_type
             self._remaining = field_type.__size__ * 8
+            start = self.stream.tell()
             self._buffer = field_type._read(self.stream, endian=self.endian)
+            self.last_span = (start, self.stream.tell())
+            self.consumed_low = 0
 
         if isinstance(self._buffer, bytes):
             if self.endian == "<":
@@ -38,10 +41,12 @@ class BitBuffer:
         if self.endian == "<":
             v = self._buffer & ((1 << bits) - 1)
             self._buffer >>= bits
+            self.consumed_low += bits
             self._remaining -= bits
         else:
             v = self._buffer & (((1 << (self._remaining - bits)) - 1) ^ ((1 << self._remaining) - 1))
             v >>= self._remaining - bits
+            self.consumed_low += bits
             self._remaining -= bits
 
         return v
@@ -80,3 +85,5 @@ class BitBuffer:
         self._type = None
         self._buffer = 0
         self._remaining = 0
+        self.last_span = None
+        self.consumed_low = 0

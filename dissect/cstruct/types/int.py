@@ -32,9 +32,19 @@ class Int(int, BaseType):
         if count == EOF:
             return MetaType._read_array(cls, stream, count, context=context, endian=endian)
 
+        from dissect.cstruct.trace import _ElementAttributor, current_tracer
+
         size = cls.__size__
         length = size * count
-        data = stream.read(length)
+        tracer = current_tracer(stream)
+        attributor = _ElementAttributor(tracer, cls.__name__, size) if tracer is not None else None
+        if attributor is not None:
+            attributor.__enter__()
+        try:
+            data = stream.read(length)
+        finally:
+            if attributor is not None:
+                attributor.__exit__(None, None, None)
         if len(data) != length:
             raise EOFError(f"Read {len(data) % size} bytes, but expected {size}")
 

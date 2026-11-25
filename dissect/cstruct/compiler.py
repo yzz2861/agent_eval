@@ -118,7 +118,7 @@ class _LazyCompile:
                 log.debug("Failed to compile %s", cls, exc_info=e)
                 self.method = self._revert()
 
-            if cls.__dict__.get(self.name) is self:
+            if cls.__dict__.get(self.name) is self and not getattr(self, "_defer_install", False):
                 setattr(cls, self.name, self.method)
 
         return self.method
@@ -135,6 +135,31 @@ class _LazyCompileRead(_LazyCompile):
     """Descriptor that compiles the ``_read`` method of a structure on first access and replaces itself with it."""
 
     name = "_read"
+    _defer_install = True
+
+    def compile(self) -> classmethod:
+        compiled = super().compile()
+        if getattr(compiled, "__wrapped_for_tracing__", False):
+            return compiled
+
+        interpreted = classmethod(type(self.cls)._read)
+        compiled_func = compiled.__func__
+        interpreted_func = interpreted.__func__
+
+        def _read(cls: type[Structure], stream: BinaryIO, *, context: dict[str, Any] | None = None, endian: str) -> Any:
+            from dissect.cstruct.trace import current_tracer
+
+            if current_tracer(stream) is not None:
+                return interpreted_func(cls, stream, context=context, endian=endian)
+            return compiled_func(cls, stream, context=context, endian=endian)
+
+        _read.__source__ = getattr(compiled_func, "__source__", None)
+        _read.__wrapped_for_tracing__ = True
+        wrapper = classmethod(_read)
+        self.method = wrapper
+        if self.cls.__dict__.get(self.name) is self:
+            setattr(self.cls, self.name, wrapper)
+        return wrapper
 
     def _generator(self, inline: bool) -> _SourceGenerator:
         return _ReadSourceGenerator(self.cls, self.fields, inline)
