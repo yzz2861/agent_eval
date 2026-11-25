@@ -574,6 +574,45 @@ test -z "$(pip-audit -r requirements.txt --format=json 2>/dev/null | jq '.depend
 
 which runs `pip-audit` as usual and exits with a non-zero code only if there are fixed versions for the known vulnerabilities.
 
+## Offline disclosure review
+
+`pip-audit-disclose` is an offline companion entry point for reviewing and
+distributing local audit results to external recipients (e.g. contractors
+that each maintain a different environment). It never contacts a
+vulnerability service; it only merges `pip-audit --format json` files that
+were collected per deployment scope and redacts them per recipient:
+
+```console
+$ pip-audit-disclose \
+    --scope web=audits/web.json \
+    --scope worker=audits/worker.json \
+    --recipients recipients.json \
+    --out-dir dist/
+```
+
+The recipient config maps each recipient to the deployment scopes they are
+authorized to see, and may optionally narrow the fixed disclosure field
+whitelist (`name`, `version`, `vulns.id`, `vulns.fix_versions` by
+default):
+
+```json
+{
+  "recipients": {
+    "contractor-a": { "scopes": ["web"] },
+    "contractor-b": { "scopes": ["worker"] }
+  },
+  "disclosure_fields": ["name", "version", "vulns.id", "vulns.fix_versions"]
+}
+```
+
+Each `dist/<recipient>.json` contains only the records within that
+recipient's scopes (dependencies shared between environments are only
+counted when covered by an authorized scope, and same-name packages from
+different build lines stay distinct), plus an omission note whose digest
+the internal reviewer can recompute to verify exactly what was withheld.
+Records that no recipient can claim, and the full merged data, are kept in
+`dist/internal.json`, which must not be distributed.
+
 ## Security Model
 
 This section exists to describe the security assumptions you **can** and **must not**
