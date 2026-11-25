@@ -1847,3 +1847,26 @@ class PdfReader(PdfDocCommon):
         if self._named_destinations_cache is None:
             self._named_destinations_cache = super()._get_named_destinations()
         return self._named_destinations_cache
+
+    def navigation_audit(self, **kwargs: Any) -> Any:
+        """Return a read-only navigation and named-destination audit."""
+        from .navigation import audit_navigation  # noqa: PLC0415
+
+        return audit_navigation(self, **kwargs)
+
+    def navigation_forensics_report(self, **kwargs: Any) -> Any:
+        """Alias for :meth:`navigation_audit`."""
+        return self.navigation_audit(**kwargs)
+
+    @property
+    def navigation(self) -> Any:
+        """Return the object-oriented navigation forensics entry point."""
+        from .navigation import NavigationForensics  # noqa: PLC0415
+
+        return NavigationForensics(self)
+
+    audit_navigation = navigation_audit
+    navigation_forensics = navigation_audit
+    inspect_navigation = navigation_audit
+    verify_navigation = navigation_audit
+    collect_navigation_evidence = navigation_audit

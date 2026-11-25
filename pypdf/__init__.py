@@ -17,6 +17,17 @@ from ._text_extraction import mult
 from ._version import __version__
 from ._writer import ObjectDeletionFlag, PdfWriter
 from .constants import ImageType
+from .navigation import (
+    NavigationAudit,
+    NavigationAuditor,
+    NavigationForensics,
+    NavigationHop,
+    NavigationPath,
+    NavigationReference,
+    NavigationReport,
+    NavigationTrace,
+    audit_navigation,
+)
 from .pagerange import PageRange, parse_filename_page_ranges
 from .papersizes import PaperSize
 
@@ -27,14 +38,20 @@ try:
 except ImportError:
     pil_version = "none"
 
-_debug_versions = (
-    f"pypdf=={__version__}, {crypt_provider=}, PIL={pil_version}"
-)
+_debug_versions = f"pypdf=={__version__}, {crypt_provider=}, PIL={pil_version}"
 
 __all__ = [
     "Configuration",
     "DocumentInformation",
     "ImageType",
+    "NavigationAudit",
+    "NavigationAuditor",
+    "NavigationForensics",
+    "NavigationHop",
+    "NavigationPath",
+    "NavigationReference",
+    "NavigationReport",
+    "NavigationTrace",
     "ObjectDeletionFlag",
     "PageObject",
     "PageRange",
@@ -46,6 +63,7 @@ __all__ = [
     "__version__",
     "_debug_versions",
     "apply_configuration",
+    "audit_navigation",
     "get_configuration",
     "mult",
     "overwrite_configuration",
