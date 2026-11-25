@@ -117,6 +117,29 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("binding.py", expect)
 
+    def test_async_approval_toctou(self):
+        """Test stale approval decisions across awaits."""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 2, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 2},
+        }
+        self.check_example("async_approval_unfrozen.py", expect)
+
+        # freezing the decision before the await silences the finding
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+        }
+        self.check_example("async_approval_frozen.py", expect)
+
+        # unanalyzable scheduling yields a boundary note, a conditional
+        # await yields a medium confidence finding
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 1, "MEDIUM": 1, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 2, "HIGH": 0},
+        }
+        self.check_example("async_approval_boundary.py", expect)
+
     def test_crypto_md5(self):
         """Test the `hashlib.md5` example."""
         expect = {
