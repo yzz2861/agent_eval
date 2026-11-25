@@ -1,0 +1,22 @@
+{
+  "advisory": "Sun Solaris 5.8 or 5.9 with BEA Weblogic 8.1 installed",
+  "inventories": [
+    {
+      "asset_id": "P-1001",
+      "role": "production",
+      "covered_parts": ["a", "o"],
+      "components": [
+        "cpe:2.3:o:sun:solaris:5.9:*:*:*:*:*:*:*",
+        "cpe:2.3:a:bea:weblogic:8.1:*:*:*:*:*:*:*"
+      ]
+    },
+    {
+      "asset_id": "D-2002",
+      "role": "disaster_recovery",
+      "covered_parts": ["a"],
+      "components": [
+        "cpe:2.3:a:bea:weblogic:8.1:*:*:*:*:*:*:*"
+      ]
+    }
+  ]
+}

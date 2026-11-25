@@ -327,6 +327,31 @@ class CPELanguage2_3(CPELanguage):
         else:
             return False
 
+    def assess_applicability(self, inventories):
+        """
+        Offline applicability assessment against one or more asset
+        inventories.
+
+        Each inventory represents a deployment and carries its own component
+        list and the parts (application, operating system, hardware) that
+        have been fully inventoried. The expression is evaluated
+        independently for every deployment with three-valued logic, so a
+        branch can be matched, excluded or left as insufficient evidence.
+
+        The classic boolean :meth:`language_match` interface is kept
+        unchanged; this method only adds the offline, evidence-aware
+        assessment on top of the same language expression.
+
+        :param inventories: a single :class:`~cpe.applicability.AssetInventory`
+            or a list of them, one per deployment.
+        :returns: the per-asset and overall applicability assessment.
+        :rtype: cpe.applicability.ApplicabilityAssessment
+        """
+
+        from .applicability import ApplicabilityEvaluator
+
+        return ApplicabilityEvaluator(self).assess(inventories)
+
 if __name__ == "__main__":
     import doctest
     doctest.testmod()
