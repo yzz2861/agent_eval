@@ -35,6 +35,7 @@ Reference Guide
    framework
    macho_o
    ptypes
+   slice_diff
 
 Online Resources
 ----------------

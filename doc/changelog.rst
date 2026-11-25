@@ -6,6 +6,12 @@ macholib 1.16.4
 
 * Update classifiers for Python 3.13 and 3.14
 
+* Add :mod:`macholib.slice_diff`, a read-only pairwise auditor for fat
+  Mach-O files.  It matches architecture slices across reordered, absent or
+  duplicate architectures, explains reference-rewrite load commands and their
+  layout effects, and separately reports unexplained segment content edits,
+  code signature changes and missing evidence with byte ranges on both files.
+
 macholib 1.16.3
 ---------------
 
