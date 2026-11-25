@@ -11,3 +11,6 @@ tmp/
 .DS_Store
 .coverage
 coverage.xml
+
+# evidence_timeline generated demo output
+sample_output/
