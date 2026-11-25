@@ -14,6 +14,10 @@ from string import Formatter
 from markupsafe import EscapeFormatter
 from markupsafe import Markup
 
+from .capabilities import ACTIVE_GRANT as ACTIVE_GRANT
+from .capabilities import CapabilityReviewer as CapabilityReviewer
+from .capabilities import CapabilityRegistry as CapabilityRegistry
+from .capabilities import *  # noqa: F403
 from .environment import Environment
 from .exceptions import SecurityError
 from .runtime import Context
@@ -244,6 +248,56 @@ class SandboxedEnvironment(Environment):
         self.globals["range"] = safe_range
         self.binop_table = self.default_binop_table.copy()
         self.unop_table = self.default_unop_table.copy()
+        self.capability_registry = CapabilityRegistry()
+        self.capability_reviewer = CapabilityReviewer(
+            self, registry=self.capability_registry
+        )
+
+    def overlay(self, *args: t.Any, **kwargs: t.Any) -> "SandboxedEnvironment":
+        rv = t.cast("SandboxedEnvironment", super().overlay(*args, **kwargs))
+        registry = getattr(self, "capability_registry", None) or CapabilityRegistry()
+        rv.capability_registry = registry
+        old_reviewer = getattr(self, "capability_reviewer", None)
+        reviewer_kwargs = {}
+
+        if old_reviewer is not None:
+            reviewer_kwargs = {
+                "allow_unknown_dynamic_calls": old_reviewer.allow_unknown_dynamic_calls,
+                "allow_lazy_templates": old_reviewer.allow_lazy_templates,
+                "allow_unsafe_callables": old_reviewer.allow_unsafe_callables,
+                "recursive_templates": old_reviewer.recursive_templates,
+                "runtime_safe_calls": old_reviewer.runtime_safe_calls,
+                "strict_template_names": old_reviewer.strict_template_names,
+            }
+
+        rv.capability_reviewer = CapabilityReviewer(
+            rv, registry=registry, **reviewer_kwargs
+        )
+        return rv
+
+    def review_capabilities(self, target: t.Any = None, **kwargs: t.Any) -> t.Any:
+        return self.capability_reviewer.review(target, **kwargs)
+
+    def approve_capabilities(self, target: t.Any = None, **kwargs: t.Any) -> t.Any:
+        return self.capability_reviewer.approve(target, **kwargs)
+
+    def require_capabilities(self, target: t.Any = None, **kwargs: t.Any) -> t.Any:
+        return self.capability_reviewer.require(target, **kwargs)
+
+    def render_reviewed(self, target: t.Any = None, *args: t.Any, **kwargs: t.Any) -> t.Any:
+        return self.capability_reviewer.render(target, *args, **kwargs)
+
+    review = review_capabilities
+    audit_capabilities = review_capabilities
+    check_capabilities = review_capabilities
+
+    def _load_template(self, name: str, globals: t.Any = None) -> t.Any:
+        grant = ACTIVE_GRANT.get()
+
+        if grant is not None:
+            grant.authorize_template_name(name)
+
+        return super()._load_template(name, globals)
 
     def is_safe_attribute(self, obj: t.Any, attr: str, value: t.Any) -> bool:
         """The sandboxed environment will call this method to check if the
@@ -394,6 +448,9 @@ class SandboxedEnvironment(Environment):
 
         # the double prefixes are to avoid double keyword argument
         # errors when proxying the call.
+        grant = ACTIVE_GRANT.get()
+        if grant is not None:
+            grant.authorize_call(__obj)
         if not __self.is_safe_callable(__obj):
             raise SecurityError(f"{__obj!r} is not safely callable")
         return __context.call(__obj, *args, **kwargs)
@@ -410,6 +467,16 @@ class ImmutableSandboxedEnvironment(SandboxedEnvironment):
             return False
 
         return not modifies_known_mutable(obj, attr)
+
+
+class CapabilitySandboxedEnvironment(SandboxedEnvironment):
+    """Sandboxed environment with a capability reviewer attached."""
+
+
+ReviewedSandboxedEnvironment = CapabilitySandboxedEnvironment
+CapabilityGuardedEnvironment = CapabilitySandboxedEnvironment
+SecureSandboxedEnvironment = CapabilitySandboxedEnvironment
+SandboxedCapabilityEnvironment = CapabilitySandboxedEnvironment
 
 
 class SandboxedFormatter(Formatter):
