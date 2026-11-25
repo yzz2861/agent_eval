@@ -1,0 +1,336 @@
+{
+  "as_of": "2026-11-25",
+  "results": [
+    {
+      "id": "GR-DELTA-20261116",
+      "release_line_id": "rel-delta-2026.11",
+      "release_line": "rel-delta-2026.11",
+      "branches": [
+        "delta/core"
+      ],
+      "finding": {
+        "type": "Twilio API Key",
+        "filename": "detect_secrets/plugins/twilio.py",
+        "hashed_secret": "34c2246140bc39b1fce81d9be2124f713a06bdaf",
+        "baseline_line_number": 17,
+        "requested_line_number": 17,
+        "line_matches_baseline": true,
+        "identity_key": "Twilio API Key|detect_secrets/plugins/twilio.py|34c2246140bc39b1fce81d9be2124f713a06bdaf"
+      },
+      "start_date": "2026-11-16",
+      "allowance_working_days": 5,
+      "nominal_due_date": "2026-11-20",
+      "due_date": "2026-11-23",
+      "due_weekday": "周一",
+      "used_working_days_as_of": 5,
+      "paused_working_days_as_of": 1,
+      "remaining_working_days": 0,
+      "state": "exhausted",
+      "overdue_working_days_as_of": 2,
+      "verified_branch_days": 1,
+      "deduplicated_pause_days": 1,
+      "applied_pause_working_days": 1,
+      "duplicate_days_removed": 0,
+      "evidence": [
+        {
+          "branch": "delta/core",
+          "date": "2026-11-18",
+          "weekday": "周三",
+          "evidence_id": "CHG-DELTA-9012",
+          "status": "verified",
+          "verified_working_outage": true,
+          "treatment": "计入暂停工作日"
+        }
+      ],
+      "schedule": [
+        {
+          "date": "2026-11-16",
+          "weekday": "周一",
+          "kind": "work",
+          "billable_index": 1,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-17",
+          "weekday": "周二",
+          "kind": "work",
+          "billable_index": 2,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-18",
+          "weekday": "周三",
+          "kind": "outage",
+          "billable_index": null,
+          "evidence_ids": [
+            "CHG-DELTA-9012"
+          ],
+          "branch_count": 1,
+          "binding_count": 1
+        },
+        {
+          "date": "2026-11-19",
+          "weekday": "周四",
+          "kind": "work",
+          "billable_index": 3,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-20",
+          "weekday": "周五",
+          "kind": "work",
+          "billable_index": 4,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-23",
+          "weekday": "周一",
+          "kind": "due",
+          "billable_index": 5,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        }
+      ]
+    },
+    {
+      "id": "GR-ATLAS-20261123",
+      "release_line_id": "rel-atlas-2026.11",
+      "release_line": "rel-atlas-2026.11",
+      "branches": [
+        "atlas/payments"
+      ],
+      "finding": {
+        "type": "Private Key",
+        "filename": "detect_secrets/plugins/private_key.py",
+        "hashed_secret": "daefe0b4345a654580dcad25c7c11ff4c944a8c0",
+        "baseline_line_number": 45,
+        "requested_line_number": 45,
+        "line_matches_baseline": true,
+        "identity_key": "Private Key|detect_secrets/plugins/private_key.py|daefe0b4345a654580dcad25c7c11ff4c944a8c0"
+      },
+      "start_date": "2026-11-23",
+      "allowance_working_days": 5,
+      "nominal_due_date": "2026-11-27",
+      "due_date": "2026-11-30",
+      "due_weekday": "周一",
+      "used_working_days_as_of": 2,
+      "paused_working_days_as_of": 1,
+      "remaining_working_days": 3,
+      "state": "active",
+      "overdue_working_days_as_of": 0,
+      "verified_branch_days": 1,
+      "deduplicated_pause_days": 1,
+      "applied_pause_working_days": 1,
+      "duplicate_days_removed": 0,
+      "evidence": [
+        {
+          "branch": "atlas/payments",
+          "date": "2026-11-24",
+          "weekday": "周二",
+          "evidence_id": "CHG-ATLAS-7781",
+          "status": "verified",
+          "verified_working_outage": true,
+          "treatment": "计入暂停工作日"
+        }
+      ],
+      "schedule": [
+        {
+          "date": "2026-11-23",
+          "weekday": "周一",
+          "kind": "work",
+          "billable_index": 1,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-24",
+          "weekday": "周二",
+          "kind": "outage",
+          "billable_index": null,
+          "evidence_ids": [
+            "CHG-ATLAS-7781"
+          ],
+          "branch_count": 1,
+          "binding_count": 1
+        },
+        {
+          "date": "2026-11-25",
+          "weekday": "周三",
+          "kind": "work",
+          "billable_index": 2,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-26",
+          "weekday": "周四",
+          "kind": "work",
+          "billable_index": 3,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-27",
+          "weekday": "周五",
+          "kind": "work",
+          "billable_index": 4,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-30",
+          "weekday": "周一",
+          "kind": "due",
+          "billable_index": 5,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        }
+      ]
+    },
+    {
+      "id": "GR-BOREALIS-20261123",
+      "release_line_id": "rel-borealis-2026.12",
+      "release_line": "rel-borealis-2026.12",
+      "branches": [
+        "borealis/api",
+        "borealis/web"
+      ],
+      "finding": {
+        "type": "JSON Web Token",
+        "filename": "docs/audit.md",
+        "hashed_secret": "d6b66ddd9ea7dbe760114bfe9a97352a5e139134",
+        "baseline_line_number": 180,
+        "requested_line_number": 180,
+        "line_matches_baseline": true,
+        "identity_key": "JSON Web Token|docs/audit.md|d6b66ddd9ea7dbe760114bfe9a97352a5e139134"
+      },
+      "start_date": "2026-11-23",
+      "allowance_working_days": 5,
+      "nominal_due_date": "2026-11-27",
+      "due_date": "2026-12-01",
+      "due_weekday": "周二",
+      "used_working_days_as_of": 1,
+      "paused_working_days_as_of": 2,
+      "remaining_working_days": 4,
+      "state": "active",
+      "overdue_working_days_as_of": 0,
+      "verified_branch_days": 3,
+      "deduplicated_pause_days": 2,
+      "applied_pause_working_days": 2,
+      "duplicate_days_removed": 1,
+      "evidence": [
+        {
+          "branch": "borealis/web",
+          "date": "2026-11-24",
+          "weekday": "周二",
+          "evidence_id": "INC-BW-2211",
+          "status": "verified",
+          "verified_working_outage": true,
+          "treatment": "计入暂停工作日"
+        },
+        {
+          "branch": "borealis/web",
+          "date": "2026-11-25",
+          "weekday": "周三",
+          "evidence_id": "INC-BW-2218",
+          "status": "verified",
+          "verified_working_outage": true,
+          "treatment": "证据有效；该发布线当日只计一次，合流不重复冲抵"
+        },
+        {
+          "branch": "borealis/api",
+          "date": "2026-11-25",
+          "weekday": "周三",
+          "evidence_id": "INC-BA-2214",
+          "status": "verified",
+          "verified_working_outage": true,
+          "treatment": "证据有效；该发布线当日只计一次，合流不重复冲抵"
+        }
+      ],
+      "schedule": [
+        {
+          "date": "2026-11-23",
+          "weekday": "周一",
+          "kind": "work",
+          "billable_index": 1,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-24",
+          "weekday": "周二",
+          "kind": "outage",
+          "billable_index": null,
+          "evidence_ids": [
+            "INC-BW-2211"
+          ],
+          "branch_count": 1,
+          "binding_count": 1
+        },
+        {
+          "date": "2026-11-25",
+          "weekday": "周三",
+          "kind": "outage",
+          "billable_index": null,
+          "evidence_ids": [
+            "INC-BW-2218",
+            "INC-BA-2214"
+          ],
+          "branch_count": 2,
+          "binding_count": 2
+        },
+        {
+          "date": "2026-11-26",
+          "weekday": "周四",
+          "kind": "work",
+          "billable_index": 2,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-27",
+          "weekday": "周五",
+          "kind": "work",
+          "billable_index": 3,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-11-30",
+          "weekday": "周一",
+          "kind": "work",
+          "billable_index": 4,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        },
+        {
+          "date": "2026-12-01",
+          "weekday": "周二",
+          "kind": "due",
+          "billable_index": 5,
+          "evidence_ids": [],
+          "branch_count": 0,
+          "binding_count": 0
+        }
+      ]
+    }
+  ]
+}

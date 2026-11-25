@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "notice": "最小可替换样例台账；初始工作区未提供真实业务分支、停机证据或宽限额度。",
+  "calendar": {
+    "timezone": "Asia/Shanghai",
+    "working_weekdays": [1, 2, 3, 4, 5],
+    "holidays": []
+  },
+  "as_of": "2026-11-25",
+  "grace_records": [
+    {
+      "id": "GR-DELTA-20261116",
+      "release_line": {
+        "id": "RL-DELTA-2026Q4",
+        "name": "release/delta-2026.11",
+        "branches": ["delta/core"]
+      },
+      "start_date": "2026-11-16",
+      "allowance_working_days": 5,
+      "finding": {
+        "type": "Twilio API Key",
+        "filename": "detect_secrets/plugins/twilio.py",
+        "hashed_secret": "34c2246140bc39b1fce81d9be2124f713a06bdaf",
+        "baseline_line_number": 17
+      },
+      "outage_evidence": [
+        {
+          "branch": "delta/core",
+          "date": "2026-11-18",
+          "evidence_id": "CHG-DELTA-9012",
+          "status": "verified",
+          "summary": "构建与发布环境断电，发布流水线停摆"
+        }
+      ]
+    },
+    {
+      "id": "GR-ATLAS-20261123",
+      "release_line": {
+        "id": "RL-ATLAS-2026Q4",
+        "name": "release/atlas-2026.11",
+        "branches": ["atlas/payments"]
+      },
+      "start_date": "2026-11-23",
+      "allowance_working_days": 5,
+      "finding": {
+        "type": "Private Key",
+        "filename": "detect_secrets/plugins/private_key.py",
+        "hashed_secret": "daefe0b4345a654580dcad25c7c11ff4c944a8c0",
+        "baseline_line_number": 45
+      },
+      "outage_evidence": [
+        {
+          "branch": "atlas/payments",
+          "date": "2026-11-24",
+          "evidence_id": "CHG-ATLAS-7781",
+          "status": "verified",
+          "summary": "支付分支预发环境数据库故障，无法验证修复"
+        }
+      ]
+    },
+    {
+      "id": "GR-BOREALIS-20261123",
+      "release_line": {
+        "id": "RL-BOREALIS-2026Q4",
+        "name": "release/borealis-2026.12",
+        "branches": ["borealis/web", "borealis/api"],
+        "merge_note": "borealis/api 已合入 borealis/web，两条分支进入同一发布线"
+      },
+      "start_date": "2026-11-23",
+      "allowance_working_days": 5,
+      "finding": {
+        "type": "JSON Web Token",
+        "filename": "docs/audit.md",
+        "hashed_secret": "d6b66ddd9ea7dbe760114bfe9a97352a5e139134",
+        "baseline_line_number": 180
+      },
+      "outage_evidence": [
+        {
+          "branch": "borealis/web",
+          "date": "2026-11-24",
+          "evidence_id": "INC-BW-2211",
+          "status": "verified",
+          "summary": "Web 节点故障，审核台不可用"
+        },
+        {
+          "branch": "borealis/web",
+          "date": "2026-11-25",
+          "evidence_id": "INC-BW-2218",
+          "status": "verified",
+          "summary": "Web 制品仓库只读，无法提交修复"
+        },
+        {
+          "branch": "borealis/api",
+          "date": "2026-11-25",
+          "evidence_id": "INC-BA-2214",
+          "status": "verified",
+          "summary": "API 集群同日故障；与 Web 为同一发布线同一日历停机日"
+        }
+      ]
+    }
+  ]
+}
