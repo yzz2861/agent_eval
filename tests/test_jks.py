@@ -78,6 +78,25 @@ class JksTests(AbstractTest):
         self.assertEqual(store.store_type, "jks")
         self.assertEqual(len(store.entries), 2)
 
+    def test_trusted_certs_shared_cert_bytes_keep_distinct_identities(self):
+        # Two public cert observations share the same certificate bytes but
+        # differ in alias and timestamp; both must survive a save/load round
+        # trip individually instead of the last one overwriting the first.
+        shared_cert = b"shared public cert bytes"
+        obs1 = jks.TrustedCertEntry(type='X.509', cert=shared_cert, timestamp=1463338684456, alias='observation-1')
+        obs2 = jks.TrustedCertEntry(type='X.509', cert=shared_cert, timestamp=1514764800000, alias='observation-2')
+        store = jks.KeyStore.new('jks', [obs1, obs2])
+        store2 = jks.KeyStore.loads(store.saves(''), '')
+        self.assertEqual(len(store2.entries), 2)
+        obs1_2 = self.find_cert(store2, "observation-1")
+        obs2_2 = self.find_cert(store2, "observation-2")
+        self.assertEqual(obs1_2.cert, shared_cert)
+        self.assertEqual(obs1_2.timestamp, 1463338684456)
+        self.assertEqual(obs2_2.cert, shared_cert)
+        self.assertEqual(obs2_2.timestamp, 1514764800000)
+        self.assertEqual(obs1_2.alias, 'observation-1')
+        self.assertEqual(obs2_2.alias, 'observation-2')
+
     def test_bad_keystore_format(self):
         self.assertRaises(jks.util.BadKeystoreFormatException, jks.KeyStore.loads, b"\x00\x00\x00\x00", "") # bad magic bytes
         self.assertRaises(jks.util.BadKeystoreFormatException, jks.KeyStore.loads, b"\xFE\xED\xFE\xED\x00", "") # insufficient store version bytes
