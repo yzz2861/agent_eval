@@ -33,6 +33,10 @@ GENERIC_RULES = {
     "allow",
     "disallow",
     "require",
+    # REVIEW/AUDIT are optional review rules. They consume matching
+    # artifacts and can carry a purpose, but never raise on their own.
+    "review",
+    "audit",
 }
 COMPLEX_RULES = {
     "match",
@@ -70,7 +74,8 @@ def unpack_rule(rule):
       A dictionary of the artifact rule data,
       if it is a generic rule the dictionary is:
       {
-        "rule_type": rule[0] ("CREATE"|"MODIFY"|"DELETE"|"ALLOW"|"DISALLOW")
+        "rule_type": rule[0]
+            ("CREATE"|"MODIFY"|"DELETE"|"ALLOW"|"DISALLOW"|"REVIEW"|"AUDIT")
         "pattern" : rule[1], a path pattern
       }
 
@@ -105,6 +110,33 @@ def unpack_rule(rule):
     rule_type = rule_lower[0]
     pattern = rule[1]
 
+    # Optional review rules may carry a purpose directly in the rule, e.g.
+    # REVIEW <pattern> AS <purpose>.
+    if rule_type in {"review", "audit"} and rule_len == 4 and (
+        rule_lower[2] in {"as", "for"}
+    ):
+        return {
+            "rule_type": rule_type,
+            "pattern": pattern,
+            "purpose": rule[3],
+        }
+
+    if rule_type in {"review", "audit"} and rule_len == 6:
+        if rule_lower[2] == "in" and rule_lower[4] in {"as", "for"}:
+            return {
+                "rule_type": rule_type,
+                "pattern": pattern,
+                "source_prefix": rule[3],
+                "purpose": rule[5],
+            }
+        if rule_lower[2] in {"as", "for"} and rule_lower[4] == "in":
+            return {
+                "rule_type": rule_type,
+                "pattern": pattern,
+                "source_prefix": rule[5],
+                "purpose": rule[3],
+            }
+
     # Type is one of "CREATE", "MODIFY", "DELETE", "ALLOW", "DISALLOW"
     if rule_type in GENERIC_RULES:
         if rule_len != 2:
@@ -117,6 +149,8 @@ def unpack_rule(rule):
                 "ALLOW <pattern>\n\t"
                 "DISALLOW <pattern>\n"
                 "REQUIRE <file>\n"
+                "REVIEW <pattern>\n"
+                "AUDIT <pattern>\n"
                 f"Got:\n\t{rule}"
             )
         return {
@@ -210,6 +244,7 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
     dest_type=None,
     dest_prefix=None,
     dest_name=None,
+    purpose=None,
 ):
     """
     <Purpose>
@@ -220,7 +255,7 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
     <Arguments>
       rule_type:
               One of "MATCH", "CREATE", "DELETE", MODIFY, ALLOW, DISALLOW,
-              REQUIRE (case insensitive).
+              REQUIRE, REVIEW, AUDIT (case insensitive).
 
       pattern:
               A glob pattern to match artifact paths.
@@ -257,7 +292,9 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
         MODIFY <pattern>,
         ALLOW <pattern>,
         DISALLOW <pattern>,
-        REQUIRE <file>
+        REQUIRE <file>,
+        REVIEW <pattern>,
+        AUDIT <pattern>
 
       Note that REQUIRE is somewhat of a weird animal that does not use patterns
       but rather single filenames (for now).
@@ -272,6 +309,15 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
                 rule_type, ", ".join(ALL_RULES)
             )
         )
+
+    if rule_type.upper() in {"REVIEW", "AUDIT"} and purpose:
+        _check_str(purpose)
+        rule = [rule_type.upper(), pattern]
+        if source_prefix:
+            _check_str(source_prefix)
+            rule += ["IN", source_prefix]
+        rule += ["AS", purpose]
+        return rule
 
     if rule_type.upper() == "MATCH":
         if not isinstance(dest_type, str) or not (
@@ -350,3 +396,38 @@ def pack_require_rule(filename):
     but rather single filenames (for now).
     """
     return pack_rule("REQUIRE", filename)
+
+
+def pack_review_rule(pattern, purpose=None, source_prefix=None):
+    """Shortcut for 'pack_rule' to pack an optional REVIEW rule."""
+    return pack_rule(
+        "REVIEW", pattern, purpose=purpose, source_prefix=source_prefix
+    )
+
+
+def pack_audit_rule(pattern, purpose=None, source_prefix=None):
+    """Shortcut for 'pack_rule' to pack an optional AUDIT rule."""
+    return pack_rule(
+        "AUDIT", pattern, purpose=purpose, source_prefix=source_prefix
+    )
+
+
+def review_material_usage(*args, **kwargs):
+    """Run the optional artifact-usage review from the rule module.
+
+    This is a convenience wrapper around
+    :func:`in_toto.reviewlib.review_material_usage`.
+    """
+    import in_toto.reviewlib
+
+    return in_toto.reviewlib.review_material_usage(*args, **kwargs)
+
+
+review_artifact_usage = review_material_usage
+review_artifact_scope = review_material_usage
+audit_material_usage = review_material_usage
+trace_material_usage = review_material_usage
+verify_artifact_scope = review_material_usage
+review = review_material_usage
+audit = review_material_usage
+review_usage = review_material_usage

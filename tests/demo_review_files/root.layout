@@ -1,0 +1,97 @@
+{
+ "signatures": [],
+ "signed": {
+  "_type": "layout",
+  "expires": "2026-12-23T12:49:09Z",
+  "inspect": [],
+  "keys": {},
+  "readme": "",
+  "steps": [
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "base.toml",
+      "IN",
+      "reviewed",
+      "WITH",
+      "MATERIALS",
+      "IN",
+      "reviewed",
+      "FROM",
+      "copy-config"
+     ],
+     [
+      "ALLOW",
+      "reviewed/base.toml"
+     ]
+    ],
+    "expected_products": [
+     [
+      "ALLOW",
+      "dist/*"
+     ]
+    ],
+    "name": "copy-config",
+    "pubkeys": [],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "base.toml",
+      "IN",
+      "dist/release",
+      "WITH",
+      "PRODUCTS",
+      "IN",
+      "dist/release",
+      "FROM",
+      "copy-config"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "ALLOW",
+      "release/*"
+     ]
+    ],
+    "name": "build-release",
+    "pubkeys": [],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "ALLOW",
+      "dist/test/base.toml"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "ALLOW",
+      "test/*"
+     ]
+    ],
+    "name": "build-test",
+    "pubkeys": [],
+    "threshold": 1
+   }
+  ]
+ }
+}

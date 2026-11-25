@@ -396,6 +396,21 @@ class Layout(Signable):
 
         return key_dict
 
+    def review_material_usage(self, links, usage_declarations=None, **kwargs):
+        """Review artifact copy provenance and build-use scope.
+
+        This is a convenience wrapper around
+        :func:`in_toto.reviewlib.review_material_usage`.
+        """
+        import in_toto.reviewlib
+
+        return in_toto.reviewlib.review_material_usage(
+            self, links, usage_declarations, **kwargs
+        )
+
+    review = review_material_usage
+    audit = review_material_usage
+
     def _validate_type(self):
         """Private method to check that the type string is set to layout."""
         if self._type != "layout":

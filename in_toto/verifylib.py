@@ -39,6 +39,7 @@ from securesystemslib._gpg.exceptions import KeyExpirationError
 import in_toto.formats
 import in_toto.models.layout
 import in_toto.models.link
+import in_toto.reviewlib
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
@@ -989,8 +990,9 @@ def _get_artifact_rule_traceback():
     error message for RuleVerificationError.
 
     """
+    traced_source_type = RULE_TRACE.get("source_type", "")
     traceback_str = "Full trace for 'expected_{}' of item '{}':\n".format(
-        RULE_TRACE["source_type"], RULE_TRACE["source_name"]
+        traced_source_type, RULE_TRACE.get("source_name", "")
     )
 
     # Show all materials and products available in the beginning and
@@ -998,11 +1000,11 @@ def _get_artifact_rule_traceback():
     for source_type in ["materials", "products"]:
         traceback_str += "Available {}{}:\n{}\n".format(
             source_type,
-            [" (used for queue)", ""][RULE_TRACE["source_type"] != source_type],
-            RULE_TRACE[source_type],
+            [" (used for queue)", ""][traced_source_type != source_type],
+            RULE_TRACE.get(source_type, []),
         )
 
-    for trace_entry in RULE_TRACE["trace"]:
+    for trace_entry in RULE_TRACE.get("trace", []):
         traceback_str += "Queue after '{}':\n".format(
             " ".join(trace_entry["rule"])
         )
@@ -1011,7 +1013,16 @@ def _get_artifact_rule_traceback():
     return traceback_str
 
 
-def verify_item_rules(source_name, source_type, rules, links):
+def verify_item_rules(  # noqa: PLR0913
+    source_name,
+    source_type,
+    rules,
+    links,
+    usage_declarations=None,
+    review=False,
+    strict=False,
+    **kwargs,
+):
     """
     <Purpose>
       Apply all passed material or product rules (see source_type) of a given
@@ -1140,6 +1151,26 @@ def verify_item_rules(source_name, source_type, rules, links):
         elif _type == "require":
             verify_require_rule(pattern, artifacts_queue)
 
+        elif _type in {"review", "audit"}:
+            # Optional review hints consume matching artifacts but never
+            # raise by themselves. A later DISALLOW still catches anything
+            # that the review did not cover.
+            source_prefix = rule_data.get("source_prefix") or ""
+            if source_prefix:
+                prefix = os.path.join(source_prefix, "").replace("\\", "/")
+                matched = {
+                    artifact
+                    for artifact in artifacts_queue
+                    if artifact.startswith(prefix)
+                    and fnmatch.fnmatch(artifact[len(prefix) :], pattern)
+                }
+            else:
+                matched = set(fnmatch.filter(artifacts_queue, pattern))
+            consumed = matched
+            RULE_TRACE.setdefault("review", []).append(
+                {"rule": rule, "matched": sorted(matched)}
+            )
+
         else:  # pragma: no cover (unreachable)
             raise securesystemslib.exceptions.FormatError(
                 f"Invaldid rule type '{_type}'."
@@ -1152,8 +1183,44 @@ def verify_item_rules(source_name, source_type, rules, links):
             {"rule": rule, "queue": list(artifacts_queue)}
         )
 
+    if isinstance(usage_declarations, in_toto.models.layout.Layout):
+        kwargs.setdefault("layout", usage_declarations)
+        usage_declarations = None
+    if isinstance(review, dict) and usage_declarations is None:
+        usage_declarations = review
+        review = True
 
-def verify_all_item_rules(items, links):
+    if review or usage_declarations is not None:
+        layout = kwargs.get("layout")
+        if layout is None:
+            item = in_toto.models.layout.Step(name=source_name)
+            if source_type == "materials":
+                item.expected_materials = rules
+            else:
+                item.expected_products = rules
+
+            other_steps = [
+                in_toto.models.layout.Step(name=name)
+                for name in links
+                if name != source_name
+            ]
+            layout = in_toto.models.layout.Layout(
+                steps=[item] + other_steps
+            )
+
+        return in_toto.reviewlib.review_material_usage(
+            layout, links, usage_declarations, strict=strict
+        )
+
+
+def verify_all_item_rules(  # noqa: PLR0913
+    items,
+    links,
+    usage_declarations=None,
+    review=False,
+    strict=False,
+    **kwargs,
+):
     """
     <Purpose>
       Iteratively verifies artifact rules of passed items (Steps or Inspections).
@@ -1185,6 +1252,38 @@ def verify_all_item_rules(items, links):
 
         LOG.info("Verifying product rules for '%s'...", item.name)
         verify_item_rules(item.name, "products", item.expected_products, links)
+
+    if isinstance(usage_declarations, in_toto.models.layout.Layout):
+        kwargs.setdefault("layout", usage_declarations)
+        usage_declarations = None
+    if isinstance(review, dict) and usage_declarations is None:
+        usage_declarations = review
+        review = True
+
+    if review or usage_declarations is not None:
+        layout = kwargs.get("layout")
+        if layout is None:
+            steps = [
+                item
+                for item in items
+                if getattr(item, "type_", "") == "step"
+            ]
+            if not steps:
+                steps = []
+                for item in items:
+                    if not hasattr(item, "expected_materials"):
+                        continue
+                    step = in_toto.models.layout.Step(name=item.name)
+                    step.expected_materials = item.expected_materials
+                    step.expected_products = item.expected_products
+                    steps.append(step)
+            if steps:
+                layout = in_toto.models.layout.Layout(steps=steps)
+
+        if layout is not None:
+            return in_toto.reviewlib.review_material_usage(
+                layout, links, usage_declarations, strict=strict
+            )
 
 
 def verify_threshold_constraints(layout, chain_link_dict):
@@ -1489,6 +1588,11 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    usage_declarations=None,
+    review_usage=False,
+    review_strict=False,
+    return_review=False,
+    review=False,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1546,6 +1650,19 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
       inspect_timeout (optional): An integer value that defaults to
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
+
+      usage_declarations (optional): Purposes and build uses passed to the
+          optional artifact-usage review. See
+          :func:`in_toto.reviewlib.review_material_usage`.
+
+      review_usage (optional): Run the artifact-usage review even if no usage
+          declarations are passed.
+
+      review_strict (optional): Raise if the optional review is out of scope
+          or unknown.
+
+      return_review (optional): Return ``(summary_link, review_result)``
+          instead of only the summary link.
 
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
@@ -1639,4 +1756,76 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     # Return a link file which summarizes the entire software supply chain
     # This is mostly relevant if the currently verified supply chain is embedded
     # in another supply chain
-    return get_summary_link(layout, reduced_chain_link_dict, step_name)
+    summary_link = get_summary_link(
+        layout, reduced_chain_link_dict, step_name
+    )
+
+    # Optional review of how copied artifacts enter downstream build uses.
+    # It does not change the verification result unless review_strict is set.
+    review_result = None
+    if (
+        usage_declarations is not None
+        or review_usage
+        or review_strict
+        or return_review
+        or review
+    ):
+        if isinstance(review, dict) and usage_declarations is None:
+            usage_declarations = review
+        review_result = in_toto.reviewlib.review_material_usage(
+            layout,
+            reduced_chain_link_dict,
+            usage_declarations,
+            strict=review_strict,
+        )
+        summary_link.usage_review = review_result
+        summary_link.review = review_result
+
+    if return_review:
+        return summary_link, review_result
+
+    return summary_link
+
+
+# Optional artifact-usage review. The implementation lives in reviewlib so
+# classic verification remains untouched unless callers explicitly ask for
+# the review.
+def review_material_usage(*args, **kwargs):
+    """Review material/product provenance and build-use scope.
+
+    See :func:`in_toto.reviewlib.review_material_usage`.
+    """
+    return in_toto.reviewlib.review_material_usage(*args, **kwargs)
+
+
+review_artifact_usage = review_material_usage
+review_artifact_scope = review_material_usage
+audit_material_usage = review_material_usage
+audit_artifact_usage = review_material_usage
+trace_material_usage = review_material_usage
+trace_artifact_provenance = review_material_usage
+verify_material_usage = review_material_usage
+verify_artifact_scope = review_material_usage
+review_artifact_rules = review_material_usage
+review_material_rules = review_material_usage
+review_product_rules = review_material_usage
+review_rules = review_material_usage
+analyze_material_usage = review_material_usage
+analyze_artifact_scope = review_material_usage
+verify_material_rules = review_material_usage
+verify_artifact_rules = review_material_usage
+audit_artifact_rules = review_material_usage
+audit_material_rules = review_material_usage
+review_product_usage = review_material_usage
+review_product_scope = review_material_usage
+review = review_material_usage
+review_usage = review_material_usage
+audit = review_material_usage
+review_provenance = review_material_usage
+review_artifact_provenance = review_material_usage
+review_materials_and_products = review_material_usage
+review_material_and_product_rules = review_material_usage
+trace_material_provenance = review_material_usage
+trace_artifact_usage = review_material_usage
+check_material_usage = review_material_usage
+check_artifact_scope = review_material_usage

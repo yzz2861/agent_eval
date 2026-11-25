@@ -18,6 +18,18 @@ class RuleVerificationError(Error):
     """Indicates that artifact rule verification failed."""
 
 
+class ArtifactScopeError(RuleVerificationError):
+    """Indicates that an artifact copy entered an out-of-scope use."""
+
+
+class MaterialUsageError(ArtifactScopeError):
+    """Alias for an artifact-usage scope error."""
+
+
+class ReviewUnknownError(ArtifactScopeError):
+    """Indicates that an artifact-usage review could not reach a conclusion."""
+
+
 class ThresholdVerificationError(Error):
     """Indicates that signature threshold verification failed."""
 

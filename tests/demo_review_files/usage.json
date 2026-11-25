@@ -1,0 +1,8 @@
+{
+  "origin": "reviewed/base.toml",
+  "approved_purposes": ["release"],
+  "uses": {
+    "build-release": "release",
+    "build-test": "test"
+  }
+}

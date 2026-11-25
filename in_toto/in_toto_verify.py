@@ -175,6 +175,35 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
 
     parser.add_argument(*GPG_HOME_ARGS, **GPG_HOME_KWARGS)
     parser.add_argument(
+        "--usage-declarations",
+        dest="usage_declarations",
+        type=str,
+        metavar="<path>",
+        help=(
+            "path to a JSON document declaring the intended build use of "
+            "artifact copies. When passed, an optional path-aware usage "
+            "review is run after verification."
+        ),
+    )
+    parser.add_argument(
+        "--review-usage",
+        dest="review_usage",
+        action="store_true",
+        help=(
+            "run the optional artifact usage review even without "
+            "'--usage-declarations'."
+        ),
+    )
+    parser.add_argument(
+        "--review-strict",
+        dest="review_strict",
+        action="store_true",
+        help=(
+            "fail verification if the optional artifact usage review finds "
+            "an out-of-scope or unknown conclusion."
+        ),
+    )
+    parser.add_argument(
         "--inspection-timeout",
         dest="inspect_timeout",
         type=int,
@@ -233,12 +262,30 @@ def main():
                 key = load_public_key_from_file(path)
                 layout_key_dict[key["keyid"]] = key
 
-        verifylib.in_toto_verify(
+        summary_link = verifylib.in_toto_verify(
             layout,
             layout_key_dict,
             args.link_dir,
             inspect_timeout=args.inspect_timeout,
+            usage_declarations=args.usage_declarations,
+            review_usage=(
+                args.review_usage
+                or args.review_strict
+                or bool(args.usage_declarations)
+            ),
+            review_strict=args.review_strict,
         )
+
+        review_result = getattr(summary_link, "usage_review", None)
+        if review_result is not None:
+            LOG.info(
+                "Artifact usage review: %s (in scope: %s, out of scope: %s, "
+                "unknown: %s)",
+                review_result.status,
+                len(review_result.in_scope),
+                len(review_result.out_of_scope),
+                len(review_result.unknown),
+            )
 
     except Exception as e:  # noqa: BLE001
         LOG.error("(in-toto-verify) %s: %s", type(e).__name__, e)

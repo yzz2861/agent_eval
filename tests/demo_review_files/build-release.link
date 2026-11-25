@@ -1,0 +1,20 @@
+{
+ "signatures": [],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [],
+  "environment": {},
+  "materials": {
+   "dist/release/base.toml": {
+    "sha256": "ba250a568129c01f24145d3d520d7253ce94d1c9a83508ad643cc7b2e11d7cfa"
+   }
+  },
+  "name": "build-release",
+  "products": {
+   "release/app.bin": {
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   }
+  }
+ }
+}

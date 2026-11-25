@@ -41,3 +41,22 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+## Optional Artifact Usage Review
+
+The review is an optional, non-fatal analysis of how copies of an approved
+artifact are renamed and consumed across the actual steps of a layout. It is
+path-aware: two downstream files with identical hashes are not interchangeable
+when only one of them is connected to the approved origin by a MATCH rule.
+
+```{eval-rst}
+.. autofunction:: in_toto.reviewlib.review_material_usage
+```
+
+```{eval-rst}
+.. autoclass:: in_toto.reviewlib.ReviewResult
+```
+
+```{eval-rst}
+.. autoclass:: in_toto.reviewlib.Finding
+```
