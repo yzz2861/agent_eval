@@ -1,0 +1,10 @@
+{
+  "comment": "第 1 代档案(已解码镜像)。$bytes=base64 字节串, $tag=CBOR 标签。",
+  "value": {
+    "title": "Quarterly archive 2025-Q4",
+    "created": {"$tag": 1, "value": 1735689600},
+    "owner": "records-ops",
+    "payload": {"$bytes": "AAECAwQ="},
+    "tags": ["archive", "quarterly"]
+  }
+}

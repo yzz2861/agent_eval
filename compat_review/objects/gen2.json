@@ -1,0 +1,12 @@
+{
+  "comment": "第 2 代档案(已解码镜像)。payload 类别由字节串变为文本;新增 summary/version/review_meta;移除 tags。",
+  "value": {
+    "title": "Quarterly archive 2026-Q1",
+    "created": {"$tag": 1, "value": 1743465600},
+    "owner": "records-ops",
+    "summary": "Migrated to generation-2 envelope",
+    "version": 2,
+    "payload": "textual payload replacing binary blob",
+    "review_meta": {"$tag": 60001, "value": {"origin": "migration-2026-11"}}
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "description": "调用方批准的读者描述(批准口径)。每代读者的签收仅覆盖列出的逻辑字段形状,不外延。",
+  "readers": [
+    {
+      "reader_id": "legacy-archive-reader",
+      "generation": 1,
+      "approved_by": "caller:records-ops",
+      "signoff": "SO-2025-114",
+      "fields": {
+        "title":   {"category": "text",         "required": true},
+        "created": {"category": "timestamp",    "required": true},
+        "owner":   {"category": "text",         "required": true},
+        "payload": {"category": "opaque-bytes", "required": false},
+        "tags":    {"category": "text[]",       "required": false}
+      }
+    },
+    {
+      "reader_id": "analytics-export-reader",
+      "generation": 2,
+      "approved_by": "caller:data-platform",
+      "signoff": "SO-2026-041",
+      "fields": {
+        "title":   {"category": "text",      "required": true},
+        "created": {"category": "timestamp", "required": true},
+        "owner":   {"category": "text",      "required": true},
+        "summary": {"category": "text",      "required": false},
+        "version": {"category": "count",     "required": true}
+      }
+    }
+  ]
+}
