@@ -40,3 +40,16 @@ from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:ski
 
 #
 from RestrictedPython.Eval import RestrictionCapableEval
+
+# Explicit opt-in transactional execution layer (additive, does not
+# change the default execution behavior):
+from RestrictedPython.transactions import Binding  # isort:skip
+from RestrictedPython.transactions import CommitError  # isort:skip
+from RestrictedPython.transactions import Transaction  # isort:skip
+from RestrictedPython.transactions import TransactionError  # isort:skip
+from RestrictedPython.transactions import TransactionStateError  # isort:skip
+from RestrictedPython.transactions import UnsupportedWritable  # isort:skip
+from RestrictedPython.transactions import VersionConflict  # isort:skip
+from RestrictedPython.transactions import WritePermissionDenied  # isort:skip
+from RestrictedPython.transactions import WriteRecord  # isort:skip
+from RestrictedPython.transactions import transactional_exec  # isort:skip

@@ -8,3 +8,4 @@ Usage of RestrictedPython
    framework_usage
    policy
    security_considerations
+   transactional_execution

@@ -4,7 +4,14 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add an explicit, opt-in transactional execution layer
+  (``RestrictedPython.transactions``). A ``Transaction`` documents the data
+  objects and write capabilities available to a restricted program, collects
+  nested list, dict and attribute writes on copy-on-write shadows, keeps
+  object identity for aliases and self-referencing containers, checks host
+  versions on commit and applies changes atomically with full rollback on
+  validation or apply failure. Default execution behavior is unchanged; only
+  the standard library is used.
 
 
 9.0 (2026-11-04)
