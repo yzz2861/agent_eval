@@ -34,6 +34,7 @@ class SecretsCollection:
         """
         self.data: Dict[str, Set[PotentialSecret]] = defaultdict(set)
         self.root = root
+        self.coverage_receipts: Dict[str, Any] = {}
 
     @classmethod
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':
@@ -75,6 +76,22 @@ class SecretsCollection:
     def scan_file(self, filename: str) -> None:
         for secret in scan.scan_file(os.path.join(self.root, convert_local_os_path(filename))):
             self[convert_local_os_path(filename)].add(secret)
+
+    def scan_file_with_receipt(self, filename: str, **kwargs: Any) -> Any:
+        """Scan one file and retain its stable coverage receipt."""
+        from ..coverage_receipt import scan_file_with_receipt
+
+        relative_filename = convert_local_os_path(filename)
+        target = os.path.join(self.root, relative_filename)
+        secrets, receipt = scan_file_with_receipt(target, **kwargs)
+        for secret in secrets:
+            self[relative_filename].add(secret)
+        self.coverage_receipts[relative_filename] = receipt
+        return receipt
+
+    @property
+    def coverage(self) -> Dict[str, Any]:
+        return self.coverage_receipts
 
     def scan_diff(self, diff: str) -> None:
         """

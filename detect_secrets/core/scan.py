@@ -166,6 +166,13 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
         return
 
 
+def scan_file_with_receipt(filename: str, **kwargs: Any) -> Tuple[List[PotentialSecret], Any]:
+    """Scan a file and return secrets plus its coverage receipt."""
+    from ..coverage_receipt import scan_file_with_receipt as _scan_file_with_receipt
+
+    return _scan_file_with_receipt(filename, **kwargs)
+
+
 def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
     """
     :raises: ImportError

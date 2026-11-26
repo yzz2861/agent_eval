@@ -85,6 +85,14 @@ def _add_initialize_baseline_options(parser: argparse.ArgumentParser) -> None:
             'slim baselines will need to be remade to be audited.'
         ),
     )
+    group.add_argument(
+        '--coverage-receipt',
+        '--coverage-receipt-output',
+        '--coverage-receipt-out',
+        metavar='PATH',
+        default=None,
+        help='Write stable coverage commitments and categorized intervals to PATH.',
+    )
 
 
 def parse_args(args: argparse.Namespace) -> None:

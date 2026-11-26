@@ -73,6 +73,32 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         root=args.custom_root,
         num_processors=args.num_cores,
     )
+    coverage_receipt_path = getattr(args, 'coverage_receipt', None)
+    if coverage_receipt_path:
+        coverage_collection = SecretsCollection(root=args.custom_root)
+        coverage_receipts = {}
+        for filename in get_files_to_scan(
+            *args.path,
+            should_scan_all_files=args.all_files,
+            root=args.custom_root,
+        ):
+            coverage_collection.scan_file_with_receipt(filename)
+            receipt = coverage_collection.coverage_receipts.get(filename)
+            if receipt is not None:
+                coverage_receipts[filename] = receipt.to_wire_dict()
+
+        with open(coverage_receipt_path, 'w', encoding='utf-8') as handle:
+            json.dump(
+                {
+                    'version': 1,
+                    'file_count': len(coverage_receipts),
+                    'files': coverage_receipts,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+            handle.write('\n')
     if args.baseline is not None:
         # The pre-commit hook's baseline upgrade is to trim the supplied baseline for non-existent
         # secrets, and to upgrade the format to the latest version. This is because the pre-commit
