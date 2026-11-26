@@ -1,0 +1,30 @@
+{
+  "mirror_ports": [
+    {
+      "id": "MP-A",
+      "capture_point": "probe_a",
+      "switch": "dc1-leaf-7",
+      "mirror_port": "Eth1/1",
+      "monitored_port": "Gi1/0/1",
+      "vlans": [
+        100
+      ],
+      "directions": [
+        "outbound"
+      ]
+    },
+    {
+      "id": "MP-B",
+      "capture_point": "probe_b",
+      "switch": "dc2-leaf-3",
+      "mirror_port": "Eth1/2",
+      "monitored_port": "Gi1/0/9",
+      "vlans": [
+        200
+      ],
+      "directions": [
+        "inbound"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1651 @@
+{
+  "summary": {
+    "frame_count": 3,
+    "claim_count": 3,
+    "conflict_count": 1,
+    "conflicting_claim_ids": [
+      "R-B"
+    ],
+    "truncated_evidence_ids": [
+      "truncated_header#1"
+    ],
+    "capture_points": [
+      "probe_a",
+      "probe_b"
+    ],
+    "outer_vlans": [
+      100,
+      200
+    ],
+    "vlan_ids": [
+      100,
+      200
+    ],
+    "multiple_direction_evidence_ids": []
+  },
+  "frames": [
+    {
+      "frame_number": 1,
+      "timestamp": 1764100001.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_a.pcap",
+      "source_id": "probe_a.pcap",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "55ecb9f19c6ed2c787f0ff2195eb8be7a93a77758d3b4b0decb7d77d642a0940",
+      "link_header_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "raw_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 100,
+          "tci": 100,
+          "raw_hex": "81000064",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        100
+      ],
+      "outer_vlan": 100,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_a.pcap#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "probe_a.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100002.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_b.pcap",
+      "source_id": "probe_b.pcap",
+      "capture_point": "probe_b",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "609089d94e6e241240dc06837c6d6f176ff461ccd23ac94871716517f3b058d6",
+      "link_header_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "raw_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:cc:dd:ee:ff:00",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 200,
+          "tci": 200,
+          "raw_hex": "810000c8",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        200
+      ],
+      "outer_vlan": 200,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_b.pcap#1",
+      "evidence_aliases": [
+        "probe_b#1",
+        "probe_b.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-B",
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ],
+          "vlans": [
+            200
+          ],
+          "directions": [
+            "inbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-B"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        200
+      ],
+      "scope_vlans": [
+        200
+      ],
+      "expected_vlans": [
+        200
+      ],
+      "direction_sources": [
+        {
+          "direction": "inbound",
+          "record_id": "MP-B",
+          "vlans": [
+            200
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ],
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "inbound"
+      ],
+      "directions": [
+        "inbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100003.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/truncated_header.pcap",
+      "source_id": "truncated_header",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 13,
+      "captured_len": 13,
+      "caplen": 13,
+      "original_len": 40,
+      "orig_len": 40,
+      "wire_truncated": true,
+      "read_truncated": false,
+      "frame_sha256": "3198eb1a4581785506fb38a0c81650ed6c70a41792c78c59f70d8cd552d2a12d",
+      "link_header_hex": "02aabbccddee02112233445581",
+      "raw_hex": "02aabbccddee02112233445581",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": null,
+      "ethertype_name": null,
+      "vlan_tags": [],
+      "vlan_ids": [],
+      "outer_vlan": null,
+      "mpls_labels": [],
+      "dpkt_parsed": false,
+      "dpkt_error": "NeedData: got 13, 14 needed at least",
+      "parse_errors": [
+        "short Ethernet header",
+        "NeedData: got 13, 14 needed at least"
+      ],
+      "warnings": [],
+      "evidence_id": "truncated_header#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "truncated_header#1"
+      ],
+      "link_layer": "Ethernet",
+      "link_header_complete": false,
+      "header_truncated": true,
+      "truncated": true,
+      "is_truncated": true,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "conflicts": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "has_scope_or_vlan_conflict": true
+    }
+  ],
+  "results": [
+    {
+      "frame_number": 1,
+      "timestamp": 1764100001.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_a.pcap",
+      "source_id": "probe_a.pcap",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "55ecb9f19c6ed2c787f0ff2195eb8be7a93a77758d3b4b0decb7d77d642a0940",
+      "link_header_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "raw_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 100,
+          "tci": 100,
+          "raw_hex": "81000064",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        100
+      ],
+      "outer_vlan": 100,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_a.pcap#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "probe_a.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100002.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_b.pcap",
+      "source_id": "probe_b.pcap",
+      "capture_point": "probe_b",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "609089d94e6e241240dc06837c6d6f176ff461ccd23ac94871716517f3b058d6",
+      "link_header_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "raw_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:cc:dd:ee:ff:00",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 200,
+          "tci": 200,
+          "raw_hex": "810000c8",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        200
+      ],
+      "outer_vlan": 200,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_b.pcap#1",
+      "evidence_aliases": [
+        "probe_b#1",
+        "probe_b.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-B",
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ],
+          "vlans": [
+            200
+          ],
+          "directions": [
+            "inbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-B"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        200
+      ],
+      "scope_vlans": [
+        200
+      ],
+      "expected_vlans": [
+        200
+      ],
+      "direction_sources": [
+        {
+          "direction": "inbound",
+          "record_id": "MP-B",
+          "vlans": [
+            200
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ],
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "inbound"
+      ],
+      "directions": [
+        "inbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100003.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/truncated_header.pcap",
+      "source_id": "truncated_header",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 13,
+      "captured_len": 13,
+      "caplen": 13,
+      "original_len": 40,
+      "orig_len": 40,
+      "wire_truncated": true,
+      "read_truncated": false,
+      "frame_sha256": "3198eb1a4581785506fb38a0c81650ed6c70a41792c78c59f70d8cd552d2a12d",
+      "link_header_hex": "02aabbccddee02112233445581",
+      "raw_hex": "02aabbccddee02112233445581",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": null,
+      "ethertype_name": null,
+      "vlan_tags": [],
+      "vlan_ids": [],
+      "outer_vlan": null,
+      "mpls_labels": [],
+      "dpkt_parsed": false,
+      "dpkt_error": "NeedData: got 13, 14 needed at least",
+      "parse_errors": [
+        "short Ethernet header",
+        "NeedData: got 13, 14 needed at least"
+      ],
+      "warnings": [],
+      "evidence_id": "truncated_header#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "truncated_header#1"
+      ],
+      "link_layer": "Ethernet",
+      "link_header_complete": false,
+      "header_truncated": true,
+      "truncated": true,
+      "is_truncated": true,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "conflicts": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "has_scope_or_vlan_conflict": true
+    }
+  ],
+  "direction_attributions": [
+    {
+      "frame_number": 1,
+      "timestamp": 1764100001.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_a.pcap",
+      "source_id": "probe_a.pcap",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "55ecb9f19c6ed2c787f0ff2195eb8be7a93a77758d3b4b0decb7d77d642a0940",
+      "link_header_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "raw_hex": "02aabbccddee0211223344558100006408006e6f726d616c2d6672616d652d61742d70726f62652d61",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 100,
+          "tci": 100,
+          "raw_hex": "81000064",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        100
+      ],
+      "outer_vlan": 100,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_a.pcap#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "probe_a.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100002.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/probe_b.pcap",
+      "source_id": "probe_b.pcap",
+      "capture_point": "probe_b",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 41,
+      "captured_len": 41,
+      "caplen": 41,
+      "original_len": 41,
+      "orig_len": 41,
+      "wire_truncated": false,
+      "read_truncated": false,
+      "frame_sha256": "609089d94e6e241240dc06837c6d6f176ff461ccd23ac94871716517f3b058d6",
+      "link_header_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "raw_hex": "02ccddeeff00021122334455810000c808006e6f726d616c2d6672616d652d61742d70726f62652d62",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:cc:dd:ee:ff:00",
+      "ethertype": "0x8100",
+      "ethertype_name": "802.1Q",
+      "vlan_tags": [
+        {
+          "tpid": "0x8100",
+          "tpid_name": "802.1Q",
+          "pcp": 0,
+          "dei": 0,
+          "cfi": 0,
+          "vlan_id": 200,
+          "tci": 200,
+          "raw_hex": "810000c8",
+          "truncated": false,
+          "next_ethertype": "0x0800",
+          "next_ethertype_name": "IPv4"
+        }
+      ],
+      "vlan_ids": [
+        200
+      ],
+      "outer_vlan": 200,
+      "mpls_labels": [],
+      "dpkt_parsed": true,
+      "dpkt_error": null,
+      "parse_errors": [],
+      "warnings": [],
+      "evidence_id": "probe_b.pcap#1",
+      "evidence_aliases": [
+        "probe_b#1",
+        "probe_b.pcap#1"
+      ],
+      "link_layer": "Ethernet",
+      "ethertype_value": 33024,
+      "inner_ethertype": "0x0800",
+      "inner_ethertype_name": "IPv4",
+      "link_header_complete": true,
+      "header_truncated": false,
+      "truncated": false,
+      "is_truncated": false,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-B",
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ],
+          "vlans": [
+            200
+          ],
+          "directions": [
+            "inbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-B"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        200
+      ],
+      "scope_vlans": [
+        200
+      ],
+      "expected_vlans": [
+        200
+      ],
+      "direction_sources": [
+        {
+          "direction": "inbound",
+          "record_id": "MP-B",
+          "vlans": [
+            200
+          ],
+          "monitored_ports": [
+            "Gi1/0/9"
+          ],
+          "lookup_keys": [
+            "eth1_2",
+            "mp_b",
+            "probe_b"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "inbound"
+      ],
+      "directions": [
+        "inbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [],
+      "conflicts": [],
+      "has_scope_or_vlan_conflict": false
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1764100003.0,
+      "source": "/Users/bill/领域专项项目/state/agent-eval-intake-20261126/workspaces/ds20261122-py60-055/direction_audit_demo/truncated_header.pcap",
+      "source_id": "truncated_header",
+      "capture_point": "probe_a",
+      "interface_id": null,
+      "interface_name": null,
+      "record_format": "pcap",
+      "linktype": 1,
+      "linktype_name": "EN10MB/Ethernet",
+      "included_len": 13,
+      "captured_len": 13,
+      "caplen": 13,
+      "original_len": 40,
+      "orig_len": 40,
+      "wire_truncated": true,
+      "read_truncated": false,
+      "frame_sha256": "3198eb1a4581785506fb38a0c81650ed6c70a41792c78c59f70d8cd552d2a12d",
+      "link_header_hex": "02aabbccddee02112233445581",
+      "raw_hex": "02aabbccddee02112233445581",
+      "src_mac": "02:11:22:33:44:55",
+      "dst_mac": "02:aa:bb:cc:dd:ee",
+      "ethertype": null,
+      "ethertype_name": null,
+      "vlan_tags": [],
+      "vlan_ids": [],
+      "outer_vlan": null,
+      "mpls_labels": [],
+      "dpkt_parsed": false,
+      "dpkt_error": "NeedData: got 13, 14 needed at least",
+      "parse_errors": [
+        "short Ethernet header",
+        "NeedData: got 13, 14 needed at least"
+      ],
+      "warnings": [],
+      "evidence_id": "truncated_header#1",
+      "evidence_aliases": [
+        "probe_a#1",
+        "truncated_header#1"
+      ],
+      "link_layer": "Ethernet",
+      "link_header_complete": false,
+      "header_truncated": true,
+      "truncated": true,
+      "is_truncated": true,
+      "mac_evidence_complete": true,
+      "ledger_records": [
+        {
+          "record_id": "MP-A",
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ],
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ]
+        }
+      ],
+      "ledger_record_ids": [
+        "MP-A"
+      ],
+      "ledger_matched": true,
+      "ledger_vlans": [
+        100
+      ],
+      "scope_vlans": [
+        100
+      ],
+      "expected_vlans": [
+        100
+      ],
+      "direction_sources": [
+        {
+          "direction": "outbound",
+          "record_id": "MP-A",
+          "vlans": [
+            100
+          ],
+          "monitored_ports": [
+            "Gi1/0/1"
+          ],
+          "lookup_keys": [
+            "eth1_1",
+            "mp_a",
+            "probe_a"
+          ]
+        }
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "directions": [
+        "outbound"
+      ],
+      "multiple_directions_possible": false,
+      "mac_is_direction_evidence": false,
+      "mac_policy": "MAC association is not sufficient; use capture point and trusted ledger",
+      "attribution_status": "attributed",
+      "issues": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "conflicts": [
+        {
+          "code": "missing_outer_vlan",
+          "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+          "expected_vlans": [
+            100
+          ]
+        }
+      ],
+      "has_scope_or_vlan_conflict": true
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "R-A",
+      "id": "R-A",
+      "claimed_direction": "outbound",
+      "direction": "outbound",
+      "mac": "02:11:22:33:44:55",
+      "basis": "report-mac-rule",
+      "status": "supported",
+      "verdict": "supported",
+      "directly_conflicts_with_ledger": false,
+      "is_conflict": false,
+      "conflict": false,
+      "supported": true,
+      "ambiguous": false,
+      "unverifiable": false,
+      "matching_evidence_ids": [
+        "probe_a.pcap#1",
+        "truncated_header#1"
+      ],
+      "conflicting_evidence_ids": [],
+      "supported_evidence_ids": [
+        "probe_a.pcap#1",
+        "truncated_header#1"
+      ],
+      "unverifiable_evidence_ids": [],
+      "mac_conflict_evidence_ids": [],
+      "frame_findings": [
+        {
+          "evidence_id": "probe_a.pcap#1",
+          "frame_number": 1,
+          "capture_point": "probe_a",
+          "source_id": "probe_a.pcap",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "outbound"
+          ],
+          "relation": "supported",
+          "directly_conflicts_with_ledger": false,
+          "mac_relation": "matches_src",
+          "outer_vlan": 100,
+          "vlan_ids": [
+            100
+          ],
+          "truncated": false,
+          "ledger_record_ids": [
+            "MP-A"
+          ],
+          "issues": []
+        },
+        {
+          "evidence_id": "truncated_header#1",
+          "frame_number": 1,
+          "capture_point": "probe_a",
+          "source_id": "truncated_header",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "outbound"
+          ],
+          "relation": "supported",
+          "directly_conflicts_with_ledger": false,
+          "mac_relation": "matches_src",
+          "outer_vlan": null,
+          "vlan_ids": [],
+          "truncated": true,
+          "ledger_record_ids": [
+            "MP-A"
+          ],
+          "issues": [
+            {
+              "code": "missing_outer_vlan",
+              "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+              "expected_vlans": [
+                100
+              ]
+            }
+          ]
+        }
+      ],
+      "reasons": [
+        "claimed direction is present in trusted mirror ledger directions"
+      ],
+      "raw_claim": {
+        "claim_id": "R-A",
+        "mac": "02:11:22:33:44:55",
+        "capture_point": "probe_a",
+        "direction": "outbound",
+        "basis": "report-mac-rule"
+      }
+    },
+    {
+      "claim_id": "R-B",
+      "id": "R-B",
+      "claimed_direction": "outbound",
+      "direction": "outbound",
+      "mac": "02:11:22:33:44:55",
+      "basis": "report-mac-rule",
+      "status": "conflict",
+      "verdict": "conflict",
+      "directly_conflicts_with_ledger": true,
+      "is_conflict": true,
+      "conflict": true,
+      "supported": false,
+      "ambiguous": false,
+      "unverifiable": false,
+      "matching_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "conflicting_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "supported_evidence_ids": [],
+      "unverifiable_evidence_ids": [],
+      "mac_conflict_evidence_ids": [],
+      "frame_findings": [
+        {
+          "evidence_id": "probe_b.pcap#1",
+          "frame_number": 1,
+          "capture_point": "probe_b",
+          "source_id": "probe_b.pcap",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "inbound"
+          ],
+          "relation": "direction_conflict",
+          "directly_conflicts_with_ledger": true,
+          "mac_relation": "matches_src",
+          "outer_vlan": 200,
+          "vlan_ids": [
+            200
+          ],
+          "truncated": false,
+          "ledger_record_ids": [
+            "MP-B"
+          ],
+          "issues": []
+        }
+      ],
+      "reasons": [
+        "claimed 'outbound' is absent from trusted ledger directions for probe_b.pcap#1"
+      ],
+      "raw_claim": {
+        "claim_id": "R-B",
+        "mac": "02:11:22:33:44:55",
+        "capture_point": "probe_b",
+        "direction": "outbound",
+        "basis": "report-mac-rule"
+      }
+    },
+    {
+      "claim_id": "R-TRUNC",
+      "id": "R-TRUNC",
+      "claimed_direction": "outbound",
+      "direction": "outbound",
+      "mac": "02:11:22:33:44:55",
+      "basis": "report-mac-rule",
+      "status": "supported",
+      "verdict": "supported",
+      "directly_conflicts_with_ledger": false,
+      "is_conflict": false,
+      "conflict": false,
+      "supported": true,
+      "ambiguous": false,
+      "unverifiable": false,
+      "matching_evidence_ids": [
+        "truncated_header#1"
+      ],
+      "conflicting_evidence_ids": [],
+      "supported_evidence_ids": [
+        "truncated_header#1"
+      ],
+      "unverifiable_evidence_ids": [],
+      "mac_conflict_evidence_ids": [],
+      "frame_findings": [
+        {
+          "evidence_id": "truncated_header#1",
+          "frame_number": 1,
+          "capture_point": "probe_a",
+          "source_id": "truncated_header",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "outbound"
+          ],
+          "relation": "supported",
+          "directly_conflicts_with_ledger": false,
+          "mac_relation": "matches_src",
+          "outer_vlan": null,
+          "vlan_ids": [],
+          "truncated": true,
+          "ledger_record_ids": [
+            "MP-A"
+          ],
+          "issues": [
+            {
+              "code": "missing_outer_vlan",
+              "message": "trusted records expect VLAN(s) [100], but no outer VLAN tag is present",
+              "expected_vlans": [
+                100
+              ]
+            }
+          ]
+        }
+      ],
+      "reasons": [
+        "claimed direction is present in trusted mirror ledger directions"
+      ],
+      "raw_claim": {
+        "claim_id": "R-TRUNC",
+        "evidence_id": "truncated_header#1",
+        "mac": "02:11:22:33:44:55",
+        "direction": "outbound",
+        "basis": "report-mac-rule"
+      }
+    }
+  ],
+  "conflicting_claims": [
+    {
+      "claim_id": "R-B",
+      "id": "R-B",
+      "claimed_direction": "outbound",
+      "direction": "outbound",
+      "mac": "02:11:22:33:44:55",
+      "basis": "report-mac-rule",
+      "status": "conflict",
+      "verdict": "conflict",
+      "directly_conflicts_with_ledger": true,
+      "is_conflict": true,
+      "conflict": true,
+      "supported": false,
+      "ambiguous": false,
+      "unverifiable": false,
+      "matching_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "conflicting_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "supported_evidence_ids": [],
+      "unverifiable_evidence_ids": [],
+      "mac_conflict_evidence_ids": [],
+      "frame_findings": [
+        {
+          "evidence_id": "probe_b.pcap#1",
+          "frame_number": 1,
+          "capture_point": "probe_b",
+          "source_id": "probe_b.pcap",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "inbound"
+          ],
+          "relation": "direction_conflict",
+          "directly_conflicts_with_ledger": true,
+          "mac_relation": "matches_src",
+          "outer_vlan": 200,
+          "vlan_ids": [
+            200
+          ],
+          "truncated": false,
+          "ledger_record_ids": [
+            "MP-B"
+          ],
+          "issues": []
+        }
+      ],
+      "reasons": [
+        "claimed 'outbound' is absent from trusted ledger directions for probe_b.pcap#1"
+      ],
+      "raw_claim": {
+        "claim_id": "R-B",
+        "mac": "02:11:22:33:44:55",
+        "capture_point": "probe_b",
+        "direction": "outbound",
+        "basis": "report-mac-rule"
+      }
+    }
+  ],
+  "mac_observations": {
+    "02:11:22:33:44:55": {
+      "mac": "02:11:22:33:44:55",
+      "roles": [
+        "src"
+      ],
+      "evidence_ids": [
+        "probe_a.pcap#1",
+        "probe_b.pcap#1",
+        "truncated_header#1"
+      ],
+      "capture_points": [
+        "probe_a",
+        "probe_b"
+      ],
+      "possible_directions": [
+        "inbound",
+        "outbound"
+      ],
+      "vlans": [
+        100,
+        200
+      ],
+      "seen_at_multiple_points": true,
+      "has_multiple_possible_directions": true
+    },
+    "02:aa:bb:cc:dd:ee": {
+      "mac": "02:aa:bb:cc:dd:ee",
+      "roles": [
+        "dst"
+      ],
+      "evidence_ids": [
+        "probe_a.pcap#1",
+        "truncated_header#1"
+      ],
+      "capture_points": [
+        "probe_a"
+      ],
+      "possible_directions": [
+        "outbound"
+      ],
+      "vlans": [
+        100
+      ],
+      "seen_at_multiple_points": false,
+      "has_multiple_possible_directions": false
+    },
+    "02:cc:dd:ee:ff:00": {
+      "mac": "02:cc:dd:ee:ff:00",
+      "roles": [
+        "dst"
+      ],
+      "evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "capture_points": [
+        "probe_b"
+      ],
+      "possible_directions": [
+        "inbound"
+      ],
+      "vlans": [
+        200
+      ],
+      "seen_at_multiple_points": false,
+      "has_multiple_possible_directions": false
+    }
+  },
+  "ledger": {
+    "records": [
+      {
+        "record_id": "MP-A",
+        "lookup_keys": [
+          "eth1_1",
+          "mp_a",
+          "probe_a"
+        ],
+        "vlans": [
+          100
+        ],
+        "directions": [
+          "outbound"
+        ],
+        "monitored_ports": [
+          "Gi1/0/1"
+        ],
+        "raw": {
+          "id": "MP-A",
+          "capture_point": "probe_a",
+          "switch": "dc1-leaf-7",
+          "mirror_port": "Eth1/1",
+          "monitored_port": "Gi1/0/1",
+          "vlans": [
+            100
+          ],
+          "directions": [
+            "outbound"
+          ]
+        }
+      },
+      {
+        "record_id": "MP-B",
+        "lookup_keys": [
+          "eth1_2",
+          "mp_b",
+          "probe_b"
+        ],
+        "vlans": [
+          200
+        ],
+        "directions": [
+          "inbound"
+        ],
+        "monitored_ports": [
+          "Gi1/0/9"
+        ],
+        "raw": {
+          "id": "MP-B",
+          "capture_point": "probe_b",
+          "switch": "dc2-leaf-3",
+          "mirror_port": "Eth1/2",
+          "monitored_port": "Gi1/0/9",
+          "vlans": [
+            200
+          ],
+          "directions": [
+            "inbound"
+          ]
+        }
+      }
+    ]
+  },
+  "scope": {
+    "name": "incident-DS055-authorized-span-scope",
+    "capture_points": [
+      "probe_a",
+      "probe_b"
+    ],
+    "point_vlans": {
+      "probe_a": [
+        100
+      ],
+      "probe_b": [
+        200
+      ]
+    }
+  },
+  "conflicts": [
+    {
+      "claim_id": "R-B",
+      "id": "R-B",
+      "claimed_direction": "outbound",
+      "direction": "outbound",
+      "mac": "02:11:22:33:44:55",
+      "basis": "report-mac-rule",
+      "status": "conflict",
+      "verdict": "conflict",
+      "directly_conflicts_with_ledger": true,
+      "is_conflict": true,
+      "conflict": true,
+      "supported": false,
+      "ambiguous": false,
+      "unverifiable": false,
+      "matching_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "conflicting_evidence_ids": [
+        "probe_b.pcap#1"
+      ],
+      "supported_evidence_ids": [],
+      "unverifiable_evidence_ids": [],
+      "mac_conflict_evidence_ids": [],
+      "frame_findings": [
+        {
+          "evidence_id": "probe_b.pcap#1",
+          "frame_number": 1,
+          "capture_point": "probe_b",
+          "source_id": "probe_b.pcap",
+          "claimed_direction": "outbound",
+          "possible_directions": [
+            "inbound"
+          ],
+          "relation": "direction_conflict",
+          "directly_conflicts_with_ledger": true,
+          "mac_relation": "matches_src",
+          "outer_vlan": 200,
+          "vlan_ids": [
+            200
+          ],
+          "truncated": false,
+          "ledger_record_ids": [
+            "MP-B"
+          ],
+          "issues": []
+        }
+      ],
+      "reasons": [
+        "claimed 'outbound' is absent from trusted ledger directions for probe_b.pcap#1"
+      ],
+      "raw_claim": {
+        "claim_id": "R-B",
+        "mac": "02:11:22:33:44:55",
+        "capture_point": "probe_b",
+        "direction": "outbound",
+        "basis": "report-mac-rule"
+      }
+    }
+  ],
+  "conclusion": "与可信镜像端口台账直接冲突的方向主张: R-B。\n- R-B: 主张 outbound；冲突证据 probe_b.pcap#1。\n同一 MAC 出现在不同采集点: 02:11:22:33:44:55；必须按采集点/台账分别归属，不能全局贴同一方向。\n截断帧已保留原始链路字节和长度差异，MAC 缺失时只能作证据不足处理: truncated_header#1。\n外层 VLAN/QinQ 标签已单独保留；VLAN 不一致属于台账或捕获范围冲突。"
+}

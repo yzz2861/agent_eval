@@ -1,0 +1,25 @@
+{
+  "claims": [
+    {
+      "claim_id": "R-A",
+      "mac": "02:11:22:33:44:55",
+      "capture_point": "probe_a",
+      "direction": "outbound",
+      "basis": "report-mac-rule"
+    },
+    {
+      "claim_id": "R-B",
+      "mac": "02:11:22:33:44:55",
+      "capture_point": "probe_b",
+      "direction": "outbound",
+      "basis": "report-mac-rule"
+    },
+    {
+      "claim_id": "R-TRUNC",
+      "evidence_id": "truncated_header#1",
+      "mac": "02:11:22:33:44:55",
+      "direction": "outbound",
+      "basis": "report-mac-rule"
+    }
+  ]
+}

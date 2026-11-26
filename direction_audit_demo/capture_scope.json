@@ -1,0 +1,15 @@
+{
+  "name": "incident-DS055-authorized-span-scope",
+  "capture_points": [
+    "probe_a",
+    "probe_b"
+  ],
+  "point_vlans": {
+    "probe_a": [
+      100
+    ],
+    "probe_b": [
+      200
+    ]
+  }
+}
