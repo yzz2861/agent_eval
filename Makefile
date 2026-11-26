@@ -7,6 +7,7 @@ lint:
 test:
 	python ./test/test.py -v
 	python ./test/test_modern_interop.py -v
+	python ./test/test_local_verification_fixture.py -v
 
 init_docs:
 	cd docs; sphinx-quickstart
