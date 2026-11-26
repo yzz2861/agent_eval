@@ -1,0 +1,10 @@
+{
+  "package": "libdemo-1.0",
+  "subject": "libdemo.so.1",
+  "components": [
+    {"name": "libalpha.so.1", "file": "libalpha.so.1",   "build_tag": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"},
+    {"name": "libbeta.so.1",  "file": "libbeta-1.2.0.so", "build_tag": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"},
+    {"name": "libgamma.so.1", "file": "libgamma.so.1",   "build_tag": "cccccccccccccccccccccccccccccccccccccccc"},
+    {"name": "libdelta.so.1", "file": "libdelta.so.1",   "build_tag": "dddddddddddddddddddddddddddddddddddddddd"}
+  ]
+}
