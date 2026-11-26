@@ -1,0 +1,3822 @@
+{
+  "schema": "marker-attribution-report/1",
+  "summary": {
+    "artifact_count": 2,
+    "occurrence_count": 12,
+    "marker_name_count": 8,
+    "approved_occurrence_count": 6,
+    "duplicate_name_group_count": 2,
+    "unmapped_occurrence_count": 2,
+    "undeclared_occurrence_count": 2,
+    "provider_mismatch_count": 2
+  },
+  "artifacts": [
+    {
+      "path": "examples/marker_attribution/program_a.elf",
+      "artifact": "program_a.elf",
+      "sha256": "1afe6933806fa6473f920604b47cbb0862025e86a8c70677b51575ad723e66c2",
+      "build_id": null,
+      "elfclass": 64,
+      "e_type": "ET_EXEC",
+      "machine": "EM_X86_64"
+    },
+    {
+      "path": "examples/marker_attribution/program_b.elf",
+      "artifact": "program_b.elf",
+      "sha256": "327ceb615e99ceebfdf4f9547f97e2c7deadb1a7de3827af1cebb6a4c3c4031d",
+      "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2",
+      "elfclass": 64,
+      "e_type": "ET_EXEC",
+      "machine": "EM_X86_64"
+    }
+  ],
+  "manifest": {
+    "record_count": 6,
+    "path": "examples/marker_attribution/manifest.json"
+  },
+  "categories": {
+    "approved_before_release": [
+      "program_a.elf:M001",
+      "program_a.elf:M002",
+      "program_a.elf:M004",
+      "program_b.elf:M001",
+      "program_b.elf:M002",
+      "program_b.elf:M004"
+    ],
+    "approved_attributions": [
+      {
+        "marker": "boot.attested",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.firmware",
+        "address": 4195360,
+        "size": 16,
+        "note_owner": "acme.firmware",
+        "note_type": 1329746689,
+        "note_offset": 7376,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195360,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1056,
+          "file_offset": 1056,
+          "segment_index": 2,
+          "segment_file_offset": 1056,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "approved_before_release"
+        ],
+        "manifest_records": [
+          {
+            "name": "boot.attested",
+            "provider": "acme.firmware",
+            "section": ".text",
+            "address": 4195360,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.firmware",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M001",
+        "coordinate_key": ".text:0x400420:file-0x420",
+        "location_key": "program_a.elf::.text:0x400420:file-0x420"
+      },
+      {
+        "marker": "heartbeat",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.observability",
+        "address": 4195392,
+        "size": 16,
+        "note_owner": "acme.observability",
+        "note_type": 1329746689,
+        "note_offset": 7492,
+        "note_size": 108,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195392,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1088,
+          "file_offset": 1088,
+          "segment_index": 2,
+          "segment_file_offset": 1088,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "approved_before_release",
+          "same_name_different_location"
+        ],
+        "manifest_records": [
+          {
+            "name": "heartbeat",
+            "provider": "acme.observability",
+            "section": ".text",
+            "address": 4195392,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.observability",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M002",
+        "coordinate_key": ".text:0x400440:file-0x440",
+        "location_key": "program_a.elf::.text:0x400440:file-0x440"
+      },
+      {
+        "marker": "trace.flush",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.observability",
+        "address": 4195472,
+        "size": 16,
+        "note_owner": "acme.observability",
+        "note_type": 1329746689,
+        "note_offset": 7708,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195472,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1168,
+          "file_offset": 1168,
+          "segment_index": 2,
+          "segment_file_offset": 1168,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "approved_before_release",
+          "same_name_different_location"
+        ],
+        "manifest_records": [
+          {
+            "name": "trace.flush",
+            "provider": "acme.observability",
+            "section": ".text",
+            "address": 4195472,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.observability",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M004",
+        "coordinate_key": ".text:0x400490:file-0x490",
+        "location_key": "program_a.elf::.text:0x400490:file-0x490"
+      },
+      {
+        "marker": "boot.attested",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "acme.firmware",
+        "address": 4195360,
+        "size": 16,
+        "note_owner": "acme.firmware",
+        "note_type": 1329746689,
+        "note_offset": 8184,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195360,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1056,
+          "file_offset": 1056,
+          "segment_index": 2,
+          "segment_file_offset": 1056,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "approved_before_release"
+        ],
+        "manifest_records": [
+          {
+            "name": "boot.attested",
+            "provider": "acme.firmware",
+            "section": ".text",
+            "address": 4195360,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.firmware",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_b.elf:M001",
+        "coordinate_key": ".text:0x400420:file-0x420",
+        "location_key": "program_b.elf::.text:0x400420:file-0x420"
+      },
+      {
+        "marker": "heartbeat",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "acme.observability",
+        "address": 4195392,
+        "size": 16,
+        "note_owner": "acme.observability",
+        "note_type": 1329746689,
+        "note_offset": 8300,
+        "note_size": 108,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195392,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1088,
+          "file_offset": 1088,
+          "segment_index": 2,
+          "segment_file_offset": 1088,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "approved_before_release",
+          "same_name_different_location"
+        ],
+        "manifest_records": [
+          {
+            "name": "heartbeat",
+            "provider": "acme.observability",
+            "section": ".text",
+            "address": 4195392,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.observability",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_b.elf:M002",
+        "coordinate_key": ".text:0x400440:file-0x440",
+        "location_key": "program_b.elf::.text:0x400440:file-0x440"
+      },
+      {
+        "marker": "release.gate",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "release.ops",
+        "address": 4195488,
+        "size": 16,
+        "note_owner": "release.ops",
+        "note_type": 1329746689,
+        "note_offset": 8520,
+        "note_size": 108,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195488,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1184,
+          "file_offset": 1184,
+          "segment_index": 2,
+          "segment_file_offset": 1184,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "approved_before_release"
+        ],
+        "manifest_records": [
+          {
+            "name": "release.gate",
+            "provider": "release.ops",
+            "artifact": "program_b.elf",
+            "section": ".text",
+            "address": 4195488,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "release.ops",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_b.elf:M004",
+        "coordinate_key": ".text:0x4004a0:file-0x4a0",
+        "location_key": "program_b.elf::.text:0x4004a0:file-0x4a0"
+      }
+    ],
+    "same_name_different_locations": [
+      {
+        "marker": "heartbeat",
+        "occurrence_count": 3,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.driver"
+        ],
+        "location_count": 2,
+        "coordinate_count": 2,
+        "artifact_location_count": 3,
+        "within_artifact_duplicate": true,
+        "locations": [
+          {
+            "marker": "heartbeat",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195392,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 7492,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195392,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1088,
+              "file_offset": 1088,
+              "segment_index": 2,
+              "segment_file_offset": 1088,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_a.elf:M002",
+            "coordinate_key": ".text:0x400440:file-0x440",
+            "location_key": "program_a.elf::.text:0x400440:file-0x440"
+          },
+          {
+            "marker": "heartbeat",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "beta.driver",
+            "address": 4195432,
+            "size": 16,
+            "note_owner": "beta.driver",
+            "note_type": 1329746689,
+            "note_offset": 7600,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195432,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1128,
+              "file_offset": 1128,
+              "segment_index": 2,
+              "segment_file_offset": 1128,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "provider_mismatch"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": false,
+                    "address": false,
+                    "section": true
+                  },
+                  "exact_match": false
+                }
+              ]
+            },
+            "approval": {
+              "approved": false,
+              "pre_release": false
+            },
+            "occurrence_id": "program_a.elf:M003",
+            "coordinate_key": ".text:0x400468:file-0x468",
+            "location_key": "program_a.elf::.text:0x400468:file-0x468"
+          },
+          {
+            "marker": "heartbeat",
+            "artifact": "program_b.elf",
+            "artifact_path": "examples/marker_attribution/program_b.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195392,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 8300,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195392,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195296,
+              "section_size": 472,
+              "section_file_offset": 1088,
+              "file_offset": 1088,
+              "segment_index": 2,
+              "segment_file_offset": 1088,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_b.elf:M002",
+            "coordinate_key": ".text:0x400440:file-0x440",
+            "location_key": "program_b.elf::.text:0x400440:file-0x440"
+          }
+        ]
+      },
+      {
+        "marker": "trace.flush",
+        "occurrence_count": 2,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.tracing"
+        ],
+        "location_count": 2,
+        "coordinate_count": 2,
+        "artifact_location_count": 2,
+        "within_artifact_duplicate": false,
+        "locations": [
+          {
+            "marker": "trace.flush",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195472,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 7708,
+            "note_size": 116,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195472,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1168,
+              "file_offset": 1168,
+              "segment_index": 2,
+              "segment_file_offset": 1168,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "trace.flush",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195472,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_a.elf:M004",
+            "coordinate_key": ".text:0x400490:file-0x490",
+            "location_key": "program_a.elf::.text:0x400490:file-0x490"
+          },
+          {
+            "marker": "trace.flush",
+            "artifact": "program_b.elf",
+            "artifact_path": "examples/marker_attribution/program_b.elf",
+            "source": "elf-note",
+            "provider": "beta.tracing",
+            "address": 4195440,
+            "size": 16,
+            "note_owner": "beta.tracing",
+            "note_type": 1329746689,
+            "note_offset": 8408,
+            "note_size": 112,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195440,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195296,
+              "section_size": 472,
+              "section_file_offset": 1136,
+              "file_offset": 1136,
+              "segment_index": 2,
+              "segment_file_offset": 1136,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+            },
+            "categories": [
+              "provider_mismatch"
+            ],
+            "manifest_records": [
+              {
+                "name": "trace.flush",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195472,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": false,
+                    "address": false,
+                    "section": true
+                  },
+                  "exact_match": false
+                }
+              ]
+            },
+            "approval": {
+              "approved": false,
+              "pre_release": false
+            },
+            "occurrence_id": "program_b.elf:M003",
+            "coordinate_key": ".text:0x400470:file-0x470",
+            "location_key": "program_b.elf::.text:0x400470:file-0x470"
+          }
+        ]
+      }
+    ],
+    "duplicate_locations": [
+      {
+        "marker": "heartbeat",
+        "occurrence_count": 3,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.driver"
+        ],
+        "location_count": 2,
+        "coordinate_count": 2,
+        "artifact_location_count": 3,
+        "within_artifact_duplicate": true,
+        "locations": [
+          {
+            "marker": "heartbeat",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195392,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 7492,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195392,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1088,
+              "file_offset": 1088,
+              "segment_index": 2,
+              "segment_file_offset": 1088,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_a.elf:M002",
+            "coordinate_key": ".text:0x400440:file-0x440",
+            "location_key": "program_a.elf::.text:0x400440:file-0x440"
+          },
+          {
+            "marker": "heartbeat",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "beta.driver",
+            "address": 4195432,
+            "size": 16,
+            "note_owner": "beta.driver",
+            "note_type": 1329746689,
+            "note_offset": 7600,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195432,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1128,
+              "file_offset": 1128,
+              "segment_index": 2,
+              "segment_file_offset": 1128,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "provider_mismatch"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": false,
+                    "address": false,
+                    "section": true
+                  },
+                  "exact_match": false
+                }
+              ]
+            },
+            "approval": {
+              "approved": false,
+              "pre_release": false
+            },
+            "occurrence_id": "program_a.elf:M003",
+            "coordinate_key": ".text:0x400468:file-0x468",
+            "location_key": "program_a.elf::.text:0x400468:file-0x468"
+          },
+          {
+            "marker": "heartbeat",
+            "artifact": "program_b.elf",
+            "artifact_path": "examples/marker_attribution/program_b.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195392,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 8300,
+            "note_size": 108,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195392,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195296,
+              "section_size": 472,
+              "section_file_offset": 1088,
+              "file_offset": 1088,
+              "segment_index": 2,
+              "segment_file_offset": 1088,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "heartbeat",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195392,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_b.elf:M002",
+            "coordinate_key": ".text:0x400440:file-0x440",
+            "location_key": "program_b.elf::.text:0x400440:file-0x440"
+          }
+        ]
+      },
+      {
+        "marker": "trace.flush",
+        "occurrence_count": 2,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.tracing"
+        ],
+        "location_count": 2,
+        "coordinate_count": 2,
+        "artifact_location_count": 2,
+        "within_artifact_duplicate": false,
+        "locations": [
+          {
+            "marker": "trace.flush",
+            "artifact": "program_a.elf",
+            "artifact_path": "examples/marker_attribution/program_a.elf",
+            "source": "elf-note",
+            "provider": "acme.observability",
+            "address": 4195472,
+            "size": 16,
+            "note_owner": "acme.observability",
+            "note_type": 1329746689,
+            "note_offset": 7708,
+            "note_size": 116,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195472,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195200,
+              "section_size": 546,
+              "section_file_offset": 1168,
+              "file_offset": 1168,
+              "segment_index": 2,
+              "segment_file_offset": 1168,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": null
+            },
+            "categories": [
+              "approved_before_release"
+            ],
+            "manifest_records": [
+              {
+                "name": "trace.flush",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195472,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": true,
+                    "address": true,
+                    "section": true
+                  },
+                  "exact_match": true
+                }
+              ]
+            },
+            "approval": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "occurrence_id": "program_a.elf:M004",
+            "coordinate_key": ".text:0x400490:file-0x490",
+            "location_key": "program_a.elf::.text:0x400490:file-0x490"
+          },
+          {
+            "marker": "trace.flush",
+            "artifact": "program_b.elf",
+            "artifact_path": "examples/marker_attribution/program_b.elf",
+            "source": "elf-note",
+            "provider": "beta.tracing",
+            "address": 4195440,
+            "size": 16,
+            "note_owner": "beta.tracing",
+            "note_type": 1329746689,
+            "note_offset": 8408,
+            "note_size": 112,
+            "note_section": ".note.obs",
+            "symbol_section": null,
+            "symbol_type": null,
+            "symbol_bind": null,
+            "mapping": {
+              "requested_address": 4195440,
+              "requested_size": 16,
+              "mapped": true,
+              "file_mapped": true,
+              "memory_mapped": true,
+              "section": ".text",
+              "section_index": 13,
+              "section_type": "SHT_PROGBITS",
+              "section_address": 4195296,
+              "section_size": 472,
+              "section_file_offset": 1136,
+              "file_offset": 1136,
+              "segment_index": 2,
+              "segment_file_offset": 1136,
+              "nobits": false,
+              "zero_fill_only": false,
+              "reason": "ok"
+            },
+            "details": {
+              "v": 1,
+              "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+            },
+            "categories": [
+              "provider_mismatch"
+            ],
+            "manifest_records": [
+              {
+                "name": "trace.flush",
+                "provider": "acme.observability",
+                "section": ".text",
+                "address": 4195472,
+                "approved": true,
+                "approval": {
+                  "status": "approved_before_release",
+                  "approved_at": "2026-11-26T10:00:00+08:00"
+                }
+              }
+            ],
+            "declaration": {
+              "declared": true,
+              "name_only_elsewhere": false,
+              "matches": [
+                {
+                  "provider": "acme.observability",
+                  "approved": {
+                    "approved": true,
+                    "pre_release": true,
+                    "timing_proven_by_timestamps": true,
+                    "status": "approved_before_release",
+                    "approved_at": "2026-11-26T10:00:00+08:00",
+                    "released_at": "2026-11-28T10:00:00+08:00"
+                  },
+                  "checks": {
+                    "provider": false,
+                    "address": false,
+                    "section": true
+                  },
+                  "exact_match": false
+                }
+              ]
+            },
+            "approval": {
+              "approved": false,
+              "pre_release": false
+            },
+            "occurrence_id": "program_b.elf:M003",
+            "coordinate_key": ".text:0x400470:file-0x470",
+            "location_key": "program_b.elf::.text:0x400470:file-0x470"
+          }
+        ]
+      }
+    ],
+    "addresses_without_file_mapping": [
+      {
+        "marker": "telemetry.dma",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "gamma.telemetry",
+        "address": 4718848,
+        "size": 32,
+        "note_owner": "gamma.telemetry",
+        "note_type": 1329746689,
+        "note_offset": 7924,
+        "note_size": 112,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4718848,
+          "requested_size": 32,
+          "mapped": false,
+          "file_mapped": false,
+          "memory_mapped": false,
+          "section": null,
+          "section_index": null,
+          "section_type": null,
+          "section_address": null,
+          "section_size": null,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": null,
+          "segment_file_offset": null,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "address_outside_all_mappings"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "telemetry.dma",
+            "provider": "gamma.telemetry",
+            "artifact": "program_a.elf",
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "gamma.telemetry",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M006",
+        "coordinate_key": "<no-section>:0x480100:unbacked",
+        "location_key": "program_a.elf::<no-section>:0x480100:unbacked"
+      },
+      {
+        "marker": "runtime.watermark",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.runtime",
+        "address": 6293916,
+        "size": 20,
+        "note_owner": "acme.runtime",
+        "note_type": 1329746689,
+        "note_offset": 8036,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 6293916,
+          "requested_size": 20,
+          "mapped": true,
+          "file_mapped": false,
+          "memory_mapped": true,
+          "section": ".bss",
+          "section_index": 25,
+          "section_type": "SHT_NOBITS",
+          "section_address": 6293916,
+          "section_size": 20,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": 3,
+          "segment_file_offset": 2460,
+          "nobits": true,
+          "zero_fill_only": true,
+          "reason": "zero_fill_only"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "runtime.watermark",
+            "provider": "acme.runtime",
+            "artifact": "program_a.elf",
+            "section": ".bss",
+            "address": 6293916,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.runtime",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M007",
+        "coordinate_key": ".bss:0x60099c:unbacked",
+        "location_key": "program_a.elf::.bss:0x60099c:unbacked"
+      }
+    ],
+    "addresses_outside_file_mapping": [
+      {
+        "marker": "telemetry.dma",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "gamma.telemetry",
+        "address": 4718848,
+        "size": 32,
+        "note_owner": "gamma.telemetry",
+        "note_type": 1329746689,
+        "note_offset": 7924,
+        "note_size": 112,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4718848,
+          "requested_size": 32,
+          "mapped": false,
+          "file_mapped": false,
+          "memory_mapped": false,
+          "section": null,
+          "section_index": null,
+          "section_type": null,
+          "section_address": null,
+          "section_size": null,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": null,
+          "segment_file_offset": null,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "address_outside_all_mappings"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "telemetry.dma",
+            "provider": "gamma.telemetry",
+            "artifact": "program_a.elf",
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "gamma.telemetry",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M006",
+        "coordinate_key": "<no-section>:0x480100:unbacked",
+        "location_key": "program_a.elf::<no-section>:0x480100:unbacked"
+      },
+      {
+        "marker": "runtime.watermark",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.runtime",
+        "address": 6293916,
+        "size": 20,
+        "note_owner": "acme.runtime",
+        "note_type": 1329746689,
+        "note_offset": 8036,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 6293916,
+          "requested_size": 20,
+          "mapped": true,
+          "file_mapped": false,
+          "memory_mapped": true,
+          "section": ".bss",
+          "section_index": 25,
+          "section_type": "SHT_NOBITS",
+          "section_address": 6293916,
+          "section_size": 20,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": 3,
+          "segment_file_offset": 2460,
+          "nobits": true,
+          "zero_fill_only": true,
+          "reason": "zero_fill_only"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "runtime.watermark",
+            "provider": "acme.runtime",
+            "artifact": "program_a.elf",
+            "section": ".bss",
+            "address": 6293916,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.runtime",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M007",
+        "coordinate_key": ".bss:0x60099c:unbacked",
+        "location_key": "program_a.elf::.bss:0x60099c:unbacked"
+      }
+    ],
+    "unmapped_addresses": [
+      {
+        "marker": "telemetry.dma",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "gamma.telemetry",
+        "address": 4718848,
+        "size": 32,
+        "note_owner": "gamma.telemetry",
+        "note_type": 1329746689,
+        "note_offset": 7924,
+        "note_size": 112,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4718848,
+          "requested_size": 32,
+          "mapped": false,
+          "file_mapped": false,
+          "memory_mapped": false,
+          "section": null,
+          "section_index": null,
+          "section_type": null,
+          "section_address": null,
+          "section_size": null,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": null,
+          "segment_file_offset": null,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "address_outside_all_mappings"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "telemetry.dma",
+            "provider": "gamma.telemetry",
+            "artifact": "program_a.elf",
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "gamma.telemetry",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M006",
+        "coordinate_key": "<no-section>:0x480100:unbacked",
+        "location_key": "program_a.elf::<no-section>:0x480100:unbacked"
+      },
+      {
+        "marker": "runtime.watermark",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "acme.runtime",
+        "address": 6293916,
+        "size": 20,
+        "note_owner": "acme.runtime",
+        "note_type": 1329746689,
+        "note_offset": 8036,
+        "note_size": 116,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 6293916,
+          "requested_size": 20,
+          "mapped": true,
+          "file_mapped": false,
+          "memory_mapped": true,
+          "section": ".bss",
+          "section_index": 25,
+          "section_type": "SHT_NOBITS",
+          "section_address": 6293916,
+          "section_size": 20,
+          "section_file_offset": null,
+          "file_offset": null,
+          "segment_index": 3,
+          "segment_file_offset": 2460,
+          "nobits": true,
+          "zero_fill_only": true,
+          "reason": "zero_fill_only"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "address_without_file_mapping"
+        ],
+        "manifest_records": [
+          {
+            "name": "runtime.watermark",
+            "provider": "acme.runtime",
+            "artifact": "program_a.elf",
+            "section": ".bss",
+            "address": 6293916,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.runtime",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": true,
+                "address": true,
+                "section": true
+              },
+              "exact_match": true
+            }
+          ]
+        },
+        "approval": {
+          "approved": true,
+          "pre_release": true,
+          "timing_proven_by_timestamps": true,
+          "status": "approved_before_release",
+          "approved_at": "2026-11-26T10:00:00+08:00",
+          "released_at": "2026-11-28T10:00:00+08:00"
+        },
+        "occurrence_id": "program_a.elf:M007",
+        "coordinate_key": ".bss:0x60099c:unbacked",
+        "location_key": "program_a.elf::.bss:0x60099c:unbacked"
+      }
+    ],
+    "undeclared_markers": [
+      {
+        "marker": "shadow.event",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195520,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 7824,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195520,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1216,
+          "file_offset": 1216,
+          "segment_index": 2,
+          "segment_file_offset": 1216,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_a.elf:M005",
+        "coordinate_key": ".text:0x4004c0:file-0x4c0",
+        "location_key": "program_a.elf::.text:0x4004c0:file-0x4c0"
+      },
+      {
+        "marker": "debug.probe",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195528,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 8628,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195528,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1224,
+          "file_offset": 1224,
+          "segment_index": 2,
+          "segment_file_offset": 1224,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_b.elf:M005",
+        "coordinate_key": ".text:0x4004c8:file-0x4c8",
+        "location_key": "program_b.elf::.text:0x4004c8:file-0x4c8"
+      }
+    ],
+    "undeclared_items": [
+      {
+        "marker": "shadow.event",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195520,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 7824,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195520,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1216,
+          "file_offset": 1216,
+          "segment_index": 2,
+          "segment_file_offset": 1216,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_a.elf:M005",
+        "coordinate_key": ".text:0x4004c0:file-0x4c0",
+        "location_key": "program_a.elf::.text:0x4004c0:file-0x4c0"
+      },
+      {
+        "marker": "debug.probe",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195528,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 8628,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195528,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1224,
+          "file_offset": 1224,
+          "segment_index": 2,
+          "segment_file_offset": 1224,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_b.elf:M005",
+        "coordinate_key": ".text:0x4004c8:file-0x4c8",
+        "location_key": "program_b.elf::.text:0x4004c8:file-0x4c8"
+      }
+    ],
+    "unlisted_markers": [
+      {
+        "marker": "shadow.event",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195520,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 7824,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195520,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1216,
+          "file_offset": 1216,
+          "segment_index": 2,
+          "segment_file_offset": 1216,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_a.elf:M005",
+        "coordinate_key": ".text:0x4004c0:file-0x4c0",
+        "location_key": "program_a.elf::.text:0x4004c0:file-0x4c0"
+      },
+      {
+        "marker": "debug.probe",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195528,
+        "size": 8,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 8628,
+        "note_size": 100,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195528,
+          "requested_size": 8,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1224,
+          "file_offset": 1224,
+          "segment_index": 2,
+          "segment_file_offset": 1224,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "undeclared"
+        ],
+        "manifest_records": [],
+        "declaration": {
+          "declared": false,
+          "name_only_elsewhere": false,
+          "matches": []
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_b.elf:M005",
+        "coordinate_key": ".text:0x4004c8:file-0x4c8",
+        "location_key": "program_b.elf::.text:0x4004c8:file-0x4c8"
+      }
+    ],
+    "provider_mismatches": [
+      {
+        "marker": "heartbeat",
+        "artifact": "program_a.elf",
+        "artifact_path": "examples/marker_attribution/program_a.elf",
+        "source": "elf-note",
+        "provider": "beta.driver",
+        "address": 4195432,
+        "size": 16,
+        "note_owner": "beta.driver",
+        "note_type": 1329746689,
+        "note_offset": 7600,
+        "note_size": 108,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195432,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195200,
+          "section_size": 546,
+          "section_file_offset": 1128,
+          "file_offset": 1128,
+          "segment_index": 2,
+          "segment_file_offset": 1128,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": null
+        },
+        "categories": [
+          "provider_mismatch",
+          "same_name_different_location"
+        ],
+        "manifest_records": [
+          {
+            "name": "heartbeat",
+            "provider": "acme.observability",
+            "section": ".text",
+            "address": 4195392,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.observability",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": false,
+                "address": false,
+                "section": true
+              },
+              "exact_match": false
+            }
+          ]
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_a.elf:M003",
+        "coordinate_key": ".text:0x400468:file-0x468",
+        "location_key": "program_a.elf::.text:0x400468:file-0x468"
+      },
+      {
+        "marker": "trace.flush",
+        "artifact": "program_b.elf",
+        "artifact_path": "examples/marker_attribution/program_b.elf",
+        "source": "elf-note",
+        "provider": "beta.tracing",
+        "address": 4195440,
+        "size": 16,
+        "note_owner": "beta.tracing",
+        "note_type": 1329746689,
+        "note_offset": 8408,
+        "note_size": 112,
+        "note_section": ".note.obs",
+        "symbol_section": null,
+        "symbol_type": null,
+        "symbol_bind": null,
+        "mapping": {
+          "requested_address": 4195440,
+          "requested_size": 16,
+          "mapped": true,
+          "file_mapped": true,
+          "memory_mapped": true,
+          "section": ".text",
+          "section_index": 13,
+          "section_type": "SHT_PROGBITS",
+          "section_address": 4195296,
+          "section_size": 472,
+          "section_file_offset": 1136,
+          "file_offset": 1136,
+          "segment_index": 2,
+          "segment_file_offset": 1136,
+          "nobits": false,
+          "zero_fill_only": false,
+          "reason": "ok"
+        },
+        "details": {
+          "v": 1,
+          "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+        },
+        "categories": [
+          "provider_mismatch",
+          "same_name_different_location"
+        ],
+        "manifest_records": [
+          {
+            "name": "trace.flush",
+            "provider": "acme.observability",
+            "section": ".text",
+            "address": 4195472,
+            "approved": true,
+            "approval": {
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00"
+            }
+          }
+        ],
+        "declaration": {
+          "declared": true,
+          "name_only_elsewhere": false,
+          "matches": [
+            {
+              "provider": "acme.observability",
+              "approved": {
+                "approved": true,
+                "pre_release": true,
+                "timing_proven_by_timestamps": true,
+                "status": "approved_before_release",
+                "approved_at": "2026-11-26T10:00:00+08:00",
+                "released_at": "2026-11-28T10:00:00+08:00"
+              },
+              "checks": {
+                "provider": false,
+                "address": false,
+                "section": true
+              },
+              "exact_match": false
+            }
+          ]
+        },
+        "approval": {
+          "approved": false,
+          "pre_release": false
+        },
+        "occurrence_id": "program_b.elf:M003",
+        "coordinate_key": ".text:0x400470:file-0x470",
+        "location_key": "program_b.elf::.text:0x400470:file-0x470"
+      }
+    ]
+  },
+  "comparison": {
+    "marker_count": 8,
+    "approved_marker_count": 4,
+    "approved_markers": [
+      "boot.attested",
+      "heartbeat",
+      "release.gate",
+      "trace.flush"
+    ],
+    "unambiguous_approved_markers": [
+      "boot.attested",
+      "release.gate"
+    ],
+    "markers": {
+      "boot.attested": {
+        "occurrences": 2,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.firmware"
+        ],
+        "distinct_artifact_locations": 2,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": true,
+        "declared": true,
+        "approved_occurrence_ids": [
+          "program_a.elf:M001",
+          "program_b.elf:M001"
+        ],
+        "approved_artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "approved_providers": [
+          "acme.firmware"
+        ],
+        "static_pre_release_attribution": true,
+        "unambiguous_pre_release_attribution": true
+      },
+      "debug.probe": {
+        "occurrences": 1,
+        "artifacts": [
+          "program_b.elf"
+        ],
+        "providers": [
+          "beta.driver"
+        ],
+        "distinct_artifact_locations": 1,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": true,
+        "declared": false,
+        "approved_occurrence_ids": [],
+        "approved_artifacts": [],
+        "approved_providers": [],
+        "static_pre_release_attribution": false,
+        "unambiguous_pre_release_attribution": false
+      },
+      "heartbeat": {
+        "occurrences": 3,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.driver"
+        ],
+        "distinct_artifact_locations": 3,
+        "distinct_coordinates": 2,
+        "within_artifact_duplicate": true,
+        "file_mapped": true,
+        "declared": true,
+        "approved_occurrence_ids": [
+          "program_a.elf:M002",
+          "program_b.elf:M002"
+        ],
+        "approved_artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "approved_providers": [
+          "acme.observability"
+        ],
+        "static_pre_release_attribution": true,
+        "unambiguous_pre_release_attribution": false
+      },
+      "release.gate": {
+        "occurrences": 1,
+        "artifacts": [
+          "program_b.elf"
+        ],
+        "providers": [
+          "release.ops"
+        ],
+        "distinct_artifact_locations": 1,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": true,
+        "declared": true,
+        "approved_occurrence_ids": [
+          "program_b.elf:M004"
+        ],
+        "approved_artifacts": [
+          "program_b.elf"
+        ],
+        "approved_providers": [
+          "release.ops"
+        ],
+        "static_pre_release_attribution": true,
+        "unambiguous_pre_release_attribution": true
+      },
+      "runtime.watermark": {
+        "occurrences": 1,
+        "artifacts": [
+          "program_a.elf"
+        ],
+        "providers": [
+          "acme.runtime"
+        ],
+        "distinct_artifact_locations": 1,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": false,
+        "declared": true,
+        "approved_occurrence_ids": [],
+        "approved_artifacts": [],
+        "approved_providers": [],
+        "static_pre_release_attribution": false,
+        "unambiguous_pre_release_attribution": false
+      },
+      "shadow.event": {
+        "occurrences": 1,
+        "artifacts": [
+          "program_a.elf"
+        ],
+        "providers": [
+          "beta.driver"
+        ],
+        "distinct_artifact_locations": 1,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": true,
+        "declared": false,
+        "approved_occurrence_ids": [],
+        "approved_artifacts": [],
+        "approved_providers": [],
+        "static_pre_release_attribution": false,
+        "unambiguous_pre_release_attribution": false
+      },
+      "telemetry.dma": {
+        "occurrences": 1,
+        "artifacts": [
+          "program_a.elf"
+        ],
+        "providers": [
+          "gamma.telemetry"
+        ],
+        "distinct_artifact_locations": 1,
+        "distinct_coordinates": 1,
+        "within_artifact_duplicate": false,
+        "file_mapped": false,
+        "declared": true,
+        "approved_occurrence_ids": [],
+        "approved_artifacts": [],
+        "approved_providers": [],
+        "static_pre_release_attribution": false,
+        "unambiguous_pre_release_attribution": false
+      },
+      "trace.flush": {
+        "occurrences": 2,
+        "artifacts": [
+          "program_a.elf",
+          "program_b.elf"
+        ],
+        "providers": [
+          "acme.observability",
+          "beta.tracing"
+        ],
+        "distinct_artifact_locations": 2,
+        "distinct_coordinates": 2,
+        "within_artifact_duplicate": false,
+        "file_mapped": true,
+        "declared": true,
+        "approved_occurrence_ids": [
+          "program_a.elf:M004"
+        ],
+        "approved_artifacts": [
+          "program_a.elf"
+        ],
+        "approved_providers": [
+          "acme.observability"
+        ],
+        "static_pre_release_attribution": true,
+        "unambiguous_pre_release_attribution": false
+      }
+    }
+  },
+  "occurrences": [
+    {
+      "marker": "boot.attested",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "acme.firmware",
+      "address": 4195360,
+      "size": 16,
+      "note_owner": "acme.firmware",
+      "note_type": 1329746689,
+      "note_offset": 7376,
+      "note_size": 116,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195360,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195200,
+        "section_size": 546,
+        "section_file_offset": 1056,
+        "file_offset": 1056,
+        "segment_index": 2,
+        "segment_file_offset": 1056,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "approved_before_release"
+      ],
+      "manifest_records": [
+        {
+          "name": "boot.attested",
+          "provider": "acme.firmware",
+          "section": ".text",
+          "address": 4195360,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.firmware",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_a.elf:M001",
+      "coordinate_key": ".text:0x400420:file-0x420",
+      "location_key": "program_a.elf::.text:0x400420:file-0x420"
+    },
+    {
+      "marker": "heartbeat",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "acme.observability",
+      "address": 4195392,
+      "size": 16,
+      "note_owner": "acme.observability",
+      "note_type": 1329746689,
+      "note_offset": 7492,
+      "note_size": 108,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195392,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195200,
+        "section_size": 546,
+        "section_file_offset": 1088,
+        "file_offset": 1088,
+        "segment_index": 2,
+        "segment_file_offset": 1088,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "approved_before_release",
+        "same_name_different_location"
+      ],
+      "manifest_records": [
+        {
+          "name": "heartbeat",
+          "provider": "acme.observability",
+          "section": ".text",
+          "address": 4195392,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.observability",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_a.elf:M002",
+      "coordinate_key": ".text:0x400440:file-0x440",
+      "location_key": "program_a.elf::.text:0x400440:file-0x440"
+    },
+    {
+      "marker": "heartbeat",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "beta.driver",
+      "address": 4195432,
+      "size": 16,
+      "note_owner": "beta.driver",
+      "note_type": 1329746689,
+      "note_offset": 7600,
+      "note_size": 108,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195432,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195200,
+        "section_size": 546,
+        "section_file_offset": 1128,
+        "file_offset": 1128,
+        "segment_index": 2,
+        "segment_file_offset": 1128,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "provider_mismatch",
+        "same_name_different_location"
+      ],
+      "manifest_records": [
+        {
+          "name": "heartbeat",
+          "provider": "acme.observability",
+          "section": ".text",
+          "address": 4195392,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.observability",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": false,
+              "address": false,
+              "section": true
+            },
+            "exact_match": false
+          }
+        ]
+      },
+      "approval": {
+        "approved": false,
+        "pre_release": false
+      },
+      "occurrence_id": "program_a.elf:M003",
+      "coordinate_key": ".text:0x400468:file-0x468",
+      "location_key": "program_a.elf::.text:0x400468:file-0x468"
+    },
+    {
+      "marker": "trace.flush",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "acme.observability",
+      "address": 4195472,
+      "size": 16,
+      "note_owner": "acme.observability",
+      "note_type": 1329746689,
+      "note_offset": 7708,
+      "note_size": 116,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195472,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195200,
+        "section_size": 546,
+        "section_file_offset": 1168,
+        "file_offset": 1168,
+        "segment_index": 2,
+        "segment_file_offset": 1168,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "approved_before_release",
+        "same_name_different_location"
+      ],
+      "manifest_records": [
+        {
+          "name": "trace.flush",
+          "provider": "acme.observability",
+          "section": ".text",
+          "address": 4195472,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.observability",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_a.elf:M004",
+      "coordinate_key": ".text:0x400490:file-0x490",
+      "location_key": "program_a.elf::.text:0x400490:file-0x490"
+    },
+    {
+      "marker": "shadow.event",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "beta.driver",
+      "address": 4195520,
+      "size": 8,
+      "note_owner": "beta.driver",
+      "note_type": 1329746689,
+      "note_offset": 7824,
+      "note_size": 100,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195520,
+        "requested_size": 8,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195200,
+        "section_size": 546,
+        "section_file_offset": 1216,
+        "file_offset": 1216,
+        "segment_index": 2,
+        "segment_file_offset": 1216,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "undeclared"
+      ],
+      "manifest_records": [],
+      "declaration": {
+        "declared": false,
+        "name_only_elsewhere": false,
+        "matches": []
+      },
+      "approval": {
+        "approved": false,
+        "pre_release": false
+      },
+      "occurrence_id": "program_a.elf:M005",
+      "coordinate_key": ".text:0x4004c0:file-0x4c0",
+      "location_key": "program_a.elf::.text:0x4004c0:file-0x4c0"
+    },
+    {
+      "marker": "telemetry.dma",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "gamma.telemetry",
+      "address": 4718848,
+      "size": 32,
+      "note_owner": "gamma.telemetry",
+      "note_type": 1329746689,
+      "note_offset": 7924,
+      "note_size": 112,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4718848,
+        "requested_size": 32,
+        "mapped": false,
+        "file_mapped": false,
+        "memory_mapped": false,
+        "section": null,
+        "section_index": null,
+        "section_type": null,
+        "section_address": null,
+        "section_size": null,
+        "section_file_offset": null,
+        "file_offset": null,
+        "segment_index": null,
+        "segment_file_offset": null,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "address_outside_all_mappings"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "address_without_file_mapping"
+      ],
+      "manifest_records": [
+        {
+          "name": "telemetry.dma",
+          "provider": "gamma.telemetry",
+          "artifact": "program_a.elf",
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "gamma.telemetry",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_a.elf:M006",
+      "coordinate_key": "<no-section>:0x480100:unbacked",
+      "location_key": "program_a.elf::<no-section>:0x480100:unbacked"
+    },
+    {
+      "marker": "runtime.watermark",
+      "artifact": "program_a.elf",
+      "artifact_path": "examples/marker_attribution/program_a.elf",
+      "source": "elf-note",
+      "provider": "acme.runtime",
+      "address": 6293916,
+      "size": 20,
+      "note_owner": "acme.runtime",
+      "note_type": 1329746689,
+      "note_offset": 8036,
+      "note_size": 116,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 6293916,
+        "requested_size": 20,
+        "mapped": true,
+        "file_mapped": false,
+        "memory_mapped": true,
+        "section": ".bss",
+        "section_index": 25,
+        "section_type": "SHT_NOBITS",
+        "section_address": 6293916,
+        "section_size": 20,
+        "section_file_offset": null,
+        "file_offset": null,
+        "segment_index": 3,
+        "segment_file_offset": 2460,
+        "nobits": true,
+        "zero_fill_only": true,
+        "reason": "zero_fill_only"
+      },
+      "details": {
+        "v": 1,
+        "build_id": null
+      },
+      "categories": [
+        "address_without_file_mapping"
+      ],
+      "manifest_records": [
+        {
+          "name": "runtime.watermark",
+          "provider": "acme.runtime",
+          "artifact": "program_a.elf",
+          "section": ".bss",
+          "address": 6293916,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.runtime",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_a.elf:M007",
+      "coordinate_key": ".bss:0x60099c:unbacked",
+      "location_key": "program_a.elf::.bss:0x60099c:unbacked"
+    },
+    {
+      "marker": "boot.attested",
+      "artifact": "program_b.elf",
+      "artifact_path": "examples/marker_attribution/program_b.elf",
+      "source": "elf-note",
+      "provider": "acme.firmware",
+      "address": 4195360,
+      "size": 16,
+      "note_owner": "acme.firmware",
+      "note_type": 1329746689,
+      "note_offset": 8184,
+      "note_size": 116,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195360,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195296,
+        "section_size": 472,
+        "section_file_offset": 1056,
+        "file_offset": 1056,
+        "segment_index": 2,
+        "segment_file_offset": 1056,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+      },
+      "categories": [
+        "approved_before_release"
+      ],
+      "manifest_records": [
+        {
+          "name": "boot.attested",
+          "provider": "acme.firmware",
+          "section": ".text",
+          "address": 4195360,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.firmware",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_b.elf:M001",
+      "coordinate_key": ".text:0x400420:file-0x420",
+      "location_key": "program_b.elf::.text:0x400420:file-0x420"
+    },
+    {
+      "marker": "heartbeat",
+      "artifact": "program_b.elf",
+      "artifact_path": "examples/marker_attribution/program_b.elf",
+      "source": "elf-note",
+      "provider": "acme.observability",
+      "address": 4195392,
+      "size": 16,
+      "note_owner": "acme.observability",
+      "note_type": 1329746689,
+      "note_offset": 8300,
+      "note_size": 108,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195392,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195296,
+        "section_size": 472,
+        "section_file_offset": 1088,
+        "file_offset": 1088,
+        "segment_index": 2,
+        "segment_file_offset": 1088,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+      },
+      "categories": [
+        "approved_before_release",
+        "same_name_different_location"
+      ],
+      "manifest_records": [
+        {
+          "name": "heartbeat",
+          "provider": "acme.observability",
+          "section": ".text",
+          "address": 4195392,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.observability",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_b.elf:M002",
+      "coordinate_key": ".text:0x400440:file-0x440",
+      "location_key": "program_b.elf::.text:0x400440:file-0x440"
+    },
+    {
+      "marker": "trace.flush",
+      "artifact": "program_b.elf",
+      "artifact_path": "examples/marker_attribution/program_b.elf",
+      "source": "elf-note",
+      "provider": "beta.tracing",
+      "address": 4195440,
+      "size": 16,
+      "note_owner": "beta.tracing",
+      "note_type": 1329746689,
+      "note_offset": 8408,
+      "note_size": 112,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195440,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195296,
+        "section_size": 472,
+        "section_file_offset": 1136,
+        "file_offset": 1136,
+        "segment_index": 2,
+        "segment_file_offset": 1136,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+      },
+      "categories": [
+        "provider_mismatch",
+        "same_name_different_location"
+      ],
+      "manifest_records": [
+        {
+          "name": "trace.flush",
+          "provider": "acme.observability",
+          "section": ".text",
+          "address": 4195472,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "acme.observability",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": false,
+              "address": false,
+              "section": true
+            },
+            "exact_match": false
+          }
+        ]
+      },
+      "approval": {
+        "approved": false,
+        "pre_release": false
+      },
+      "occurrence_id": "program_b.elf:M003",
+      "coordinate_key": ".text:0x400470:file-0x470",
+      "location_key": "program_b.elf::.text:0x400470:file-0x470"
+    },
+    {
+      "marker": "release.gate",
+      "artifact": "program_b.elf",
+      "artifact_path": "examples/marker_attribution/program_b.elf",
+      "source": "elf-note",
+      "provider": "release.ops",
+      "address": 4195488,
+      "size": 16,
+      "note_owner": "release.ops",
+      "note_type": 1329746689,
+      "note_offset": 8520,
+      "note_size": 108,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195488,
+        "requested_size": 16,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195296,
+        "section_size": 472,
+        "section_file_offset": 1184,
+        "file_offset": 1184,
+        "segment_index": 2,
+        "segment_file_offset": 1184,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+      },
+      "categories": [
+        "approved_before_release"
+      ],
+      "manifest_records": [
+        {
+          "name": "release.gate",
+          "provider": "release.ops",
+          "artifact": "program_b.elf",
+          "section": ".text",
+          "address": 4195488,
+          "approved": true,
+          "approval": {
+            "status": "approved_before_release",
+            "approved_at": "2026-11-26T10:00:00+08:00"
+          }
+        }
+      ],
+      "declaration": {
+        "declared": true,
+        "name_only_elsewhere": false,
+        "matches": [
+          {
+            "provider": "release.ops",
+            "approved": {
+              "approved": true,
+              "pre_release": true,
+              "timing_proven_by_timestamps": true,
+              "status": "approved_before_release",
+              "approved_at": "2026-11-26T10:00:00+08:00",
+              "released_at": "2026-11-28T10:00:00+08:00"
+            },
+            "checks": {
+              "provider": true,
+              "address": true,
+              "section": true
+            },
+            "exact_match": true
+          }
+        ]
+      },
+      "approval": {
+        "approved": true,
+        "pre_release": true,
+        "timing_proven_by_timestamps": true,
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00",
+        "released_at": "2026-11-28T10:00:00+08:00"
+      },
+      "occurrence_id": "program_b.elf:M004",
+      "coordinate_key": ".text:0x4004a0:file-0x4a0",
+      "location_key": "program_b.elf::.text:0x4004a0:file-0x4a0"
+    },
+    {
+      "marker": "debug.probe",
+      "artifact": "program_b.elf",
+      "artifact_path": "examples/marker_attribution/program_b.elf",
+      "source": "elf-note",
+      "provider": "beta.driver",
+      "address": 4195528,
+      "size": 8,
+      "note_owner": "beta.driver",
+      "note_type": 1329746689,
+      "note_offset": 8628,
+      "note_size": 100,
+      "note_section": ".note.obs",
+      "symbol_section": null,
+      "symbol_type": null,
+      "symbol_bind": null,
+      "mapping": {
+        "requested_address": 4195528,
+        "requested_size": 8,
+        "mapped": true,
+        "file_mapped": true,
+        "memory_mapped": true,
+        "section": ".text",
+        "section_index": 13,
+        "section_type": "SHT_PROGBITS",
+        "section_address": 4195296,
+        "section_size": 472,
+        "section_file_offset": 1224,
+        "file_offset": 1224,
+        "segment_index": 2,
+        "segment_file_offset": 1224,
+        "nobits": false,
+        "zero_fill_only": false,
+        "reason": "ok"
+      },
+      "details": {
+        "v": 1,
+        "build_id": "d21dfc8786c53c7d5e3b6e07ecb56fbf31073ba2"
+      },
+      "categories": [
+        "undeclared"
+      ],
+      "manifest_records": [],
+      "declaration": {
+        "declared": false,
+        "name_only_elsewhere": false,
+        "matches": []
+      },
+      "approval": {
+        "approved": false,
+        "pre_release": false
+      },
+      "occurrence_id": "program_b.elf:M005",
+      "coordinate_key": ".text:0x4004c8:file-0x4c8",
+      "location_key": "program_b.elf::.text:0x4004c8:file-0x4c8"
+    }
+  ]
+}

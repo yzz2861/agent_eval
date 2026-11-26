@@ -1,0 +1,75 @@
+{
+  "schema": "observability-attribution-manifest/1",
+  "release": "2026-11-27-review-candidate",
+  "release_at": "2026-11-28T10:00:00+08:00",
+  "approval_policy": "Exact name, provider, artifact, section, and address must match.",
+  "markers": [
+    {
+      "name": "boot.attested",
+      "provider": "acme.firmware",
+      "section": ".text",
+      "address": "0x400420",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    },
+    {
+      "name": "heartbeat",
+      "provider": "acme.observability",
+      "section": ".text",
+      "address": "0x400440",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    },
+    {
+      "name": "trace.flush",
+      "provider": "acme.observability",
+      "section": ".text",
+      "address": "0x400490",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    },
+    {
+      "name": "release.gate",
+      "provider": "release.ops",
+      "artifact": "program_b.elf",
+      "section": ".text",
+      "address": "0x4004a0",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    },
+    {
+      "name": "telemetry.dma",
+      "provider": "gamma.telemetry",
+      "artifact": "program_a.elf",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    },
+    {
+      "name": "runtime.watermark",
+      "provider": "acme.runtime",
+      "artifact": "program_a.elf",
+      "section": ".bss",
+      "address": "0x60099c",
+      "approved": true,
+      "approval": {
+        "status": "approved_before_release",
+        "approved_at": "2026-11-26T10:00:00+08:00"
+      }
+    }
+  ]
+}
