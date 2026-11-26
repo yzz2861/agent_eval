@@ -29,7 +29,17 @@ python-evtx operates on event log files from Windows operating systems newer tha
 
 Examples
 --------
-Provided with the parsing module `Evtx` are four scripts that mimic the tools distributed with Parse-Evtx.  `evtx_info.py` prints metadata about the event log and verifies the checksums of each chunk.  `evtx_templates.py` builds and prints the templates used throughout the event log. `evtx_dump.py` parses the event log and transforms the binary XML into a human readable ASCII XML format. Finally, `evtx_dump_json.py` parses event logs, similar to `evtx_dump.py` and transforms the binary XML into JSON with the added capability to output the JSON array to a file. 
+Provided with the parsing module `Evtx` are scripts that mimic the tools distributed with Parse-Evtx.  `evtx_info.py` prints metadata about the event log and verifies the checksums of each chunk.  `evtx_templates.py` builds and prints the templates used throughout the event log. `evtx_dump.py` parses the event log and transforms the binary XML into a human readable ASCII XML format. Finally, `evtx_dump_json.py` parses event logs, similar to `evtx_dump.py` and transforms the binary XML into JSON with the added capability to output the JSON array to a file.
+
+### Field-scoped evidence bundles
+
+`Evtx.Evidence` derives reviewable evidence packages that retain only approved
+fields, explain missing values, preserve approved cross-record identity
+relationships, and carry byte-level references back to the original EVTX.  The
+`evtx_evidence` command creates and verifies narrow (actor-only) and broad
+(actor plus organizational unit) packages.  See
+[docs/evidence-bundles.md](docs/evidence-bundles.md) for the bundle contract and
+the offline verification rules.
 
 Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review the contents and notice the complete implementation of the logic:
 
@@ -71,4 +81,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-
