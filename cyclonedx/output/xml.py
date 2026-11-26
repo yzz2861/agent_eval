@@ -38,11 +38,12 @@ from . import BaseOutput
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..model.bom import Bom
+    from ..view import DisclosurePolicy
 
 
 class Xml(BaseSchemaVersion, BaseOutput):
-    def __init__(self, bom: 'Bom') -> None:
-        super().__init__(bom=bom)
+    def __init__(self, bom: 'Bom', view_policy: Optional['DisclosurePolicy'] = None) -> None:
+        super().__init__(bom=bom, view_policy=view_policy)
         self._bom_xml: str = ''
 
     @property
@@ -58,7 +59,7 @@ class Xml(BaseSchemaVersion, BaseOutput):
             return
 
         _view = SCHEMA_VERSIONS[self.schema_version_enum]
-        bom = self.get_bom()
+        bom = self._get_view_bom()
         bom.validate()
         xmlns = self.get_target_namespace()
         with BomRefDiscriminator.from_bom(bom):

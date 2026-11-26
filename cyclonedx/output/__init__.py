@@ -37,15 +37,18 @@ from ..schema import OutputFormat, SchemaVersion
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..model.bom import Bom
+    from ..view import DisclosurePolicy, ViewAudit
     from .json import Json as JsonOutputter
     from .xml import Xml as XmlOutputter
 
 
 class BaseOutput(ABC):
 
-    def __init__(self, bom: 'Bom', **kwargs: int) -> None:
+    def __init__(self, bom: 'Bom', view_policy: Optional['DisclosurePolicy'] = None, **kwargs: int) -> None:
         super().__init__(**kwargs)
         self._bom = bom
+        self._view_policy = view_policy
+        self._view_audit: Optional['ViewAudit'] = None
         self._generated: bool = False
 
     @property
@@ -68,6 +71,19 @@ class BaseOutput(ABC):
 
     def get_bom(self) -> 'Bom':
         return self._bom
+
+    @property
+    def view_audit(self) -> Optional['ViewAudit']:
+        return self._view_audit
+
+    def _get_view_bom(self) -> 'Bom':
+        if self._view_policy is None:
+            return self._bom
+        from ..view import project_bom
+
+        projection = project_bom(self._bom, self._view_policy)
+        self._view_audit = projection.audit
+        return projection.bom
 
     def set_bom(self, bom: 'Bom') -> None:
         self._bom = bom
@@ -98,23 +114,30 @@ class BaseOutput(ABC):
 
 @overload
 def make_outputter(bom: 'Bom', output_format: Literal[OutputFormat.JSON],
-                   schema_version: SchemaVersion) -> 'JsonOutputter':
+                   schema_version: SchemaVersion,
+                   *, view_policy: Optional['DisclosurePolicy'] = None) -> 'JsonOutputter':
     ...  # pragma: no cover
 
 
 @overload
 def make_outputter(bom: 'Bom', output_format: Literal[OutputFormat.XML],
-                   schema_version: SchemaVersion) -> 'XmlOutputter':
+                   schema_version: SchemaVersion,
+                   *, view_policy: Optional['DisclosurePolicy'] = None) -> 'XmlOutputter':
     ...  # pragma: no cover
 
 
 @overload
 def make_outputter(bom: 'Bom', output_format: OutputFormat,
-                   schema_version: SchemaVersion) -> Union['XmlOutputter', 'JsonOutputter']:
+                   schema_version: SchemaVersion,
+                   *, view_policy: Optional['DisclosurePolicy'] = None
+                   ) -> Union['XmlOutputter', 'JsonOutputter']:
     ...  # pragma: no cover
 
 
-def make_outputter(bom: 'Bom', output_format: OutputFormat, schema_version: SchemaVersion) -> BaseOutput:
+def make_outputter(
+    bom: 'Bom', output_format: OutputFormat, schema_version: SchemaVersion, *,
+    view_policy: Optional['DisclosurePolicy'] = None,
+) -> BaseOutput:
     """
     Helper method to quickly get the correct output class/formatter.
 
@@ -140,7 +163,7 @@ def make_outputter(bom: 'Bom', output_format: OutputFormat, schema_version: Sche
     klass = BY_SCHEMA_VERSION.get(schema_version, None)
     if klass is None:
         raise ValueError(f'Unknown {output_format.name}/schema_version: {schema_version!r}')
-    return klass(bom)
+    return klass(bom, view_policy=view_policy)
 
 # region deprecated re-export
 

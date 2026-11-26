@@ -83,3 +83,27 @@ Alternatively, if the output format and schema version are constants, you can us
 
     outputter = XmlV1Dot2(bom=bom)
     outputter.output_to_file(filename='/tmp/sbom-v1.2.xml')
+
+Auditable Disclosure Views
+--------------------------
+
+A :class:`cyclonedx.view.DisclosurePolicy` projects a BOM into a separate view without modifying the
+source BOM. The same projection and field-level audit are used by both JSON and XML outputters, so
+component and vulnerability references remain closed in either format.
+
+.. code-block:: python
+
+    from cyclonedx.output import make_outputter, OutputFormat, SchemaVersion
+    from cyclonedx.view import DisclosurePolicy, DisclosureView
+
+    policy = DisclosurePolicy(view=DisclosureView.PROCUREMENT_COMMITTEE)
+    outputter = make_outputter(
+        bom, OutputFormat.JSON, SchemaVersion.V1_7, view_policy=policy,
+    )
+    bom_json = outputter.output_as_string()
+    audit = outputter.view_audit
+
+Withdrawn vulnerability identifiers are replaced with an anonymous placeholder, while each
+:class:`cyclonedx.view.FieldDecision` records the action, view, disclosure state, path, and
+authorization source. The technical view accepts the same policy, including legacy schema-version
+field mappings and nested identity fields.

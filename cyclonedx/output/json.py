@@ -38,12 +38,13 @@ from . import BaseOutput
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..model.bom import Bom
+    from ..view import DisclosurePolicy
 
 
 class Json(BaseOutput, BaseSchemaVersion):
 
-    def __init__(self, bom: 'Bom') -> None:
-        super().__init__(bom=bom)
+    def __init__(self, bom: 'Bom', view_policy: Optional['DisclosurePolicy'] = None) -> None:
+        super().__init__(bom=bom, view_policy=view_policy)
         self._bom_json: dict[str, Any] = dict()
 
     @property
@@ -69,7 +70,7 @@ class Json(BaseOutput, BaseSchemaVersion):
             'specVersion': self.schema_version.to_version()
         }
         _view = SCHEMA_VERSIONS.get(self.schema_version_enum)
-        bom = self.get_bom()
+        bom = self._get_view_bom()
         bom.validate()
         with BomRefDiscriminator.from_bom(bom):
             with BomDependencyGraphFlatMerger(bom):
