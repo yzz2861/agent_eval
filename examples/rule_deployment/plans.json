@@ -1,0 +1,1062 @@
+{
+  "title": "Q4 Sigma Rule Deployment Review",
+  "description": "Fill the highest-severity known detection blind spots in a single maintenance window. The corpus contains manually triaged attack drills and benign normal-operation drills. A plan is the post-change rule set; baseline rules only establish the old true-positive hits that must remain covered.",
+  "constraints": {
+    "capacity": 4,
+    "max_rules": 3,
+    "retain_old_hits": true,
+    "required_cases": [],
+    "max_false_positives": 0,
+    "mutually_exclusive": []
+  },
+  "old_hit_ids": [
+    "A1",
+    "A4"
+  ],
+  "coverage_matrix": {
+    "cases": [
+      {
+        "id": "A0",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "Office document spawns PowerShell (phishing execution chain)"
+      },
+      {
+        "id": "A1",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "Hidden encoded PowerShell, old encoded-command hit"
+      },
+      {
+        "id": "A2",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "Readable IEX WebClient download cradle"
+      },
+      {
+        "id": "A3",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "Encoded PowerShell without hidden-window/readable markers"
+      },
+      {
+        "id": "A4",
+        "label": "malicious",
+        "severity": "high",
+        "description": "PowerShell Invoke-WebRequest payload download, old download hit"
+      },
+      {
+        "id": "A5",
+        "label": "malicious",
+        "severity": "high",
+        "description": "Certutil URL cache download"
+      },
+      {
+        "id": "A6",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "MSHTA remote HTA execution"
+      },
+      {
+        "id": "A7",
+        "label": "malicious",
+        "severity": "medium",
+        "description": "Regsvr32 Squiblydoo remote scriptlet"
+      },
+      {
+        "id": "A8",
+        "label": "malicious",
+        "severity": "critical",
+        "description": "Kernel driver service creation (no candidate covers this technique)"
+      },
+      {
+        "id": "A9",
+        "label": "malicious",
+        "severity": "high",
+        "description": "Rundll32 JavaScript execution (no candidate covers this technique)"
+      },
+      {
+        "id": "B1",
+        "label": "benign",
+        "severity": "low",
+        "description": "Normal admin PowerShell inventory script (unencoded)"
+      },
+      {
+        "id": "B2",
+        "label": "benign",
+        "severity": "low",
+        "description": "Certutil hash verification during normal drill"
+      },
+      {
+        "id": "B3",
+        "label": "benign",
+        "severity": "low",
+        "description": "Local intranet HTA application"
+      },
+      {
+        "id": "B4",
+        "label": "benign",
+        "severity": "low",
+        "description": "Local DLL registration during install"
+      },
+      {
+        "id": "B5",
+        "label": "benign",
+        "severity": "low",
+        "description": "Printer UI help invocation"
+      },
+      {
+        "id": "B6",
+        "label": "benign",
+        "severity": "low",
+        "description": "Service inventory query"
+      }
+    ],
+    "columns": [
+      "baseline:old_ps_encoded",
+      "baseline:old_ps_download",
+      "P",
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
+    ],
+    "rules": [
+      {
+        "id": "baseline:old_ps_encoded",
+        "kind": "baseline",
+        "covers": [
+          "A1"
+        ],
+        "coverage_count": 1
+      },
+      {
+        "id": "baseline:old_ps_download",
+        "kind": "baseline",
+        "covers": [
+          "A4"
+        ],
+        "coverage_count": 1
+      },
+      {
+        "id": "P",
+        "kind": "candidate",
+        "covers": [
+          "A0"
+        ],
+        "coverage_count": 1
+      },
+      {
+        "id": "A",
+        "kind": "candidate",
+        "covers": [
+          "A1",
+          "A2",
+          "A4"
+        ],
+        "coverage_count": 3
+      },
+      {
+        "id": "B",
+        "kind": "candidate",
+        "covers": [
+          "A1",
+          "A3",
+          "A4"
+        ],
+        "coverage_count": 3
+      },
+      {
+        "id": "C",
+        "kind": "candidate",
+        "covers": [
+          "A5"
+        ],
+        "coverage_count": 1
+      },
+      {
+        "id": "D",
+        "kind": "candidate",
+        "covers": [
+          "A6"
+        ],
+        "coverage_count": 1
+      },
+      {
+        "id": "E",
+        "kind": "candidate",
+        "covers": [
+          "A7"
+        ],
+        "coverage_count": 1
+      }
+    ],
+    "matrix": {
+      "A0": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": true,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A1": {
+        "baseline:old_ps_encoded": true,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": true,
+        "B": true,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A2": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A3": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": true,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A4": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": true,
+        "P": false,
+        "A": true,
+        "B": true,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A5": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": true,
+        "D": false,
+        "E": false
+      },
+      "A6": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": true,
+        "E": false
+      },
+      "A7": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": true
+      },
+      "A8": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "A9": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B1": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B2": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B3": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B4": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B5": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      },
+      "B6": {
+        "baseline:old_ps_encoded": false,
+        "baseline:old_ps_download": false,
+        "P": false,
+        "A": false,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false
+      }
+    }
+  },
+  "plans": [
+    {
+      "plan_id": "plan-1",
+      "selected": [
+        "P",
+        "A",
+        "C"
+      ],
+      "cost": 4.0,
+      "score": {
+        "critical": 3,
+        "high": 2,
+        "medium": 0,
+        "low": 0
+      },
+      "feasible": true,
+      "violations": [],
+      "covered_case_ids": [
+        "A0",
+        "A1",
+        "A2",
+        "A4",
+        "A5"
+      ],
+      "retained_old_hit_ids": [
+        "A1",
+        "A4"
+      ],
+      "missing_old_hit_ids": [],
+      "false_positive_case_ids": [],
+      "alerts": [
+        {
+          "case_id": "A0",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "P"
+          ]
+        },
+        {
+          "case_id": "A1",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A2",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A3",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A4",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A5",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "C"
+          ]
+        },
+        {
+          "case_id": "A6",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A7",
+          "label": "malicious",
+          "severity": "medium",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A8",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A9",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B1",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B2",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B3",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B4",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B5",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B6",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        }
+      ],
+      "uncovered": [
+        {
+          "case_id": "A3",
+          "severity": "critical",
+          "kind": "constraint",
+          "reason": "mutual_exclusion",
+          "detail": "B matches but is exclusive (powershell-rewrite) with selected A; adding B needs 2 more capacity but only 0 remains; adding B exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "B"
+          ],
+          "blocked_by": [
+            "mutual_exclusion",
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A6",
+          "severity": "critical",
+          "kind": "constraint",
+          "reason": "retention",
+          "detail": "D cannot be swapped in within capacity without dropping a rule that uniquely preserves a retained old hit; adding D needs 2 more capacity but only 0 remains; adding D exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "D"
+          ],
+          "blocked_by": [
+            "retention",
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": [
+            "retention",
+            "capacity",
+            "rule_limit"
+          ]
+        },
+        {
+          "case_id": "A7",
+          "severity": "medium",
+          "kind": "constraint",
+          "reason": "capacity",
+          "detail": "adding E needs 1 more capacity but only 0 remains; adding E exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "E"
+          ],
+          "blocked_by": [
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A8",
+          "severity": "critical",
+          "kind": "capability",
+          "reason": "no_rule_capability",
+          "detail": "no candidate rule's logsource/detection logic matches this event; this is a rule-capability gap",
+          "capable_rule_ids": [],
+          "blocked_by": [],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A9",
+          "severity": "high",
+          "kind": "capability",
+          "reason": "no_rule_capability",
+          "detail": "no candidate rule's logsource/detection logic matches this event; this is a rule-capability gap",
+          "capable_rule_ids": [],
+          "blocked_by": [],
+          "related_constraints": []
+        }
+      ],
+      "replay": [
+        {
+          "case_id": "A0",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "P"
+          ]
+        },
+        {
+          "case_id": "A1",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A2",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A3",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A4",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "A"
+          ]
+        },
+        {
+          "case_id": "A5",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "C"
+          ]
+        },
+        {
+          "case_id": "A6",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A7",
+          "label": "malicious",
+          "severity": "medium",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A8",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A9",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B1",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B2",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B3",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B4",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B5",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B6",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        }
+      ]
+    },
+    {
+      "plan_id": "plan-2",
+      "selected": [
+        "P",
+        "B",
+        "C"
+      ],
+      "cost": 4.0,
+      "score": {
+        "critical": 3,
+        "high": 2,
+        "medium": 0,
+        "low": 0
+      },
+      "feasible": true,
+      "violations": [],
+      "covered_case_ids": [
+        "A0",
+        "A1",
+        "A3",
+        "A4",
+        "A5"
+      ],
+      "retained_old_hit_ids": [
+        "A1",
+        "A4"
+      ],
+      "missing_old_hit_ids": [],
+      "false_positive_case_ids": [],
+      "alerts": [
+        {
+          "case_id": "A0",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "P"
+          ]
+        },
+        {
+          "case_id": "A1",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A2",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A3",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A4",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A5",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "C"
+          ]
+        },
+        {
+          "case_id": "A6",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A7",
+          "label": "malicious",
+          "severity": "medium",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A8",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A9",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B1",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B2",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B3",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B4",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B5",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B6",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        }
+      ],
+      "uncovered": [
+        {
+          "case_id": "A2",
+          "severity": "critical",
+          "kind": "constraint",
+          "reason": "mutual_exclusion",
+          "detail": "A matches but is exclusive (powershell-rewrite) with selected B; adding A needs 2 more capacity but only 0 remains; adding A exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "A"
+          ],
+          "blocked_by": [
+            "mutual_exclusion",
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A6",
+          "severity": "critical",
+          "kind": "constraint",
+          "reason": "retention",
+          "detail": "D cannot be swapped in within capacity without dropping a rule that uniquely preserves a retained old hit; adding D needs 2 more capacity but only 0 remains; adding D exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "D"
+          ],
+          "blocked_by": [
+            "retention",
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": [
+            "retention",
+            "capacity",
+            "rule_limit"
+          ]
+        },
+        {
+          "case_id": "A7",
+          "severity": "medium",
+          "kind": "constraint",
+          "reason": "capacity",
+          "detail": "adding E needs 1 more capacity but only 0 remains; adding E exceeds the 3-rule slot limit (3 already selected)",
+          "capable_rule_ids": [
+            "E"
+          ],
+          "blocked_by": [
+            "capacity",
+            "rule_limit"
+          ],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A8",
+          "severity": "critical",
+          "kind": "capability",
+          "reason": "no_rule_capability",
+          "detail": "no candidate rule's logsource/detection logic matches this event; this is a rule-capability gap",
+          "capable_rule_ids": [],
+          "blocked_by": [],
+          "related_constraints": []
+        },
+        {
+          "case_id": "A9",
+          "severity": "high",
+          "kind": "capability",
+          "reason": "no_rule_capability",
+          "detail": "no candidate rule's logsource/detection logic matches this event; this is a rule-capability gap",
+          "capable_rule_ids": [],
+          "blocked_by": [],
+          "related_constraints": []
+        }
+      ],
+      "replay": [
+        {
+          "case_id": "A0",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "P"
+          ]
+        },
+        {
+          "case_id": "A1",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A2",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A3",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A4",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "B"
+          ]
+        },
+        {
+          "case_id": "A5",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": true,
+          "rule_ids": [
+            "C"
+          ]
+        },
+        {
+          "case_id": "A6",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A7",
+          "label": "malicious",
+          "severity": "medium",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A8",
+          "label": "malicious",
+          "severity": "critical",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "A9",
+          "label": "malicious",
+          "severity": "high",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B1",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B2",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B3",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B4",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B5",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        },
+        {
+          "case_id": "B6",
+          "label": "benign",
+          "severity": "low",
+          "alerted": false,
+          "rule_ids": []
+        }
+      ]
+    }
+  ]
+}

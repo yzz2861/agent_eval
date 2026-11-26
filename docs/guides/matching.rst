@@ -243,3 +243,57 @@ Two constructor parameters control memory use for correlation state:
   correlation match to avoid unbounded memory growth on high-cardinality rules.
 * ``max_correlation_state`` (default ``None``, unlimited) — limits the total number of
   entries retained in the sliding window per group key.
+
+Coverage-Driven Deployment Planning
+-----------------------------------
+
+The :mod:`sigma.matching.deployment` module uses the local matcher to review a small set of
+candidate rule changes against manually labelled events. It builds a rule-by-case coverage
+matrix, then enumerates post-change rule sets subject to hard operational constraints:
+
+* mutually exclusive candidates (a shared ``group`` or explicit exclusion groups),
+* total processing capacity and, optionally, a maximum number of rule slots,
+* retention of every old true-positive hit produced by the baseline rules,
+* a maximum number of alerts on labelled benign drills.
+
+.. code-block:: python
+
+    from sigma.matching.deployment import DeploymentPlanner, DeploymentScenario
+
+    scenario = DeploymentScenario.from_yaml("examples/rule_deployment/scenario.yml")
+    planner = DeploymentPlanner(scenario)
+
+    matrix = planner.coverage_matrix
+    print(matrix.to_markdown())
+
+    plans = planner.select_plans()
+    for plan in plans:
+        print(plan.selected_ids, plan.score, plan.cost)
+        assert plan.replay() == plan.alert_rows()
+
+``select_plans()`` returns **every** plan tied on severity coverage, then cost, then rule
+count. This matters when two alternatives have the same operational footprint but different
+alert fingerprints; each plan keeps its own alert rows and can be replayed independently with
+a fresh :class:`~sigma.matching.SigmaMatcher`.
+
+Every malicious case not covered by a plan is reported as :class:`UncoveredCase` with one of
+two kinds:
+
+* ``capability`` — no candidate rule matches the event at all, so the detection logic or
+  logsource coverage has to change.
+* ``constraint`` — at least one candidate rule matches, but mutual exclusion, a missing
+  prerequisite, capacity, the rule-slot limit, false-positive policy, or old-hit retention
+  blocks it. ``capable_rule_ids``, ``blocked_by``, and ``detail`` identify the rule and the
+  binding constraint.
+
+Scenario files contain ``cases``, ``candidates``, optional ``baseline`` rules, and
+``constraints``. See ``examples/rule_deployment/`` for a complete scenario with two equally
+feasible plans, generated coverage matrix, JSON replay data, and review report. The same
+scenario can be run from the command line:
+
+.. code-block:: bash
+
+    python -m sigma.matching.deployment examples/rule_deployment/scenario.yml \
+      --coverage examples/rule_deployment/coverage_matrix.md \
+      --json examples/rule_deployment/plans.json \
+      --report examples/rule_deployment/report.md

