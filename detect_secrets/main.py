@@ -119,7 +119,13 @@ def scan_adhoc_string(line: str) -> str:
 
 def handle_audit_action(args: argparse.Namespace) -> None:
     try:
-        if args.stats:
+        if getattr(args, 'assignment_plan_file', None):
+            plan = audit.assignment.plan_assignment_file(
+                args.assignment_plan_file,
+                shift_change_file=getattr(args, 'shift_change_file', None),
+            )
+            print(json.dumps(plan, indent=2, ensure_ascii=False, default=str))
+        elif args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
             if args.diff:
                 # TODO

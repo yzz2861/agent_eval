@@ -8,6 +8,7 @@ from ..exceptions import NoLineNumberError
 from ..exceptions import SecretNotFoundOnSpecifiedLineError
 from ..types import SecretContext
 from ..util.code_snippet import get_code_snippet
+from .assignment import *  # noqa: F401,F403
 from .common import get_baseline_from_file
 from .common import get_raw_secret_from_file
 from .common import open_file

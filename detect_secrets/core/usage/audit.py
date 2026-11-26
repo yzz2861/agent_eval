@@ -14,7 +14,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
 
     parser.add_argument(
         'filename',
-        nargs='+',
+        nargs='*',
         help=(
             'Audit a given baseline file to distinguish the difference '
             'between false and true positives.'
@@ -22,6 +22,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
     )
 
     _add_mode_parser(parser)
+    _add_assignment_planner_module(parser)
     _add_report_module(parser)
     _add_statistics_module(parser)
     return cast(argparse.ArgumentParser, parser)
@@ -53,6 +54,31 @@ def _add_mode_parser(parser: argparse.ArgumentParser) -> None:
         help=(
             'Displays a report with the secrets detected'
         ),
+    )
+
+
+def _add_assignment_planner_module(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        '--plan-assignments',
+        '--assignment-plan',
+        '--offline-assignment-plan',
+        '--dispatch-plan',
+        '--assign',
+        '--assignments',
+        '--assignment',
+        '--plan',
+        '--offline-plan',
+        '--planner',
+        dest='assignment_plan_file',
+        help=(
+            'Plan offline audit assignments from a JSON request containing '
+            'findings/candidates, seats/auditors, and signed recusals.'
+        ),
+    )
+    parser.add_argument(
+        '--shift-change',
+        dest='shift_change_file',
+        help='Optional JSON shift-change override used with --plan-assignments.',
     )
 
 
@@ -101,6 +127,9 @@ def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
 
 def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'audit':
+        return
+
+    if getattr(args, 'assignment_plan_file', None):
         return
 
     if args.diff and len(args.filename) != 2:
