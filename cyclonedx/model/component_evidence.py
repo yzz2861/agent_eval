@@ -34,7 +34,29 @@ from ..exception.model import InvalidConfidenceException, InvalidValueException
 from ..schema.schema import SchemaVersion1Dot5, SchemaVersion1Dot6, SchemaVersion1Dot7
 from . import Copyright
 from .bom_ref import BomRef
+from .evidence_provenance import (
+    AttributionReport as AttributionReport,
+    AttributionStatus as AttributionStatus,
+    AttributionWarning as AttributionWarning,
+    BatchInterval as BatchInterval,
+    EvidenceConflict as EvidenceConflict,
+    EvidenceProvenance as EvidenceProvenance,
+    EvidenceReview as EvidenceReview,
+    EvidenceSeal as EvidenceSeal,
+    LocalSample as LocalSample,
+    LocalSampleRegistry as LocalSampleRegistry,
+    ProvenanceSource as ProvenanceSource,
+    SampleAttribution as SampleAttribution,
+    attribute_evidence as attribute_evidence,
+)
 from .license import License, LicenseRepository, _LicenseRepositorySerializationHelper
+
+
+def _conclusion_key(field: object, concluded_value: Optional[str]) -> str:
+    """Stable, human-readable key for an evidence conclusion point."""
+    if concluded_value:
+        return concluded_value
+    return str(getattr(field, 'value', field))
 
 
 @serializable.serializable_enum
@@ -201,12 +223,15 @@ class Identity:
         concluded_value: Optional[str] = None,
         methods: Optional[Iterable[Method]] = None,
         tools: Optional[Iterable[BomRef]] = None,
+        provenance: Optional[EvidenceProvenance] = None,
     ) -> None:
         self.field = field
         self.confidence = confidence
         self.concluded_value = concluded_value
         self.methods = methods or []
         self.tools = tools or []
+        self.provenance = provenance if provenance is not None else EvidenceProvenance.from_legacy(
+            conclusion=_conclusion_key(field, concluded_value))
 
     @property
     @serializable.xml_sequence(1)
@@ -287,10 +312,14 @@ class Identity:
     def __hash__(self) -> int:
         return hash(self.__comparable_tuple())
 
+    def trace_sample_ids(self) -> tuple[str, ...]:
+        """Original local sample ids this conclusion points back to."""
+        return self.provenance.trace_sample_ids()
+
     def __repr__(self) -> str:
         return f'<Identity field={self.field}, confidence={self.confidence},' \
             f' concludedValue={self.concluded_value},' \
-            f' methods={self.methods}, tools={self.tools}>'
+            f' methods={self.methods}, tools={self.tools}, provenance={self.provenance}>'
 
 
 @serializable.serializable_class(ignore_unknown_during_deserialization=True)
@@ -654,8 +683,11 @@ class ComponentEvidence:
         callstack: Optional[CallStack] = None,
         licenses: Optional[Iterable[License]] = None,
         copyright: Optional[Iterable[Copyright]] = None,
+        provenance: Optional[Union[EvidenceProvenance, Iterable[EvidenceProvenance]]] = None,
     ) -> None:
         self.identity = identity or []
+        if provenance is not None:
+            self._apply_provenance(provenance)
         self.occurrences = occurrences or []
         self.callstack = callstack
         self.licenses = licenses or []
@@ -681,6 +713,28 @@ class ComponentEvidence:
             if isinstance(identity, Identity)
             else identity
         )
+        self.provenance = tuple(i.provenance for i in self._identity)
+
+    def _apply_provenance(
+        self,
+        provenance: Union[EvidenceProvenance, Iterable[EvidenceProvenance]],
+    ) -> None:
+        records = (provenance,) if isinstance(provenance, EvidenceProvenance) else tuple(provenance)
+        identities = tuple(self._identity)
+        unmatched = list(records)
+        for identity in identities:
+            conclusion = _conclusion_key(identity.field, identity.concluded_value)
+            for record in tuple(unmatched):
+                if record.conclusion == conclusion:
+                    identity.provenance = record
+                    unmatched.remove(record)
+                    break
+        for identity in identities:
+            if not unmatched:
+                break
+            if identity.provenance.is_legacy:
+                identity.provenance = unmatched.pop(0)
+        self.provenance = tuple(i.provenance for i in self._identity) if identities else tuple(records)
 
     @property
     @serializable.view(SchemaVersion1Dot5)
@@ -742,6 +796,63 @@ class ComponentEvidence:
     @copyright.setter
     def copyright(self, copyright: Iterable[Copyright]) -> None:
         self._copyright = SortedSet(copyright)
+
+    def review(self, samples: Union[LocalSampleRegistry, LocalSample, Iterable[LocalSample]]) -> EvidenceReview:
+        """
+        Review every conclusion point against the local unpacking samples.
+
+        Each report exposes the original sample ids the conclusion traces back to
+        and any warnings, including contention when two batches claim the same
+        evidence.
+        """
+        if isinstance(samples, LocalSample):
+            samples = (samples,)
+        registry = samples if isinstance(samples, LocalSampleRegistry) else LocalSampleRegistry(samples)
+        reports = [
+            attribute_evidence(
+                identity.provenance,
+                registry,
+                conclusion=_conclusion_key(identity.field, identity.concluded_value),
+            )
+            for identity in self.identity
+        ]
+        return EvidenceReview(reports, registry.evidence_conflicts())
+
+    def trace(self, samples: Optional[Union[LocalSampleRegistry, LocalSample, Iterable[LocalSample]]] = None) \
+            -> dict[str, tuple[str, ...]]:
+        """
+        Map each conclusion point back to its original local sample ids.
+
+        Without a sample registry only explicitly recorded sample ids are used.
+        With a registry, photo-index and seal matches are resolved as well.
+        """
+        if samples is not None:
+            return self.review(samples).trace_sample_ids()
+        return {
+            _conclusion_key(identity.field, identity.concluded_value): identity.provenance.trace_sample_ids()
+            for identity in self.identity
+        }
+
+    def provenance_records(self) -> tuple[EvidenceProvenance, ...]:
+        """Current provenance records, one per evidence conclusion."""
+        records = tuple(identity.provenance for identity in self.identity)
+        return records if records else tuple(self.provenance)
+
+    def provenance_for(self, conclusion: str) -> Optional[EvidenceProvenance]:
+        """Return the provenance attached to a conclusion key, if present."""
+        for identity in self.identity:
+            if _conclusion_key(identity.field, identity.concluded_value) == conclusion:
+                return identity.provenance
+        return None
+
+    @classmethod
+    def from_legacy(cls, evidence: 'ComponentEvidence') -> 'ComponentEvidence':
+        """Re-layer every conclusion as an explicit *batch unknown* legacy record."""
+        for identity in evidence.identity:
+            identity.provenance = EvidenceProvenance.from_legacy(
+                conclusion=_conclusion_key(identity.field, identity.concluded_value))
+        evidence.provenance = tuple(i.provenance for i in evidence.identity)
+        return evidence
 
     def __comparable_tuple(self) -> _ComparableTuple:
         return _ComparableTuple((

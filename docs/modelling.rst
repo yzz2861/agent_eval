@@ -77,6 +77,75 @@ you use a library such as `defusedxml` instead of the native `xml.etree.ElementT
         deserialized_bom = cast(Bom, Bom.from_xml(data=ElementTree.fromstring(input_xml.read())))
 
 
+Evidence provenance and on-site review
+--------------------------------------
+
+CycloneDX evidence records *what* was observed.  When several on-site unpacking
+events share a part number, the part number alone cannot say which local sample a
+conclusion belongs to.  The optional provenance overlay binds every evidence
+``Identity`` (a conclusion point) to:
+
+* a ``LocalSample`` -- the on-site unpacking sample;
+* a ``BatchInterval`` -- the batch interval the evidence can support; and
+* an ``EvidenceSeal`` plus ``photo_index`` -- the two checks needed to establish
+  ownership.
+
+The overlay is kept outside the CycloneDX wire format because the CycloneDX
+schema does not allow extension fields on evidence.  It is attached to the public
+``ComponentEvidence`` and ``Identity`` models and is therefore available while
+reviewing imported BOMs.
+
+Attribution follows these rules:
+
+1. A batch-interval intersection makes a sample a **candidate** only.
+2. A candidate is **attributed** only if its photo index **and** seal confirmation
+   both match.
+3. Evidence shared by samples from different batches is reported as **contested**
+   with a warning naming the competing batches and samples.
+4. Evidence imported from a legacy manifest carries
+   ``BatchInterval.unknown()`` and is preserved as an explicit *batch unknown*
+   layer.  Unknown batches are never treated as wildcards.
+
+.. code-block:: python
+
+    from cyclonedx.model.component_evidence import (
+        BatchInterval,
+        ComponentEvidence,
+        EvidenceProvenance,
+        EvidenceSeal,
+        Identity,
+        IdentityField,
+        LocalSample,
+    )
+
+    first = LocalSample(
+        sample_id='UNPACK-1', batch=BatchInterval(1, 3),
+        photo_index='PHOTO-1', seal=EvidenceSeal('SEAL-1'))
+    second = LocalSample(
+        sample_id='UNPACK-2', batch=BatchInterval(4, 6),
+        photo_index='PHOTO-2', seal=EvidenceSeal('SEAL-2'))
+
+    evidence = ComponentEvidence(identity=[Identity(
+        field=IdentityField.HASH,
+        concluded_value='tamper-check-ok',
+        provenance=EvidenceProvenance(
+            sample_id='UNPACK-2',
+            batch=BatchInterval(4, 6),
+            photo_index='PHOTO-2',
+            seal=EvidenceSeal('SEAL-2'),
+        ),
+    )])
+
+    review = evidence.review([first, second])
+    print(review.trace_sample_ids())  # conclusion -> original sample ids
+    for warning in review.warnings:
+        print(warning)
+
+When a manifest predates provenance tracking, every conclusion is layered as a
+legacy record automatically.  ``ComponentEvidence.from_legacy(evidence)`` can
+also be used to re-layer evidence explicitly as batch-unknown.
+
+
 
 
 .. _CycloneDX Python: https://github.com/CycloneDX/cyclonedx-python

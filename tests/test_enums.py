@@ -77,6 +77,10 @@ from cyclonedx.model.component_evidence import (  # isort:skip
     AnalysisTechnique,
     IdentityField,
 )
+from cyclonedx.model.evidence_provenance import (  # isort:skip
+    AttributionStatus,
+    ProvenanceSource,
+)
 from cyclonedx.model.impact_analysis import (  # isort:skip
     ImpactAnalysisAffectedStatus,
     ImpactAnalysisJustification,
@@ -627,6 +631,20 @@ class TestEnumAnalysisTechnique(_EnumTestCase):
                 )
             ])
         super()._test_cases_render(bom, of, sv)
+
+
+class TestEnumProvenanceSource(_EnumTestCase):
+
+    def test_knows_values(self) -> None:
+        for value in ProvenanceSource:
+            self.assertIs(value, ProvenanceSource(value.value))
+
+
+class TestEnumAttributionStatus(_EnumTestCase):
+
+    def test_knows_values(self) -> None:
+        for value in AttributionStatus:
+            self.assertIs(value, AttributionStatus(value.value))
 
 
 @ddt
