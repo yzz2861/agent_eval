@@ -46,6 +46,30 @@ can be used in HTML as is.
 .. autofunction:: bleach.clean
 
 
+Cleaning HTML clipboard data
+============================
+
+Browser clipboard HTML can include the surrounding page even when the user
+copied only a selected fragment. Use
+:py:func:`bleach.clean_clipboard_html` for this format. It reads the
+``StartFragment`` and ``EndFragment`` byte offsets from the clipboard header,
+checks them against the ``<!--StartFragment-->`` and
+``<!--EndFragment-->`` markers in the HTML, decodes that selected UTF-8 range,
+and passes only that range to
+:py:class:`bleach.sanitizer.Cleaner`.
+
+Offsets are measured in bytes rather than Unicode characters, so mixed Chinese
+and English text does not change how the boundary is checked. If the header
+offset and marker describe different boundaries, the payload is ambiguous and
+:py:class:`bleach.ClipboardBoundaryError` is raised instead of cleaning content
+from outside the selection. The regular :py:func:`bleach.clean` interface
+continues to accept ordinary HTML strings directly.
+
+.. autofunction:: bleach.clean_clipboard_html
+
+.. autoclass:: bleach.ClipboardBoundaryError
+
+
 Allowed tags (``tags``)
 =======================
 
