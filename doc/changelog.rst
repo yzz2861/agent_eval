@@ -1,6 +1,16 @@
 Release history
 ===============
 
+macholib 1.16.5
+---------------
+
+* Add ``macholib.codesig``: read-only verification of the embedded
+  CodeDirectory page hashes of every slice of a (universal) Mach-O
+  file, following ``LC_CODE_SIGNATURE`` to the primary and alternate
+  code directories and recomputing the normal code slots (SHA-1 and
+  SHA-256, contiguous paged directories, tail page at its actual
+  length).  Also available as ``MachO.verify_code_signature()``.
+
 macholib 1.16.4
 ---------------
 

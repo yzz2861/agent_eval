@@ -178,6 +178,16 @@ class MachO(object):
         for header in self.headers:
             header.write(f)
 
+    def verify_code_signature(self):
+        """
+        Read-only verification of the embedded code directory page
+        hashes of every slice; see the macholib.codesig module for
+        the meaning of the result.
+        """
+        from macholib.codesig import verify_code_signature
+
+        return verify_code_signature(self.filename)
+
 
 class MachOHeader(object):
     """
