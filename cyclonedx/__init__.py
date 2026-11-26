@@ -23,3 +23,16 @@ Python library for CycloneDX
 # !! version is managed by semantic_release
 # do not use typing here, or else `semantic_release` might have issues finding the variable
 __version__ = "11.12.0"  # noqa:Q000
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose the local translation release review API at top level."""
+    review_names = {
+        'AnalysisClaim', 'TranslationManifest', 'TranslationRecord', 'ReleaseReviewer',
+        'ReleaseReviewReport', 'LanguageFallbackPolicy', 'check_release',
+        'pre_release_check', 'assert_release_ready',
+    }
+    if name in review_names:
+        from .contrib.vulnerability import translation_review as _review
+        return getattr(_review, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
