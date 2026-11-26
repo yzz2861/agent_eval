@@ -40,3 +40,38 @@ from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:ski
 
 #
 from RestrictedPython.Eval import RestrictionCapableEval
+
+# Optional call evidence API
+from RestrictedPython.evidence import AdapterRegistry  # isort:skip
+from RestrictedPython.evidence import AuditIssue  # isort:skip
+from RestrictedPython.evidence import AuditLog  # isort:skip
+from RestrictedPython.evidence import AuditReport  # isort:skip
+from RestrictedPython.evidence import AuditTrail  # isort:skip
+from RestrictedPython.evidence import EvidenceCollector  # isort:skip
+from RestrictedPython.evidence import EvidenceHub  # isort:skip
+from RestrictedPython.evidence import EvidenceLedger  # isort:skip
+from RestrictedPython.evidence import EvidenceOutlet  # isort:skip
+from RestrictedPython.evidence import EvidenceReceipt  # isort:skip
+from RestrictedPython.evidence import EvidenceRecord  # isort:skip
+from RestrictedPython.evidence import EvidenceRecorder  # isort:skip
+from RestrictedPython.evidence import EvidenceRegistry  # isort:skip
+from RestrictedPython.evidence import EvidenceReport  # isort:skip
+from RestrictedPython.evidence import Receipt  # isort:skip
+from RestrictedPython.evidence import ReconciliationMatch  # isort:skip
+from RestrictedPython.evidence import ReconciliationReport  # isort:skip
+from RestrictedPython.evidence import EvidenceSink  # isort:skip
+from RestrictedPython.evidence import FunctionAdapter  # isort:skip
+from RestrictedPython.evidence import RegisteredAdapter  # isort:skip
+from RestrictedPython.evidence import RestrictedEvidenceError  # isort:skip
+from RestrictedPython.evidence import RetryingFunctionAdapter  # isort:skip
+from RestrictedPython.evidence import ScriptIdentity  # isort:skip
+from RestrictedPython.evidence import ScriptRun  # isort:skip
+from RestrictedPython.evidence import SourceLocation  # isort:skip
+from RestrictedPython.evidence import audit_records  # isort:skip
+from RestrictedPython.evidence import create_evidence_outlet  # isort:skip
+from RestrictedPython.evidence import create_evidence_recorder  # isort:skip
+from RestrictedPython.evidence import current_call_id  # isort:skip
+from RestrictedPython.evidence import reconcile_records  # isort:skip
+from RestrictedPython.evidence import record_failure  # isort:skip
+from RestrictedPython.evidence import record_retry  # isort:skip
+from RestrictedPython.evidence import run_restricted  # isort:skip
