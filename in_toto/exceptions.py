@@ -31,6 +31,16 @@ class LinkNotFoundError(Error):
     """Indicates that a link file was not found."""
 
 
+class WitnessNotFoundError(Error):
+    """Indicates that no usable witness was provided for an inspection during
+    offline verification."""
+
+
+class WitnessVerificationError(Error):
+    """Indicates that a witness does not match the layout, sublayout chain or
+    inspection identity it is expected to attest to."""
+
+
 class UnsupportedKeyTypeError(Error):
     """Indicates that the specified key type is not yet supported."""
 

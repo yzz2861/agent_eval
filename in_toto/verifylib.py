@@ -27,6 +27,7 @@
 
 import datetime
 import fnmatch
+import hashlib
 import logging
 import os
 
@@ -48,9 +49,12 @@ from in_toto.exceptions import (
     RuleVerificationError,
     SignatureVerificationError,
     ThresholdVerificationError,
+    WitnessNotFoundError,
+    WitnessVerificationError,
 )
 from in_toto.formats import _check_parameter_dict, _check_public_keys
-from in_toto.models.metadata import Metadata
+from in_toto.models.metadata import Metablock, Metadata
+from in_toto.models.witness import Witness
 
 # Inherits from in_toto base logger (c.f. in_toto.log)
 LOG = logging.getLogger(__name__)
@@ -253,6 +257,300 @@ def run_all_inspections(
             link.dump(filename)
 
         in_toto.settings.ARTIFACT_BASE_PATH = base_path_backup
+
+    return inspection_links_dict
+
+
+def _layout_fingerprint(layout):
+    """
+    <Purpose>
+      Compute a hash dictionary over the canonical representation of the
+      passed Layout object. Used to bind an inspection witness to the exact
+      layout (after parameter substitution) it was recorded for.
+
+    <Arguments>
+      layout:
+              A Layout object.
+
+    <Returns>
+      A hash dictionary, e.g. {"sha256": "<digest>"}.
+
+    """
+    return {"sha256": hashlib.sha256(layout.signable_bytes).hexdigest()}
+
+
+def generate_inspection_witnesses(
+    layout,
+    signer,
+    sublayout_chain=None,
+    timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+):
+    """
+    <Purpose>
+      Runs all inspections of the passed Layout at the build site, exactly
+      like run_all_inspections, but instead of returning unsigned Link
+      objects it returns a list of signed witness metadata (Metablock objects
+      carrying a Witness payload), one per inspection.
+
+      Each witness binds the recorded inspection result to the canonical
+      representation of the (already parameter-substituted) layout, the
+      passed sublayout chain, the inspection name, and the inspection's
+      (substituted) run command. The witnesses can later be consumed by
+      in_toto_verify in offline mode, where inspection commands must not be
+      re-executed.
+
+    <Arguments>
+      layout:
+              A Layout object whose inspections are executed. Parameter
+              substitution must already have been applied.
+
+      signer:
+              A securesystemslib Signer used to sign each witness.
+
+      sublayout_chain: (optional)
+              A list of step names that identifies the chain of sublayout
+              delegations from the root layout to the passed layout. Empty
+              (the default) for the root layout.
+
+      timeout:
+              Integer that is the amount of seconds that each inspection run
+              will fail after.
+
+    <Exceptions>
+      Calls function that raises BadReturnValueError if an inspection
+      returned non-int or non-zero.
+
+    <Side Effects>
+      Runs inspection commands in subprocesses.
+
+    <Returns>
+      A list of Metablock objects, each carrying a signed Witness payload.
+
+    """
+    if sublayout_chain is None:
+        sublayout_chain = []
+
+    layout_hash = _layout_fingerprint(layout)
+    witnesses = []
+
+    for inspection in layout.inspect:
+        LOG.info(
+            "Executing command for inspection '%s' to record witness...",
+            inspection.name,
+        )
+
+        # FIXME: We don't want to use the base path for runlib so we patch this
+        # for now. This will not stay!
+        base_path_backup = in_toto.settings.ARTIFACT_BASE_PATH
+        in_toto.settings.ARTIFACT_BASE_PATH = None
+
+        material_list = product_list = ["."]
+        link = in_toto.runlib.in_toto_run(
+            inspection.name,
+            material_list,
+            product_list,
+            inspection.run,
+            timeout=timeout,
+        )
+
+        _raise_on_bad_retval(
+            link.signed.byproducts.get("return-value"), inspection.run
+        )
+
+        witness = Witness(
+            name=inspection.name,
+            sublayout_chain=list(sublayout_chain),
+            layout_hash=layout_hash,
+            command=list(inspection.run),
+            materials=link.signed.materials,
+            products=link.signed.products,
+            byproducts=link.signed.byproducts,
+            environment=link.signed.environment,
+        )
+        metadata = Metablock(signed=witness)
+        metadata.create_signature(signer)
+        witnesses.append(metadata)
+
+        in_toto.settings.ARTIFACT_BASE_PATH = base_path_backup
+
+    return witnesses
+
+
+def _find_inspection_witness(
+    inspection, witnesses, witness_key_dict, layout_hash, sublayout_chain
+):
+    """
+    <Purpose>
+      Internal function that selects the witness for a single inspection
+      from the passed witness metadata. See verify_inspection_witnesses for
+      the requirements a usable witness must fulfill.
+
+    <Returns>
+      The Witness payload that attests the passed inspection.
+
+    """
+    # Collect witness payloads for this inspection. Note that a plain
+    # Link payload is never accepted as a witness, even if its name
+    # matches the inspection name.
+    candidates = []
+    for metadata in witnesses:
+        payload = metadata.get_payload()
+        if (
+            getattr(payload, "type_", None) == "witness"
+            and payload.name == inspection.name
+        ):
+            candidates.append((metadata, payload))
+
+    if not candidates:
+        raise WitnessNotFoundError(
+            f"No witness found for inspection '{inspection.name}' in"
+            f" sublayout chain '{sublayout_chain}'."
+        )
+
+    # Of the candidates, only consider those that carry a valid signature
+    # from at least one authorized witness key
+    signed_candidates = []
+    for metadata, payload in candidates:
+        for verify_key in witness_key_dict.values():
+            try:
+                metadata.verify_signature(verify_key)
+                signed_candidates.append(payload)
+                break
+
+            except SignatureVerificationError:
+                pass
+
+    if not signed_candidates:
+        raise SignatureVerificationError(
+            f"No witness for inspection '{inspection.name}' carries a"
+            " valid signature from an authorized witness key."
+        )
+
+    # Of the validly signed candidates, only consider those that match
+    # the current layout, the sublayout chain, and the (substituted)
+    # inspection command
+    matching_candidates = [
+        payload
+        for payload in signed_candidates
+        if payload.layout_hash == layout_hash
+        and list(payload.sublayout_chain) == list(sublayout_chain)
+        and list(payload.command) == list(inspection.run)
+    ]
+
+    if not matching_candidates:
+        raise WitnessVerificationError(
+            f"No validly signed witness for inspection"
+            f" '{inspection.name}' matches the current layout, sublayout"
+            f" chain '{sublayout_chain}', and substituted inspection"
+            " command."
+        )
+
+    return matching_candidates[0]
+
+
+def verify_inspection_witnesses(
+    layout, witnesses, witness_key_dict, sublayout_chain=None
+):
+    """
+    <Purpose>
+      Offline replacement for run_all_inspections: instead of executing the
+      inspection commands of the passed Layout, consumes signed inspection
+      witnesses recorded at the build site (see generate_inspection_witnesses)
+      and returns the attested inspection results as Link objects, so that
+      inspection artifact rules can be verified as usual.
+
+      For each inspection, a usable witness must
+        - be a Witness payload (a plain Link, even with a matching name, is
+          not accepted),
+        - carry a valid signature from at least one of the passed authorized
+          witness keys,
+        - and match the current (parameter-substituted) layout, the passed
+          sublayout chain, the inspection name, and the inspection's
+          (substituted) run command.
+
+    <Arguments>
+      layout:
+              A Layout object whose inspections are verified. Parameter
+              substitution must already have been applied.
+
+      witnesses:
+              A list of Metadata objects expected to carry Witness payloads.
+
+      witness_key_dict:
+              A dictionary of public keys authorized to sign inspection
+              witnesses. At least one key is required, and each consumed
+              witness must carry a valid signature from at least one key.
+
+      sublayout_chain: (optional)
+              A list of step names that identifies the chain of sublayout
+              delegations from the root layout to the passed layout. Empty
+              (the default) for the root layout.
+
+    <Exceptions>
+      securesystemslib.exceptions.FormatError
+              if the passed witness key dictionary is malformed.
+
+      SignatureVerificationError
+              if no witness key is passed, or if no witness for an inspection
+              carries a valid signature from an authorized witness key.
+
+      WitnessNotFoundError
+              if no witness payload can be found for an inspection.
+
+      WitnessVerificationError
+              if a validly signed witness does not match the layout, the
+              sublayout chain, or the (substituted) inspection command.
+
+      BadReturnValueError
+              if a witness attests a non-int or non-zero inspection return
+              value.
+
+    <Returns>
+      A dictionary of Link objects attested by the consumed witnesses, e.g.:
+
+      {
+        <inspection name> : {
+          <Link object>,
+          ...
+        }, ...
+      }
+
+    """
+    if sublayout_chain is None:
+        sublayout_chain = []
+
+    _check_public_keys(witness_key_dict)
+
+    # Fail if an empty verification key dictionary was passed
+    if len(witness_key_dict) < 1:
+        raise SignatureVerificationError(
+            "Witness signature verification requires at least one key."
+        )
+
+    expected_layout_hash = _layout_fingerprint(layout)
+    inspection_links_dict = {}
+
+    for inspection in layout.inspect:
+        witness = _find_inspection_witness(
+            inspection,
+            witnesses,
+            witness_key_dict,
+            expected_layout_hash,
+            sublayout_chain,
+        )
+
+        _raise_on_bad_retval(
+            witness.byproducts.get("return-value"), inspection.run
+        )
+
+        inspection_links_dict[inspection.name] = in_toto.models.link.Link(
+            name=inspection.name,
+            command=list(inspection.run),
+            materials=witness.materials,
+            products=witness.products,
+            byproducts=witness.byproducts,
+            environment=witness.environment,
+        )
 
     return inspection_links_dict
 
@@ -1323,8 +1621,14 @@ def reduce_chain_links(chain_link_dict):
     return reduced_chain_link_dict
 
 
-def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+def verify_sublayouts(  # noqa: PLR0913
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    inspection_witnesses=None,
+    witness_key_dict=None,
+    sublayout_chain=None,
 ):
     """
     <Purpose>
@@ -1358,6 +1662,19 @@ def verify_sublayouts(
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
 
+      inspection_witnesses: (optional)
+              A list of Metadata objects carrying signed Witness payloads,
+              forwarded to recursive in_toto_verify calls for offline
+              inspection verification.
+
+      witness_key_dict: (optional)
+              A dictionary of public keys authorized to sign inspection
+              witnesses, forwarded together with inspection_witnesses.
+
+      sublayout_chain: (optional)
+              A list of step names that identifies the chain of sublayout
+              delegations from the root layout to the passed layout.
+
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
 
@@ -1377,6 +1694,9 @@ def verify_sublayouts(
 
     """
     chain_link_dict = {}
+
+    if sublayout_chain is None:
+        sublayout_chain = []
 
     for step_name, metadata_dict in steps_metadata.items():
         key_link_dict = {}
@@ -1413,6 +1733,9 @@ def verify_sublayouts(
                     link_dir_path=sublayout_link_dir_path,
                     step_name=step_name,
                     inspect_timeout=inspect_timeout,
+                    inspection_witnesses=inspection_witnesses,
+                    witness_key_dict=witness_key_dict,
+                    _sublayout_chain=[*sublayout_chain, step_name],
                 )
 
                 # Replace the layout object with the link object returned
@@ -1489,6 +1812,9 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    inspection_witnesses=None,
+    witness_key_dict=None,
+    _sublayout_chain=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1507,7 +1833,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
         https://github.com/in-toto/docs/blob/master/in-toto-spec.md#431-steps
     8.  Verify threshold artifact constraints
     9.  Process step product and material rules
-    10. Execute inspection commands and generate inspection links
+    10. Execute inspection commands and generate inspection links, or, in
+        offline mode, consume signed inspection witnesses instead
     11. Process inspection product and material rules
 
     Note: in-toto's verification workflow directly uses the key for verifying
@@ -1547,6 +1874,22 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      inspection_witnesses (optional): A list of Metadata objects carrying
+          signed Witness payloads (see generate_inspection_witnesses). If
+          passed, verification runs in offline mode: inspection commands are
+          not executed, instead each inspection must be attested by a witness
+          that matches the (substituted) layout, the sublayout chain, the
+          inspection name, and the (substituted) inspection command. An empty
+          list selects offline mode with no witnesses.
+
+      witness_key_dict (optional): A public key dictionary with keys
+          authorized to sign inspection witnesses. Required if
+          inspection_witnesses is passed. Only meaningful in offline mode.
+
+      _sublayout_chain (optional): Internal parameter used during recursive
+          sublayout verification to identify the chain of sublayout
+          delegations from the root layout to the currently verified layout.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1557,6 +1900,12 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
       LinkNotFoundError: Fewer than threshold link metadata files can be found
           for a step of the layout.
+
+      WitnessNotFoundError: In offline mode, no witness payload can be found
+          for an inspection.
+
+      WitnessVerificationError: In offline mode, a validly signed witness does
+          not match the layout, sublayout chain, or inspection identity.
 
       ThresholdVerificationError: Fewer than threshold links, validly signed by
           different authorized functionaries, who agree on the recorded materials
@@ -1571,7 +1920,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     Side Effects:
       Reads link metadata files from disk.
-      Runs inspection commands in subprocess.
+      Runs inspection commands in subprocess, unless offline mode is selected
+      by passing inspection_witnesses.
 
     Returns:
       A Link object, which summarizes the materials and products of the overall
@@ -1579,6 +1929,14 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
       verification.
 
     """
+    if _sublayout_chain is None:
+        _sublayout_chain = []
+
+    if inspection_witnesses is None and witness_key_dict is not None:
+        raise ValueError(
+            "'witness_key_dict' is only supported together with"
+            " 'inspection_witnesses' (offline verification mode)."
+        )
 
     LOG.info("Verifying layout metadata signatures...")
     verify_metadata_signatures(metadata, layout_key_dict)
@@ -1605,7 +1963,13 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     LOG.info("Verifying sublayouts...")
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout,
+        steps_metadata,
+        link_dir_path,
+        inspect_timeout,
+        inspection_witnesses=inspection_witnesses,
+        witness_key_dict=witness_key_dict,
+        sublayout_chain=_sublayout_chain,
     )
 
     LOG.info("Verifying alignment of reported commands...")
@@ -1621,10 +1985,20 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     LOG.info("Verifying Step rules...")
     verify_all_item_rules(layout.steps, reduced_chain_link_dict)
 
-    LOG.info("Executing Inspection commands...")
-    inspection_link_dict = run_all_inspections(
-        layout, persist_inspection_links, inspect_timeout
-    )
+    if inspection_witnesses is not None:
+        LOG.info("Verifying Inspection witnesses (offline mode)...")
+        inspection_link_dict = verify_inspection_witnesses(
+            layout,
+            inspection_witnesses,
+            witness_key_dict,
+            sublayout_chain=_sublayout_chain,
+        )
+
+    else:
+        LOG.info("Executing Inspection commands...")
+        inspection_link_dict = run_all_inspections(
+            layout, persist_inspection_links, inspect_timeout
+        )
 
     LOG.info("Verifying Inspection rules...")
     # Artifact rules for inspections can reference links that correspond to

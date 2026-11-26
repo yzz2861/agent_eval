@@ -43,6 +43,7 @@ from in_toto.models._signer import GPGSigner
 from in_toto.models.common import Signable, ValidationMixin
 from in_toto.models.layout import Layout
 from in_toto.models.link import Link
+from in_toto.models.witness import Witness
 
 ENVELOPE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
 
@@ -282,6 +283,9 @@ class Metablock(Metadata, ValidationMixin):
         elif signed_type == "layout":
             signed = Layout.read(signed_data)
 
+        elif signed_type == "witness":
+            signed = Witness.read(signed_data)
+
         else:
             raise securesystemslib.exceptions.FormatError(
                 "Invalid Metadata format"
@@ -418,15 +422,16 @@ class Metablock(Metadata, ValidationMixin):
 
     def _validate_signed(self):
         """Private method to check if the 'signed' attribute contains a valid
-        Layout or Link object."""
+        Layout, Link or Witness object."""
 
-        if not isinstance(self.signed, (Layout, Link)):
+        if not isinstance(self.signed, (Layout, Link, Witness)):
             raise securesystemslib.exceptions.FormatError(
                 "The Metblock's 'signed'"
-                " property has has to be of type 'Link' or 'Layout'."
+                " property has has to be of type 'Link', 'Layout' or"
+                " 'Witness'."
             )
 
-        # If the signed object is a Link or Layout object validate it.
+        # If the signed object is a Link, Layout or Witness object validate it.
         self.signed.validate()
 
     def _validate_signatures(self):

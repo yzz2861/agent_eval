@@ -43,6 +43,8 @@ from in_toto.exceptions import (
     RuleVerificationError,
     SignatureVerificationError,
     ThresholdVerificationError,
+    WitnessNotFoundError,
+    WitnessVerificationError,
 )
 from in_toto.models.layout import (
     SUBLAYOUT_LINK_DIR_FORMAT,
@@ -55,16 +57,19 @@ from in_toto.models.metadata import Metablock
 from in_toto.rulelib import unpack_rule
 from in_toto.verifylib import (
     _raise_on_bad_retval,
+    generate_inspection_witnesses,
     get_summary_link,
     in_toto_verify,
     load_links_for_layout,
     run_all_inspections,
+    substitute_parameters,
     verify_all_item_rules,
     verify_allow_rule,
     verify_command_alignment,
     verify_create_rule,
     verify_delete_rule,
     verify_disallow_rule,
+    verify_inspection_witnesses,
     verify_item_rules,
     verify_link_signature_thresholds,
     verify_match_rule,
@@ -1708,6 +1713,220 @@ class TestInTotoVerifyMultiLevelSublayouts(unittest.TestCase, TmpDirMixin):
         in_toto_verify(root_layout, root_layout_pub_key_dict)
 
         self.tear_down_test_dir()
+
+
+class TestInTotoVerifyOfflineWitnesses(unittest.TestCase, TmpDirMixin):
+    """Test verifylib.in_toto_verify offline inspection verification with
+    signed witnesses, using a two-level layout hierarchy where the root
+    layout and the sublayout each have a same-named inspection."""
+
+    def setUp(self):
+        """Build a two-level layout and record signed inspection witnesses
+        at the build site."""
+        self.set_up_test_dir()
+
+        # Root layout owner, sublayout functionary and witness signer keys
+        self.alice = SignerStore.rsa
+        self.alice_pub = SignerStore.rsa_pub
+        self.carl = SignerStore.ecdsa
+        self.carl_pub = SignerStore.ecdsa_pub
+        self.wendy = SignerStore.ed25519
+        self.wendy_pub = SignerStore.ed25519_pub
+
+        self.sublayout_step_name = "sub"
+
+        # Root layout: one step delegated to a sublayout, one inspection
+        self.root_layout = Metablock(
+            signed=Layout(
+                keys={self.carl_pub["keyid"]: self.carl_pub},
+                steps=[
+                    Step(
+                        name=self.sublayout_step_name,
+                        pubkeys=[self.carl_pub["keyid"]],
+                    )
+                ],
+                inspect=[
+                    Inspection(
+                        name="audit",
+                        run=[VersionedPython, "-c", "print('root audit')"],
+                    )
+                ],
+            )
+        )
+        self.root_layout.create_signature(self.alice)
+
+        # Sublayout: no steps, one inspection with the same name but a
+        # different command
+        self.sub_layout = Metablock(
+            signed=Layout(
+                inspect=[
+                    Inspection(
+                        name="audit",
+                        run=[VersionedPython, "-c", "print('sub audit')"],
+                    )
+                ],
+            )
+        )
+        self.sub_layout.create_signature(self.carl)
+        sub_layout_link_name = FILENAME_FORMAT.format(
+            step_name=self.sublayout_step_name, keyid=self.carl_pub["keyid"]
+        )
+        self.sub_layout.dump(sub_layout_link_name)
+
+        # Record signed witnesses for both inspections at the build site
+        self.root_witnesses = generate_inspection_witnesses(
+            self.root_layout.signed, self.wendy
+        )
+        self.sub_witnesses = generate_inspection_witnesses(
+            self.sub_layout.signed,
+            self.wendy,
+            sublayout_chain=[self.sublayout_step_name],
+        )
+        self.all_witnesses = self.root_witnesses + self.sub_witnesses
+
+        self.root_layout_key_dict = {self.alice_pub["keyid"]: self.alice_pub}
+        self.witness_key_dict = {self.wendy_pub["keyid"]: self.wendy_pub}
+
+    def tearDown(self):
+        self.tear_down_test_dir()
+
+    def test_offline_verification_runs_no_commands(self):
+        """Offline verification passes and does not execute any command."""
+        with patch("in_toto.runlib.in_toto_run") as run_mock:
+            in_toto_verify(
+                self.root_layout,
+                self.root_layout_key_dict,
+                inspection_witnesses=self.all_witnesses,
+                witness_key_dict=self.witness_key_dict,
+            )
+            run_mock.assert_not_called()
+
+    def test_witness_roundtrip_through_file(self):
+        """A dumped witness can be loaded back as witness metadata."""
+        self.root_witnesses[0].dump("audit.witness")
+        loaded = Metablock.load("audit.witness")
+        self.assertEqual(loaded.get_payload().type_, "witness")
+        self.assertEqual(loaded.get_payload().name, "audit")
+
+    def test_replaced_witness_invalidates_only_that_inspection(self):
+        """Replacing the root inspection's witness with the sublayout's
+        same-named witness invalidates only the root inspection's evidence."""
+        replaced_witnesses = [self.sub_witnesses[0], self.sub_witnesses[0]]
+
+        # The sublayout inspection (sublayout chain ['sub']) is still
+        # attested, the root inspection (empty chain) is not
+        with self.assertRaises(WitnessVerificationError) as ctx:
+            in_toto_verify(
+                self.root_layout,
+                self.root_layout_key_dict,
+                inspection_witnesses=replaced_witnesses,
+                witness_key_dict=self.witness_key_dict,
+            )
+        self.assertIn("audit", str(ctx.exception))
+
+        # The replaced witness still verifies for the inspection and
+        # sublayout chain it was recorded for
+        links = verify_inspection_witnesses(
+            self.sub_layout.signed,
+            replaced_witnesses,
+            self.witness_key_dict,
+            sublayout_chain=[self.sublayout_step_name],
+        )
+        self.assertIn("audit", links)
+
+    def test_plain_link_cannot_substitute_witness(self):
+        """A plain link, even with a matching name and a signature from an
+        authorized witness key, is not accepted as a witness."""
+        fake_witness = Metablock(
+            signed=Link(
+                name="audit",
+                command=[VersionedPython, "-c", "print('root audit')"],
+                byproducts={"return-value": 0},
+            )
+        )
+        fake_witness.create_signature(self.wendy)
+
+        with self.assertRaises(WitnessNotFoundError):
+            verify_inspection_witnesses(
+                self.root_layout.signed,
+                [fake_witness],
+                self.witness_key_dict,
+            )
+
+    def test_missing_witness_and_bad_signature_differ(self):
+        """A missing witness (trusted keys, no material) and an invalid
+        witness signature produce different conclusions."""
+        # Trusted keys, but no witness material for the root inspection
+        with self.assertRaises(WitnessNotFoundError):
+            verify_inspection_witnesses(
+                self.root_layout.signed, [], self.witness_key_dict
+            )
+
+        # Witness material exists, but is signed by an unauthorized key
+        rogue_witnesses = generate_inspection_witnesses(
+            self.root_layout.signed, self.alice
+        )
+        with self.assertRaises(SignatureVerificationError):
+            verify_inspection_witnesses(
+                self.root_layout.signed,
+                rogue_witnesses,
+                self.witness_key_dict,
+            )
+
+    def test_witness_must_match_substituted_identity(self):
+        """A witness must match the layout content and inspection command
+        after parameter substitution."""
+        layout = Metablock(
+            signed=Layout(
+                inspect=[
+                    Inspection(
+                        name="audit",
+                        run=[VersionedPython, "-c", "print('{who}')"],
+                    )
+                ],
+            )
+        )
+        layout.create_signature(self.alice)
+
+        # Witness recorded for a different substitution
+        other_layout = copy.deepcopy(layout.signed)
+        substitute_parameters(other_layout, {"who": "someone-else"})
+        wrong_witnesses = generate_inspection_witnesses(
+            other_layout, self.wendy
+        )
+
+        with self.assertRaises(WitnessVerificationError):
+            in_toto_verify(
+                copy.deepcopy(layout),
+                self.root_layout_key_dict,
+                substitution_parameters={"who": "root"},
+                inspection_witnesses=wrong_witnesses,
+                witness_key_dict=self.witness_key_dict,
+            )
+
+        # Witness recorded for the actual substitution verifies
+        matching_layout = copy.deepcopy(layout.signed)
+        substitute_parameters(matching_layout, {"who": "root"})
+        right_witnesses = generate_inspection_witnesses(
+            matching_layout, self.wendy
+        )
+
+        in_toto_verify(
+            copy.deepcopy(layout),
+            self.root_layout_key_dict,
+            substitution_parameters={"who": "root"},
+            inspection_witnesses=right_witnesses,
+            witness_key_dict=self.witness_key_dict,
+        )
+
+    def test_witness_keys_require_offline_mode(self):
+        """Passing witness keys without witnesses is rejected."""
+        with self.assertRaises(ValueError):
+            in_toto_verify(
+                self.root_layout,
+                self.root_layout_key_dict,
+                witness_key_dict=self.witness_key_dict,
+            )
 
 
 class TestSublayoutVerificationMatchRule(unittest.TestCase, TmpDirMixin):
