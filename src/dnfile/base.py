@@ -283,6 +283,8 @@ class MDTableRow(abc.ABC):
         assert hasattr(self.__class__, "_struct_class")
 
         self._loaded = LoadState.Unloaded
+        self._table: Optional["ClrMetaDataTable"] = None
+        self._row_index: Optional[int] = None
 
         self._tables_rowcnt = tables_rowcounts
         self._strings: Optional["stream.StringsHeap"] = strings_heap
@@ -319,6 +321,22 @@ class MDTableRow(abc.ABC):
         self._data = data
         self.struct = self.__class__._struct_class(format=self._format, file_offset=file_offset)
         self.struct.__unpack__(data)
+
+    def _attach_table(self, table: "ClrMetaDataTable", row_index: int) -> None:
+        self._table = table
+        self._row_index = row_index
+
+    @property
+    def row_index(self) -> Optional[int]:
+        """One-based row index (RID) of this row in its metadata table."""
+        return self._row_index
+
+    @property
+    def token(self) -> Optional[int]:
+        """ECMA metadata token, if this row was created by a metadata table."""
+        if self._table is None or self._row_index is None:
+            return None
+        return metadata_token(self._table.number, self._row_index)
 
     # can be safely parsed without all tables being initialized
     CLASS_ATTRS = (
@@ -664,6 +682,12 @@ class MDTableIndex(Generic[RowType]):
         self.row_index: int = row_index
 
     @property
+    def token(self) -> Optional[int]:
+        if self.table is None or not hasattr(self.table, "number"):
+            return None
+        return (int(self.table.number) << 24) | (int(self.row_index) & 0xFFFFFF)
+
+    @property
     def row(self) -> Optional[RowType]:
         if self.table is None:
             return None
@@ -708,6 +732,19 @@ class CodedIndex(MDTableIndex[RowType]):
 
         # this may not be a problem, e.g. when ManifestResource Implementation=0
         self.table = None
+
+
+def metadata_token(table_number: int, row_index: int) -> int:
+    """Return the ECMA-335 metadata token for a one-based row index."""
+    return ((int(table_number) & 0xFF) << 24) | (int(row_index) & 0xFFFFFF)
+
+
+def token_table(token: int) -> int:
+    return (int(token) >> 24) & 0xFF
+
+
+def token_row_index(token: int) -> int:
+    return int(token) & 0xFFFFFF
 
 
 class ClrMetaDataTable(Generic[RowType]):
@@ -824,7 +861,9 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows = _LazyList(self._lazy_parse_rows, num_rows)
             try:
                 # `_get_row_size` uses the size of the first row.
-                self.rows[0] = init_row()
+                first_row = init_row()
+                first_row._attach_table(self, 1)
+                self.rows[0] = first_row
             except errors.dnFormatError:
                 logger.warning("failed to construct %s row %d", self.name, 0)
                 # "truncate" the list since the following data is assumed invalid.
@@ -833,7 +872,9 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows = []
             for e in range(num_rows):
                 try:
-                    self.rows.append(init_row())
+                    row = init_row()
+                    row._attach_table(self, e + 1)
+                    self.rows.append(row)
                 except errors.dnFormatError:
                     # this may occur when the offset to a stream is too large.
                     # this probably means invalid data.
@@ -894,6 +935,7 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows.truncate(idx)
             return None
 
+        row._attach_table(self, idx + 1)
         row.setup_lazy_load(self._full_loader)
         offset = self.row_size * idx
         if len(self._table_data) < offset + self.row_size:

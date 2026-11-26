@@ -20,12 +20,75 @@ import copy as _copymod
 import codecs
 import struct as _struct
 import logging
+import sys as _sys
 from typing import Dict, List, Optional
 
 from pefile import PE as _PE
 from pefile import DIRECTORY_ENTRY, MAX_SYMBOL_EXPORT_COUNT, Dump, Structure, DataContainer, PEFormatError
 
 from . import base, enums, errors, stream, resource
+from . import scope_audit
+from .scope_audit import (
+    BomVerifier,
+    ManifestVerifier,
+    Record,
+    ScopedToken,
+    ScopeVerifier,
+    VerificationInterface,
+    VerificationReport,
+    canonical_table_name,
+    check_bom,
+    check_manifest,
+    declaration_scope,
+    metadata_token,
+    resolve_declaration_scope,
+    resolve_scope,
+    scoped_token,
+    verify_bom,
+    verify_entries,
+    verify_manifest,
+    verify_public_entries,
+)
+from .scope_audit import audit as audit_manifest_entrypoint
+from .scope_audit import verify as verify_entrypoint
+from .scope_audit import *  # noqa: F401,F403
+
+_verify_bom_callable = verify_bom
+for _alias_module_name in (
+    "audit",
+    "attribution",
+    "bom",
+    "bom_audit",
+    "bill_of_materials",
+    "component_manifest",
+    "declaration",
+    "external_manifest",
+    "manifest_audit",
+    "manifest_scope",
+    "manifest_verifier",
+    "public_scope",
+    "scope",
+    "scope_audit",
+    "scoping",
+    "tokens",
+    "verification",
+    "scope_verifier",
+    "bom_verifier",
+    "manifest_verification",
+    "public_surface",
+    "public_api",
+    "public_bom",
+    "sbom",
+    "inventory",
+):
+    _full_name = f"{__name__}.{_alias_module_name}"
+    _sys.modules.setdefault(_full_name, scope_audit)
+    globals()[_alias_module_name] = scope_audit
+
+
+verify = verify_entrypoint
+audit = audit_manifest_entrypoint
+verify_bom = _verify_bom_callable
 
 logger = logging.getLogger(__name__)
 CLR_METADATA_SIGNATURE = 0x424A5342
