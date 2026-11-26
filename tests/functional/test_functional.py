@@ -933,3 +933,45 @@ class FunctionalTests(testtools.TestCase):
             "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 15},
         }
         self.check_example("huggingface_unsafe_download.py", expect)
+
+    def test_mock_patch_protected_decision(self):
+        """Test release entries reaching protected calls under mock.patch"""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 1, "HIGH": 2},
+        }
+        b_conf = b_config.BanditConfig()
+        b_conf.config["mock_patch_protected_decision"] = {
+            "release_entry_points": [
+                "release_entry",
+                "release_entry_decorated",
+                "release_entry_dynamic",
+            ],
+            "protected_decision_functions": [
+                "mock_patch_shared_helpers.check_permission"
+            ],
+        }
+        ts = b_test_set.BanditTestSet(
+            config=b_conf, profile={"include": ["B616"]}
+        )
+        with self.with_test_set(ts):
+            self.check_example("mock_patch_release_entry.py", expect)
+
+    def test_mock_patch_protected_decision_shared_helpers(self):
+        """The shared helper module alone must not produce findings"""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+        }
+        b_conf = b_config.BanditConfig()
+        b_conf.config["mock_patch_protected_decision"] = {
+            "release_entry_points": ["release_entry"],
+            "protected_decision_functions": [
+                "mock_patch_shared_helpers.check_permission"
+            ],
+        }
+        ts = b_test_set.BanditTestSet(
+            config=b_conf, profile={"include": ["B616"]}
+        )
+        with self.with_test_set(ts):
+            self.check_example("mock_patch_shared_helpers.py", expect)
