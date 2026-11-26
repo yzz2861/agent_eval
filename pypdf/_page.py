@@ -73,6 +73,7 @@ from .generic import (
     ArrayObject,
     ContentStream,
     DictionaryObject,
+    EmbeddedFile,
     EncodedStreamObject,
     FloatObject,
     IndirectObject,
@@ -1824,6 +1825,25 @@ class PageObject(DictionaryObject):
             if page.indirect_reference == self.indirect_reference:
                 return number
         return None
+
+    @property
+    def associated_files(self) -> list[EmbeddedFile]:
+        """Iterable of files directly associated with this page via ``/AF``."""
+        af = self.get(NameObject(PG.AF))
+        if is_null_or_none(af):
+            return []
+        page_number = self.page_number
+        page_indexes: tuple[int, ...] = () if page_number is None else (page_number,)
+        return list(
+            EmbeddedFile._load_from_associated_files(
+                af, page_index=page_indexes[0] if page_indexes else None
+            )
+        )
+
+    @property
+    def af_files(self) -> list[EmbeddedFile]:
+        """Alias for :attr:`associated_files`."""
+        return self.associated_files
 
     def _debug_for_extract(self) -> str:  # pragma: no cover
         out = ""

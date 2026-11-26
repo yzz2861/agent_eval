@@ -804,7 +804,17 @@ class PdfWriter(PdfDocCommon):
         """
         return Action._create_open_action(self, action)
 
-    def add_attachment(self, filename: str, data: str | bytes) -> "EmbeddedFile":
+    def add_attachment(
+        self,
+        filename: str,
+        data: str | bytes | None,
+        associated_file_relationship: NameObject | str | None = None,
+        *,
+        relationship: NameObject | str | None = None,
+        page: PageObject | int | None = None,
+        pages: Iterable[PageObject | int] | None = None,
+        add_to_af: bool | None = None,
+    ) -> "EmbeddedFile":
         """
         Embed a file inside the PDF.
 
@@ -814,13 +824,99 @@ class PdfWriter(PdfDocCommon):
 
         Args:
             filename: The filename to display.
-            data: The data in the file.
+            data: The data in the file. If ``None``, an external file
+                specification without an embedded stream is created.
+            associated_file_relationship: The ``/AFRelationship`` value. When
+                provided, the file is also added to the document-level ``/AF``
+                array unless page associations are specified explicitly.
+            relationship: Alias for ``associated_file_relationship``.
+            page: Associate the file with this page instead of the document.
+            pages: Associate the file with these pages instead of the document.
+            add_to_af: Add the file to the document-level ``/AF`` array. By
+                default this happens when a relationship has been provided.
+                Pass ``False`` to suppress it.
 
         Returns:
             EmbeddedFile instance for the newly created embedded file.
 
         """
-        return EmbeddedFile._create_new(self, filename, data)
+        if associated_file_relationship is not None and relationship is not None:
+            raise ValueError(
+                "Use either associated_file_relationship or relationship, not both."
+            )
+        relationship = relationship or associated_file_relationship
+        if page is not None and pages is not None:
+            raise ValueError("Use either page or pages, not both.")
+
+        attachment = EmbeddedFile._create_new(self, filename, data)
+        if relationship is not None:
+            attachment.associated_file_relationship = (
+                relationship
+                if isinstance(relationship, NameObject)
+                else NameObject(relationship)
+            )
+
+        targets: list[DictionaryObject] = []
+        if page is not None:
+            targets.append(self.pages[page] if isinstance(page, int) else page)
+        elif pages is not None:
+            targets.extend(
+                self.pages[target] if isinstance(target, int) else target
+                for target in pages
+            )
+
+        if targets:
+            for target in targets:
+                self._add_attachment_to_af(attachment, target)
+        elif add_to_af is True or (add_to_af is None and relationship is not None):
+            self._add_attachment_to_af(attachment, self.root_object)
+
+        return attachment
+
+    def add_associated_file(
+        self,
+        filename: str,
+        data: str | bytes | None = None,
+        relationship: NameObject | str | None = None,
+        *,
+        page: PageObject | int | None = None,
+        pages: Iterable[PageObject | int] | None = None,
+    ) -> "EmbeddedFile":
+        """Add an associated file, optionally without embedded content."""
+        return self.add_attachment(
+            filename,
+            data,
+            relationship,
+            page=page,
+            pages=pages,
+            add_to_af=True,
+        )
+
+    def _add_attachment_to_af(
+        self, attachment: "EmbeddedFile", target: DictionaryObject
+    ) -> None:
+        """Add a file specification reference to an object's ``/AF`` array."""
+        af = target.get(NameObject(PG.AF))
+        if is_null_or_none(af):
+            af = ArrayObject()
+            target[NameObject(PG.AF)] = af
+        else:
+            af = af.get_object() if hasattr(af, "get_object") else af
+            if not isinstance(af, ArrayObject):
+                raise PdfReadError("Existing /AF entry is not an array.")
+
+        reference = attachment.pdf_object.indirect_reference
+        if reference is None:
+            reference = self._add_object(attachment.pdf_object)
+        if reference not in af:
+            af.append(reference)
+
+        page_indexes: tuple[int, ...] = ()
+        if isinstance(target, PageObject) and target.page_number is not None:
+            page_indexes = (target.page_number,)
+        attachment._is_associated = True
+        attachment._page_indexes.update(page_indexes)
+        attachment._add_parent(af, is_name_tree_entry=False)
 
     def append_pages_from_reader(
         self,

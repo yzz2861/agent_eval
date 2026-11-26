@@ -780,3 +780,95 @@ def test_embedded_file__order() -> None:
         "test.txt", attachment4.pdf_object.indirect_reference,
         "xyz.txt", attachment3.pdf_object.indirect_reference,
     ]
+
+
+def test_embedded_file__associated_files() -> None:
+    writer = PdfWriter()
+    first_page = writer.add_blank_page(100, 100)
+    second_page = writer.add_blank_page(100, 100)
+
+    source = writer.add_attachment(
+        "source.txt",
+        b"same content",
+        AFRelationship.SOURCE,
+        page=first_page,
+    )
+    alternative = writer.add_attachment(
+        "alternative.txt",
+        b"same content",
+        AFRelationship.ALTERNATIVE,
+        page=second_page,
+    )
+    external = writer.add_associated_file(
+        "evidence-17.pdf",
+        relationship=AFRelationship.DATA,
+    )
+
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+    reader = PdfReader(stream)
+
+    attachments = {attachment.name: attachment for attachment in reader.attachment_list}
+    assert set(attachments) == {"source.txt", "alternative.txt", "evidence-17.pdf"}
+    assert attachments["source.txt"].relationship == AFRelationship.SOURCE
+    assert attachments["alternative.txt"].relationship == AFRelationship.ALTERNATIVE
+    assert attachments["source.txt"].content == b"same content"
+    assert attachments["alternative.txt"].content == b"same content"
+    assert attachments["source.txt"].page_indexes == [0]
+    assert attachments["alternative.txt"].page_indexes == [1]
+    assert attachments["evidence-17.pdf"].is_embedded is False
+    assert "evidence-17.pdf" not in reader.attachments
+
+    assert [attachment.name for attachment in reader.pages[0].associated_files] == ["source.txt"]
+    assert [attachment.name for attachment in reader.pages[1].associated_files] == ["alternative.txt"]
+
+    assert source.relationship == AFRelationship.SOURCE
+    assert alternative.relationship == AFRelationship.ALTERNATIVE
+    assert external.is_embedded is False
+
+
+def test_embedded_file__delete_removes_associated_file_references() -> None:
+    writer = PdfWriter()
+    first_page = writer.add_blank_page(100, 100)
+    second_page = writer.add_blank_page(100, 100)
+
+    attachment = writer.add_attachment(
+        "test.txt",
+        b"content",
+        AFRelationship.DATA,
+        page=first_page,
+    )
+    writer._add_attachment_to_af(attachment, second_page)
+    writer._add_attachment_to_af(attachment, writer.root_object)
+
+    attachment.delete()
+
+    assert writer.root_object["/AF"] == []
+    assert first_page["/AF"] == []
+    assert second_page["/AF"] == []
+    assert list(writer.attachment_list) == []
+
+
+def test_embedded_file__nested_name_tree() -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+
+    inner = DictionaryObject({
+        NameObject("/Names"): ArrayObject([
+            TextStringObject("test.txt"),
+            writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Filespec"),
+                NameObject("/F"): TextStringObject("test.txt"),
+            })),
+        ])
+    })
+    outer = DictionaryObject({
+        NameObject("/Kids"): ArrayObject([writer._add_object(inner)])
+    })
+    writer.root_object[NameObject("/Names")] = writer._add_object(
+        DictionaryObject({NameObject("/EmbeddedFiles"): outer})
+    )
+
+    attachments = list(writer.attachment_list)
+    assert [attachment.name for attachment in attachments] == ["test.txt"]

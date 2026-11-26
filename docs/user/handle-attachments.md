@@ -43,6 +43,32 @@ for attachment in reader.attachment_list:
     print(attachment.name, attachment.alternative_name, attachment.content)
 ```
 
+`attachment_list` also contains file specifications which are only reachable
+through the document-level or page-level `/AF` array. Use
+`reader.associated_files` when you explicitly want the associated files and
+their roles:
+
+```{testcode}
+from pypdf import PdfReader
+
+reader = PdfReader("example.pdf")
+
+for attachment in reader.associated_files:
+    print(
+        attachment.name,
+        attachment.associated_file_relationship,
+        attachment.page_indexes,
+    )
+
+for page in reader.pages:
+    for attachment in page.associated_files:
+        print(page.page_number, attachment.name, attachment.associated_file_relationship)
+```
+
+The page indexes are zero-based. Files associated with the whole document have
+an empty `page_indexes` list. A file specification without an `/EF` entry is an
+external file reference; `is_embedded` is `False` and no content is available.
+
 ## Add Attachments
 
 To add a new attachment, use the following code:
@@ -80,6 +106,26 @@ embedded_file.modification_date = datetime.datetime.now(tz=datetime.timezone.utc
 writer.write("out-add-attachment.pdf")
 ```
 
+Pass an `AFRelationship` value to create a valid associated-file relationship.
+It is added to the document-level `/AF` array. Use `page` or `pages` to
+associate it with specific pages instead:
+
+```{testcode}
+from pypdf import PdfWriter
+from pypdf.constants import AFRelationship
+
+writer = PdfWriter(clone_from="example.pdf")
+embedded_file = writer.add_attachment(
+    filename="test.txt",
+    data=b"Hello World!",
+    associated_file_relationship=AFRelationship.SUPPLEMENT,
+)
+writer.write("out-associated-attachment.pdf")
+```
+
+`add_associated_file` accepts `data=None` for an external file specification
+which should be referenced by an `/AF` array without embedding its content.
+
 The same functionality is available if you iterate over the attachments of a writer
 using `writer.attachment_list`.
 
@@ -96,10 +142,8 @@ attachment.delete()
 assert list(writer.attachment_list) == []
 ```
 
-Please note that this will not delete the associated file relationship
-if it exists. Deleting them as well would require us to know where this has
-been defined, which requires more complexity. For now, please consider looking
-for the corresponding definition yourself and delete it from the array.
+Deleting an attachment also removes its references from all `/AF` arrays in
+which it has been discovered.
 
 ## PDF/A compliance
 

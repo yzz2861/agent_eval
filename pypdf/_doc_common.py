@@ -1729,6 +1729,9 @@ class PdfDocCommon(ABC):
         entries: dict[str, list[EmbeddedFile]] = {}
 
         for entry in self.attachment_list:
+            if entry.is_associated and not entry.is_embedded:
+                # External associated files have no content to expose here.
+                continue
             for name in entry._names:
                 entries.setdefault(name, []).append(entry)
 
@@ -1745,8 +1748,37 @@ class PdfDocCommon(ABC):
 
     @property
     def attachment_list(self) -> Iterator[EmbeddedFile]:
-        """Iterable of attachment objects."""
+        """Iterable of attachment objects.
+
+        This includes files from the ``/EmbeddedFiles`` name tree as well as
+        files referenced by the document-level and page-level ``/AF`` arrays.
+        Files reachable through multiple locations are returned only once.
+        """
         yield from EmbeddedFile._load(self.root_object, strict=self.strict)
+
+    @property
+    def associated_files(self) -> Iterator[EmbeddedFile]:
+        """Iterable of files associated with the document or its pages.
+
+        The returned objects expose their ``/AFRelationship`` through
+        :attr:`EmbeddedFile.associated_file_relationship` and the zero-based
+        page indexes through :attr:`EmbeddedFile.page_indexes`.
+        """
+        yield from self.attachment_list
+
+    @property
+    def associated_file_list(self) -> Iterator[EmbeddedFile]:
+        """Alias for :attr:`associated_files`."""
+        yield from self.associated_files
+
+    def get_associated_files(self) -> list[EmbeddedFile]:
+        """Return all associated files as a list."""
+        return list(self.associated_files)
+
+    @property
+    def af_files(self) -> Iterator[EmbeddedFile]:
+        """Alias for :attr:`associated_files`."""
+        yield from self.associated_files
 
     @abstractmethod
     def _repr_mimebundle_(

@@ -5,8 +5,8 @@ from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
 from pypdf._utils import format_iso8824_date, logger_warning, parse_iso8824_date
+from pypdf.constants import AFRelationship, FileSpecificationDictionaryEntries
 from pypdf.constants import CatalogAttributes as CA
-from pypdf.constants import FileSpecificationDictionaryEntries
 from pypdf.constants import PageAttributes as PG
 from pypdf.errors import PdfReadError, PyPdfError
 from pypdf.generic import (
@@ -24,7 +24,7 @@ from pypdf.generic import (
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from pypdf._writer import PdfWriter
 
@@ -37,16 +37,31 @@ class EmbeddedFile:
 
     Further information on embedded files can be found in section 7.11 of the PDF 2.0 specification.
     """
-    def __init__(self, name: str, pdf_object: DictionaryObject, parent: ArrayObject | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        pdf_object: DictionaryObject,
+        parent: ArrayObject | None = None,
+        *,
+        is_name_tree_entry: bool = True,
+        page_indexes: Iterable[int] | None = None,
+    ) -> None:
         """
         Args:
             name: The (primary) name as provided in the name tree.
             pdf_object: The corresponding PDF object to allow retrieving further data.
             parent: The parent list.
+            is_name_tree_entry: Whether ``parent`` is a name tree entry list.
+            page_indexes: Zero-based indexes of pages this file is associated with.
         """
         self._name = name
         self.pdf_object = pdf_object
         self._parent = parent
+        self._parents: list[tuple[ArrayObject, bool]] = []
+        self._page_indexes: set[int] = set(page_indexes or ())
+        self._is_associated = False
+        if parent is not None:
+            self._parents.append((parent, is_name_tree_entry))
 
     @property
     def name(self) -> str:
@@ -60,44 +75,82 @@ class EmbeddedFile:
         """
         return self._name
 
+    @property
+    def is_embedded(self) -> bool:
+        """Whether the file specification contains an embedded file stream."""
+        return "/EF" in self.pdf_object and not is_null_or_none(self.pdf_object["/EF"])
+
+    @property
+    def is_associated(self) -> bool:
+        """Whether this file is referenced by an ``/AF`` array."""
+        return self._is_associated
+
+    @property
+    def page_indexes(self) -> list[int]:
+        """Zero-based indexes of the pages this file is associated with."""
+        return sorted(self._page_indexes)
+
+    @property
+    def pages(self) -> list[int]:
+        """Zero-based page numbers this file is associated with."""
+        return self.page_indexes
+
+    @property
+    def associated_page_indexes(self) -> list[int]:
+        """Alias for :attr:`page_indexes`."""
+        return self.page_indexes
+
+    @property
+    def associated_pages(self) -> list[int]:
+        """Alias for :attr:`page_indexes`."""
+        return self.page_indexes
+
+    @property
+    def page_numbers(self) -> list[int]:
+        """Alias for :attr:`page_indexes`."""
+        return self.page_indexes
+
     @classmethod
-    def _create_new(cls, writer: PdfWriter, name: str, content: str | bytes) -> EmbeddedFile:
+    def _create_new(cls, writer: PdfWriter, name: str, content: str | bytes | None) -> EmbeddedFile:
         """
         Create a new embedded file and add it to the PdfWriter.
 
         Args:
             writer: The PdfWriter instance to add the embedded file to.
             name: The filename to display.
-            content: The data in the file.
+            content: The data in the file. If ``None``, only an external file
+                specification is created.
 
         Returns:
             EmbeddedFile instance for the newly created embedded file.
         """
-        # Convert string content to bytes if needed
-        if isinstance(content, str):
-            content = content.encode("latin-1")
+        ef_entry: DictionaryObject | None = None
+        if content is not None:
+            # Convert string content to bytes if needed
+            if isinstance(content, str):
+                content = content.encode("latin-1")
 
-        # Create the file entry (the actual embedded file stream)
-        file_entry = DecodedStreamObject()
-        file_entry.set_data(content)
-        file_entry.update({NameObject(PG.TYPE): NameObject("/EmbeddedFile")})
+            # Create the file entry (the actual embedded file stream)
+            file_entry = DecodedStreamObject()
+            file_entry.set_data(content)
+            file_entry.update({NameObject(PG.TYPE): NameObject("/EmbeddedFile")})
 
-        # Create the /EF entry
-        ef_entry = DictionaryObject()
-        ef_entry.update({NameObject("/F"): writer._add_object(file_entry)})
+            # Create the /EF entry
+            ef_entry = DictionaryObject()
+            ef_entry.update({NameObject("/F"): writer._add_object(file_entry)})
 
         # Create the filespec dictionary
         from pypdf.generic import create_string_object  # noqa: PLC0415
         filespec = DictionaryObject()
         filespec_reference = writer._add_object(filespec)
         name_object = cast(TextStringObject, create_string_object(name))
-        filespec.update(
-            {
-                NameObject(PG.TYPE): NameObject("/Filespec"),
-                NameObject(FileSpecificationDictionaryEntries.F): name_object,
-                NameObject(FileSpecificationDictionaryEntries.EF): ef_entry,
-            }
-        )
+        filespec.update({
+            NameObject(PG.TYPE): NameObject("/Filespec"),
+            NameObject(FileSpecificationDictionaryEntries.F): name_object,
+        })
+
+        if ef_entry is not None:
+            filespec[NameObject(FileSpecificationDictionaryEntries.EF)] = ef_entry
 
         # Add the name and filespec to the names array.
         # We use the inverse order for insertion, as this allows us to re-use the
@@ -220,15 +273,36 @@ class EmbeddedFile:
     @property
     def associated_file_relationship(self) -> str:
         """Retrieve the relationship of the referring document to this embedded file."""
-        return cast(
-            NameObject,
-            self.pdf_object.get("/AFRelationship", NameObject("/Unspecified")),
+        value = self.pdf_object.get(
+            NameObject("/AFRelationship"), NameObject(AFRelationship.UNSPECIFIED)
         )
+        value = value.get_object() if hasattr(value, "get_object") else value
+        if is_null_or_none(value):
+            return AFRelationship.UNSPECIFIED
+        return cast(str, value)
 
     @associated_file_relationship.setter
     def associated_file_relationship(self, value: NameObject) -> None:
         """Set the relationship of the referring document to this embedded file."""
         self.pdf_object[NameObject("/AFRelationship")] = value
+
+    @property
+    def relationship(self) -> str:
+        """Alias for :attr:`associated_file_relationship`."""
+        return self.associated_file_relationship
+
+    @relationship.setter
+    def relationship(self, value: NameObject) -> None:
+        self.associated_file_relationship = value
+
+    @property
+    def af_relationship(self) -> str:
+        """Alias for :attr:`associated_file_relationship`."""
+        return self.associated_file_relationship
+
+    @af_relationship.setter
+    def af_relationship(self, value: NameObject) -> None:
+        self.associated_file_relationship = value
 
     @property
     def _embedded_file(self) -> StreamObject:
@@ -244,6 +318,8 @@ class EmbeddedFile:
     @property
     def _params(self) -> DictionaryObject:
         """Retrieve the file-specific parameters."""
+        if not self.is_embedded:
+            return DictionaryObject()
         return cast(DictionaryObject, self._embedded_file.get("/Params", DictionaryObject()).get_object())
 
     @cached_property
@@ -257,6 +333,8 @@ class EmbeddedFile:
     @property
     def subtype(self) -> str | None:
         """Retrieve the subtype. This is a MIME media type, prefixed by a slash."""
+        if not self.is_embedded:
+            return None
         value = self._embedded_file.get("/Subtype")
         if is_null_or_none(value):
             return None
@@ -354,21 +432,50 @@ class EmbeddedFile:
             yield self.alternative_name
 
     def delete(self) -> None:
-        """Delete the file from the document."""
-        if not self._parent:
+        """Delete the file from the document.
+
+        This also removes references from all associated-file (``/AF``)
+        arrays the file has been discovered in.
+        """
+        if not self._parents and not self._parent:
             raise PyPdfError("Parent required to delete file from document.")
-        if self.pdf_object in self._parent:
-            index = self._parent.index(self.pdf_object)
-        elif (
-                (indirect_reference := getattr(self.pdf_object, "indirect_reference", None)) is not None
-                and indirect_reference in self._parent
-        ):
-            index = self._parent.index(indirect_reference)
-        else:
+
+        parents = list(self._parents)
+        if not parents and self._parent is not None:
+            parents.append((self._parent, True))
+
+        deleted = False
+        for parent, is_name_tree_entry in parents:
+            index = self._find_index(parent)
+            if index is None:
+                continue
+            if is_name_tree_entry:
+                parent.pop(index)  # Reference.
+                parent.pop(index - 1)  # Name.
+            else:
+                parent.pop(index)
+            deleted = True
+
+        if not deleted:
             raise PyPdfError("File not found in parent object.")
-        self._parent.pop(index)  # Reference.
-        self._parent.pop(index - 1)  # Name.
         self.pdf_object = DictionaryObject()  # Invalidate.
+        self._parents.clear()
+
+    def _find_index(self, parent: ArrayObject) -> int | None:
+        """Find the index of this file specification within an array."""
+        if self.pdf_object in parent:
+            return parent.index(self.pdf_object)
+        indirect_reference = getattr(self.pdf_object, "indirect_reference", None)
+        if indirect_reference is not None and indirect_reference in parent:
+            return parent.index(indirect_reference)
+        return None
+
+    def _add_parent(self, parent: ArrayObject, *, is_name_tree_entry: bool) -> None:
+        """Register another array referencing this file specification."""
+        for known_parent, _ in self._parents:
+            if known_parent is parent:
+                return
+        self._parents.append((parent, is_name_tree_entry))
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} name={self.name!r}>"
@@ -407,23 +514,129 @@ class EmbeddedFile:
                     )
                     continue
                 direct_name = names[i - 1].get_object()
-                yield EmbeddedFile(name=direct_name, pdf_object=file_dictionary, parent=names)
+                yield EmbeddedFile(
+                    name=direct_name,
+                    pdf_object=file_dictionary,
+                    parent=names,
+                    is_name_tree_entry=True,
+                )
+
+    @staticmethod
+    def _file_specification_key(file_specification: DictionaryObject) -> tuple[object, ...]:
+        """Return a stable key identifying a file specification object."""
+        indirect_reference = getattr(file_specification, "indirect_reference", None)
+        if indirect_reference is not None:
+            try:
+                return (
+                    "indirect",
+                    id(indirect_reference.pdf),
+                    indirect_reference.idnum,
+                    indirect_reference.generation,
+                )
+            except AttributeError:  # pragma: no cover - defensive for custom objects
+                return ("indirect", id(indirect_reference))
+        return ("direct", id(file_specification))
+
+    @staticmethod
+    def _name_from_file_specification(file_specification: DictionaryObject) -> str:
+        """Retrieve the best available name from a file specification."""
+        for key in (FileSpecificationDictionaryEntries.UF, FileSpecificationDictionaryEntries.F):
+            value = file_specification.get(NameObject(key))
+            if is_null_or_none(value):
+                continue
+            value = value.get_object() if hasattr(value, "get_object") else value
+            if is_null_or_none(value):
+                continue
+            return str(value)
+        return ""
 
     @classmethod
-    def _load(cls, catalog: DictionaryObject, strict: bool = False) -> Iterator[EmbeddedFile]:
-        """
-        Load the embedded files for the given document catalog.
+    def _load_from_associated_files(
+        cls,
+        associated_files: object,
+        strict: bool = False,
+        page_index: int | None = None,
+    ) -> Iterator[EmbeddedFile]:
+        """Load the file specifications from an ``/AF`` array."""
+        array = associated_files.get_object() if hasattr(associated_files, "get_object") else associated_files
+        if isinstance(array, NullObject):
+            return
+        if not isinstance(array, ArrayObject):
+            cls._report_malformed(
+                f"Associated files entry is not an array: {array}", strict=strict
+            )
+            return
 
-        This method and its signature are considered internal API and thus not exposed publicly for now.
+        for entry in array:
+            file_specification = entry.get_object() if hasattr(entry, "get_object") else entry
+            if isinstance(file_specification, NullObject):
+                continue
+            if not isinstance(file_specification, DictionaryObject):
+                cls._report_malformed(
+                    "Associated file specification is not a dictionary: "
+                    f"{file_specification}",
+                    strict=strict,
+                )
+                continue
+            attachment = cls(
+                name=cls._name_from_file_specification(file_specification),
+                pdf_object=file_specification,
+                parent=array,
+                is_name_tree_entry=False,
+                page_indexes=() if page_index is None else (page_index,),
+            )
+            attachment._is_associated = True
+            yield attachment
 
-        Args:
-            catalog: The document catalog to load from.
-            strict: Whether to raise an exception on malformed name trees
-                instead of issuing a warning and skipping them.
+    @classmethod
+    def _load_from_af(
+        cls,
+        associated_files: object,
+        strict: bool = False,
+        page_index: int | None = None,
+    ) -> Iterator[EmbeddedFile]:
+        """Alias for :meth:`_load_from_associated_files`."""
+        yield from cls._load_from_associated_files(
+            associated_files, strict=strict, page_index=page_index
+        )
 
-        Returns:
-            Iterable of class instances for the files found.
-        """
+    @classmethod
+    def _iter_pages(cls, catalog: DictionaryObject) -> Iterator[tuple[int, DictionaryObject]]:
+        """Iterate over the pages of a document in document order."""
+        pages = catalog.get(NameObject(CA.PAGES))
+        if is_null_or_none(pages):
+            return
+        pages = pages.get_object() if hasattr(pages, "get_object") else pages
+        if not isinstance(pages, DictionaryObject):
+            return
+
+        stack = [pages]
+        seen: set[tuple[object, ...]] = set()
+        page_index = 0
+        while stack:
+            node = stack.pop()
+            key = cls._file_specification_key(node)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            kids = node.get(NameObject("/Kids"))
+            kids = kids.get_object() if hasattr(kids, "get_object") else kids
+            if isinstance(kids, ArrayObject):
+                for kid in reversed(kids):
+                    kid = kid.get_object() if hasattr(kid, "get_object") else kid
+                    if isinstance(kid, DictionaryObject):
+                        stack.append(kid)
+                continue
+
+            node_type = node.get(NameObject(PG.TYPE))
+            if node_type == "/Page" or (node_type is None and "/Kids" not in node):
+                yield page_index, node
+                page_index += 1
+
+    @classmethod
+    def _load_from_name_tree(cls, catalog: DictionaryObject, strict: bool = False) -> Iterator[EmbeddedFile]:
+        """Load embedded files from the ``/EmbeddedFiles`` name tree."""
         if "/Names" not in catalog:
             return
         names = catalog["/Names"]
@@ -442,34 +655,89 @@ class EmbeddedFile:
             cls._report_malformed(f"Embedded files entry is not a dictionary: {container}", strict=strict)
             return
 
-        if "/Kids" in container:
-            kids = container["/Kids"].get_object()
+        yield from cls._load_from_name_tree_node(container, strict=strict)
+
+    @classmethod
+    def _load_from_name_tree_node(
+        cls, node: DictionaryObject, strict: bool = False
+    ) -> Iterator[EmbeddedFile]:
+        """Recursively load a name tree node."""
+        if "/Kids" in node:
+            kids = node["/Kids"].get_object()
             if isinstance(kids, NullObject):
                 kids = ArrayObject()
             elif not isinstance(kids, ArrayObject):
                 cls._report_malformed(f"Embedded files /Kids is not an array: {kids}", strict=strict)
                 return
             for kid in kids:
-                # There might be further (nested) kids here.
-                # Wait for an example before evaluating an implementation.
                 kid = kid.get_object()
                 if not isinstance(kid, DictionaryObject):
                     cls._report_malformed(f"Embedded files kid is not a dictionary: {kid}", strict=strict)
                     continue
-                if "/Names" not in kid:
-                    continue
-                kid_names = kid["/Names"].get_object()
-                if isinstance(kid_names, NullObject):
-                    continue
-                if not isinstance(kid_names, ArrayObject):
-                    cls._report_malformed(f"Embedded files name list is not an array: {kid_names}", strict=strict)
-                    continue
-                yield from cls._load_from_names(kid_names, strict=strict)
-        if "/Names" in container:
-            container_names = container["/Names"].get_object()
-            if isinstance(container_names, NullObject):
+                yield from cls._load_from_name_tree_node(kid, strict=strict)
+        if "/Names" in node:
+            names = node["/Names"].get_object()
+            if isinstance(names, NullObject):
                 return
-            if not isinstance(container_names, ArrayObject):
-                cls._report_malformed(f"Embedded files name list is not an array: {container_names}", strict=strict)
+            if not isinstance(names, ArrayObject):
+                cls._report_malformed(f"Embedded files name list is not an array: {names}", strict=strict)
                 return
-            yield from cls._load_from_names(container_names, strict=strict)
+            yield from cls._load_from_names(names, strict=strict)
+    @classmethod
+    def _load(cls, catalog: DictionaryObject, strict: bool = False) -> Iterator[EmbeddedFile]:
+        """
+        Load the embedded files for the given document catalog.
+
+        This method and its signature are considered internal API and thus not exposed publicly for now.
+
+        Args:
+            catalog: The document catalog to load from.
+            strict: Whether to raise an exception on malformed name trees
+                instead of issuing a warning and skipping them.
+
+        Returns:
+            Iterable of class instances for the files found.
+        """
+        loaded: dict[tuple[object, ...], list[EmbeddedFile]] = {}
+        attachments: list[EmbeddedFile] = []
+
+        for attachment in cls._load_from_name_tree(catalog, strict=strict):
+            key = cls._file_specification_key(attachment.pdf_object)
+            loaded.setdefault(key, []).append(attachment)
+            attachments.append(attachment)
+
+        document_entries: list[tuple[object, int | None]] = [
+            (catalog.get(NameObject(CA.AF)), None),
+        ]
+        for page_index, page in cls._iter_pages(catalog):
+            document_entries.append((page.get(NameObject(PG.AF)), page_index))
+
+        for associated_files, page_index in document_entries:
+            if is_null_or_none(associated_files):
+                continue
+            parent_array = (
+                associated_files.get_object()
+                if hasattr(associated_files, "get_object")
+                else associated_files
+            )
+            for attachment in cls._load_from_associated_files(
+                associated_files, strict=strict, page_index=page_index
+            ):
+                key = cls._file_specification_key(attachment.pdf_object)
+                existing_entries = loaded.get(key)
+                if existing_entries is None:
+                    loaded[key] = [attachment]
+                    attachments.append(attachment)
+                    continue
+
+                for existing in existing_entries:
+                    existing._is_associated = True
+                    existing._page_indexes.update(attachment._page_indexes)
+                    if isinstance(parent_array, ArrayObject):
+                        existing._add_parent(parent_array, is_name_tree_entry=False)
+
+        yield from attachments
+
+
+AssociatedFile = EmbeddedFile
+__all__ = ["AssociatedFile", "EmbeddedFile"]
