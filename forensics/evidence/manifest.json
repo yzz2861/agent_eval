@@ -1,0 +1,5 @@
+{
+  "claim_id": "EV-2026-1126-07",
+  "claim": "Session A 的两个接口 (eth0, eth1) 均完整留存了 TCP/23 (telnet) 类流量",
+  "archive": "capture.pcapng"
+}

@@ -1,0 +1,32 @@
+{
+  "tool": "dumpcap 3.6",
+  "host": "probe-01",
+  "sessions": [
+    {
+      "section_index": 0,
+      "started_utc": "2026-11-26T10:00:00Z",
+      "stopped_utc": "2026-11-26T10:05:00Z",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "capture_filter": null
+        },
+        {
+          "name": "eth1",
+          "capture_filter": "tcp port 23 and host 192.0.2.5"
+        }
+      ]
+    },
+    {
+      "section_index": 1,
+      "started_utc": "2026-11-26T11:00:00Z",
+      "stopped_utc": "2026-11-26T11:05:00Z",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "capture_filter": "tcp port 23"
+        }
+      ]
+    }
+  ]
+}
