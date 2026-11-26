@@ -50,6 +50,7 @@ with support from Google, and is currently maintained under the
   [SBOMs](https://en.wikipedia.org/wiki/Software_bill_of_materials) in
   [CycloneDX](https://cyclonedx.org/) XML or JSON
 * Support for automatically fixing vulnerable dependencies (`--fix`)
+* Offline reconciliation of candidate dependency locks against JSON audit output
 * Human and machine-readable output formats (columnar, Markdown, JSON)
 * Seamlessly reuses your existing local `pip` caches
 
@@ -266,6 +267,55 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Offline lock review
+
+`pip-audit-review` reconciles one or more `pip-audit --format json` reports with
+candidate dependency locks without contacting a package index or vulnerability
+service. It is intended for security review tickets where several artifacts may
+close the same advisory, or where platform-specific locks cannot be applied
+together.
+
+```console
+$ pip-audit --format json --output audit.json
+$ pip-audit-review --audit audit.json --candidates candidates.toml
+```
+
+Candidate artifacts are JSON or TOML objects with exact pins and optional
+compatibility conditions:
+
+```toml
+[[artifacts]]
+id = "linux-runtime"
+cost = 1
+conditions = { platform = "linux", python = "3.11" }
+pins = { webcore = "2.0.0", cryptography = "41.0.0" }
+
+[[artifacts]]
+id = "windows-runtime"
+cost = 1
+conditions = { platform = "windows", python = "3.12" }
+pins = { webcore = "2.0.0", cryptography = "42.0.0" }
+```
+
+The review reports every enumerated combination, the advisories each artifact
+and combination covers, and the exact condition or pin conflicts that make a
+combination infeasible. Advisory identities are merged transitively through
+their aliases, so an advisory observed in several reports or covered by several
+artifacts is counted once. Each plan also lists the pins that differ from the
+audited baseline, which makes a single-upgrade conclusion directly checkable.
+
+Recommendations maximize advisory coverage and then minimize the declared
+`cost`. When several plans have the same coverage and cost, *all* of them are
+returned in canonical order; the input order of reports, advisories, aliases,
+pins, and artifacts cannot change the result. Candidates marked
+`requires_approval = true`, and infeasible combinations that would cover
+otherwise-missing advisories, are retained under `alternatives` instead of
+silently discarding them.
+
+Use `--format json` for the full machine-readable report. The command exits `0`
+when every recommended plan closes every advisory, `1` when it does not, and `2`
+on invalid input.
 
 ## Examples
 

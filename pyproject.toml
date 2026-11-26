@@ -58,6 +58,7 @@ dev = ["build", "pip-audit[doc,test,lint]"]
 
 [project.scripts]
 pip-audit = "pip_audit._cli:audit"
+pip-audit-review = "pip_audit._review_cli:main"
 
 [project.urls]
 Homepage = "https://pypi.org/project/pip-audit/"

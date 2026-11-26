@@ -8,6 +8,14 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* Added `pip-audit-review`, an offline reconciliation layer for `pip-audit`
+  JSON output. It enumerates compatible candidate lock combinations, reports
+  deduplicated advisory coverage per artifact and combination, retains
+  verifiable infeasibility reasons, and returns every equally-valid minimum-cost
+  plan without depending on input or filtering order.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash

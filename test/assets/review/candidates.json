@@ -1,0 +1,46 @@
+{
+  "artifacts": [
+    {
+      "id": "linux-runtime",
+      "cost": 1,
+      "conditions": {"platform": "linux", "python": "3.11"},
+      "pins": {
+        "webcore": "2.0.0",
+        "Django": "4.2.0",
+        "cryptography": "40.0.0"
+      }
+    },
+    {
+      "id": "windows-runtime",
+      "cost": 1,
+      "conditions": {"platform": "windows", "python": "3.12"},
+      "pins": {
+        "webcore": "2.0.0",
+        "Django": "4.2.0",
+        "cryptography": "40.0.0"
+      }
+    },
+    {
+      "id": "legacy-linux",
+      "cost": 1,
+      "conditions": {"platform": "linux", "python": "3.10"},
+      "pins": {
+        "webcore": "1.9.5",
+        "Django": "4.2.0",
+        "cryptography": "40.0.0"
+      }
+    },
+    {
+      "id": "windows-rc",
+      "cost": 1,
+      "conditions": {"platform": "windows", "python": "3.13"},
+      "pins": {
+        "webcore": "2.0.0",
+        "Django": "4.2.0",
+        "cryptography": "40.0.0"
+      },
+      "requires_approval": true,
+      "approval_note": "requires a FIPS runtime exception"
+    }
+  ]
+}

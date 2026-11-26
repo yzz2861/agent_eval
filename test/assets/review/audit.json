@@ -1,0 +1,44 @@
+{
+  "dependencies": [
+    {
+      "name": "webcore",
+      "version": "1.8.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2026-0001",
+          "aliases": ["CVE-2026-0001", "GHSA-aaaa-bbbb-0001"],
+          "fix_versions": ["2.0.0"],
+          "description": "webcore request smuggling"
+        },
+        {
+          "id": "CVE-2026-0002",
+          "aliases": ["GHSA-aaaa-bbbb-0002"],
+          "fix_versions": ["2.0.0"],
+          "description": "webcore header injection"
+        },
+        {
+          "id": "CVE-2026-0003",
+          "aliases": ["GHSA-aaaa-bbbb-0003"],
+          "fix_versions": ["2.0.0"],
+          "description": "webcore cookie scope confusion"
+        },
+        {
+          "id": "GHSA-aaaa-bbbb-0004",
+          "aliases": ["CVE-2026-0004"],
+          "fix_versions": ["2.0.0"],
+          "description": "webcore cache poisoning"
+        }
+      ]
+    },
+    {
+      "name": "Django",
+      "version": "4.2.0",
+      "vulns": []
+    },
+    {
+      "name": "cryptography",
+      "version": "40.0.0",
+      "vulns": []
+    }
+  ]
+}
