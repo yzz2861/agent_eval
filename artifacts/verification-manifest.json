@@ -1,0 +1,108 @@
+[
+  {
+    "container": "artifacts/missing-source-preview.ole",
+    "container_sha256": "8794620c299bca1062d60a9d4e164cb959183a8a05392104131d758be77b8aff",
+    "container_size": 5632,
+    "storage_branches": [
+      "AttachmentPreview",
+      "DocumentPreview"
+    ],
+    "streams": [
+      "AttachmentPreview/ClipboardType",
+      "AttachmentPreview/PreviewRef",
+      "AttachmentPreview/Summary",
+      "Crosswalk",
+      "DocumentPreview/ClipboardType",
+      "DocumentPreview/PreviewRef",
+      "DocumentPreview/Summary"
+    ],
+    "records": [
+      {
+        "evidence_id": "DOC-PREVIEW-001",
+        "container_role": "document_preview",
+        "storage_branch": "DocumentPreview",
+        "clipboard_format_id": 49153,
+        "clipboard_format_name": "JPEG",
+        "summary_source_status": "source_stream_absent",
+        "preview_ref": "Archive/SharedContent",
+        "preview_ref_exists_in_container": false,
+        "declared_preview_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "resolved_source_sha256": null,
+        "source_hash_matches_declared_preview": false,
+        "extracted_preview_ref": "artifacts/extracted/missing-source-preview/DocumentPreview-preview-ref.txt",
+        "extracted_source": null,
+        "conclusion_ceiling": "仅能证明预览声明和哈希；不能证明源流存在、来源链条或真实性"
+      },
+      {
+        "evidence_id": "ATT-PREVIEW-001",
+        "container_role": "attachment_preview",
+        "storage_branch": "AttachmentPreview",
+        "clipboard_format_id": 49153,
+        "clipboard_format_name": "JPEG",
+        "summary_source_status": "source_stream_absent",
+        "preview_ref": "Archive/SharedContent",
+        "preview_ref_exists_in_container": false,
+        "declared_preview_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "resolved_source_sha256": null,
+        "source_hash_matches_declared_preview": false,
+        "extracted_preview_ref": "artifacts/extracted/missing-source-preview/AttachmentPreview-preview-ref.txt",
+        "extracted_source": null,
+        "conclusion_ceiling": "仅能证明预览声明和哈希；不能证明源流存在、来源链条或真实性"
+      }
+    ]
+  },
+  {
+    "container": "artifacts/fully-verifiable-file.ole",
+    "container_sha256": "24968a379523121bdc6cb6126805d609f2fdb80671ccffeda591b0a307077d62",
+    "container_size": 39424,
+    "storage_branches": [
+      "Archive",
+      "AttachmentPreview",
+      "DocumentPreview"
+    ],
+    "streams": [
+      "Archive/SharedContent",
+      "AttachmentPreview/ClipboardType",
+      "AttachmentPreview/PreviewRef",
+      "AttachmentPreview/Summary",
+      "Crosswalk",
+      "DocumentPreview/ClipboardType",
+      "DocumentPreview/PreviewRef",
+      "DocumentPreview/Summary"
+    ],
+    "records": [
+      {
+        "evidence_id": "DOC-PREVIEW-001",
+        "container_role": "document_preview",
+        "storage_branch": "DocumentPreview",
+        "clipboard_format_id": 49153,
+        "clipboard_format_name": "JPEG",
+        "summary_source_status": "verifiable_archive_source",
+        "preview_ref": "Archive/SharedContent",
+        "preview_ref_exists_in_container": true,
+        "declared_preview_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "resolved_source_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "source_hash_matches_declared_preview": true,
+        "extracted_preview_ref": "artifacts/extracted/fully-verifiable-file/DocumentPreview-preview-ref.txt",
+        "extracted_source": "artifacts/extracted/fully-verifiable-file/shared-source.jpg",
+        "conclusion_ceiling": "可证明预览内容及证据关系来源"
+      },
+      {
+        "evidence_id": "ATT-PREVIEW-001",
+        "container_role": "attachment_preview",
+        "storage_branch": "AttachmentPreview",
+        "clipboard_format_id": 49153,
+        "clipboard_format_name": "JPEG",
+        "summary_source_status": "verifiable_archive_source",
+        "preview_ref": "Archive/SharedContent",
+        "preview_ref_exists_in_container": true,
+        "declared_preview_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "resolved_source_sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+        "source_hash_matches_declared_preview": true,
+        "extracted_preview_ref": "artifacts/extracted/fully-verifiable-file/AttachmentPreview-preview-ref.txt",
+        "extracted_source": "artifacts/extracted/fully-verifiable-file/shared-source.jpg",
+        "conclusion_ceiling": "可证明预览内容及证据关系来源"
+      }
+    ]
+  }
+]

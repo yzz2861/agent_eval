@@ -1,0 +1,13 @@
+{
+  "missing_source_preview": {
+    "container": "artifacts/missing-source-preview.ole",
+    "extracted_document_preview_ref": "artifacts/extracted/missing-source-preview/DocumentPreview-preview-ref.txt",
+    "extracted_attachment_preview_ref": "artifacts/extracted/missing-source-preview/AttachmentPreview-preview-ref.txt",
+    "supported_limit": "只能核对容器分支、剪贴板类型、关联摘要和声明哈希；无法核对源流字节或来源真实性。"
+  },
+  "fully_verifiable_file": {
+    "container": "artifacts/fully-verifiable-file.ole",
+    "extracted_shared_source": "artifacts/extracted/fully-verifiable-file/shared-source.jpg",
+    "supported_limit": "可核对共享归档源流、两条独立预览关系、剪贴板类型和全部哈希；相同字节复用归档，但证据关系分别归属容器。"
+  }
+}
