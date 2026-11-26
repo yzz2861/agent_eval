@@ -1,0 +1,574 @@
+{
+  "all_rule_bases": [
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/story-seed.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-origin"
+      ],
+      "source": [
+        "fork-origin",
+        "products",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "op": "cp",
+        "rule_type": "checked-copy-map"
+      },
+      "source": [
+        "fork-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-copy",
+        "products",
+        "fork/authorized-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/authorized-story.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-copy"
+      ],
+      "source": [
+        "fork-copy",
+        "products",
+        "fork/authorized-story.txt"
+      ],
+      "target": [
+        "fork-pack",
+        "materials",
+        "fork/authorized-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "checked-pack-map"
+      },
+      "source": [
+        "fork-pack",
+        "materials",
+        "fork/authorized-story.txt"
+      ],
+      "target": [
+        "fork-pack",
+        "products",
+        "fork/partner-brief.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/story-seed.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-origin"
+      ],
+      "source": [
+        "fork-origin",
+        "products",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-secret-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "unchecked-branch-copy"
+      },
+      "source": [
+        "fork-secret-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-secret-copy",
+        "products",
+        "fork/secret-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/secret-story.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-secret-copy"
+      ],
+      "source": [
+        "fork-secret-copy",
+        "products",
+        "fork/secret-story.txt"
+      ],
+      "target": [
+        "fork-hidden-pack",
+        "materials",
+        "fork/secret-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "hidden-pack-map"
+      },
+      "source": [
+        "fork-hidden-pack",
+        "materials",
+        "fork/secret-story.txt"
+      ],
+      "target": [
+        "fork-hidden-pack",
+        "products",
+        "fork/hidden-dossier.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    }
+  ],
+  "approval": {
+    "artifact": {
+      "hashes": {
+        "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+      },
+      "kind": "products",
+      "path": "fork/partner-brief.txt",
+      "public_label": "Two Tides brief",
+      "step": "fork-pack"
+    },
+    "purpose": "classroom-reading-copy"
+  },
+  "connected_provenance": {
+    "nodes": [
+      {
+        "artifact_type": "materials",
+        "hashes": {
+          "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+        },
+        "path": "fork/story-seed.txt",
+        "step": "fork-copy"
+      },
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+        },
+        "path": "fork/authorized-story.txt",
+        "step": "fork-copy"
+      },
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+        },
+        "path": "fork/story-seed.txt",
+        "step": "fork-origin"
+      },
+      {
+        "artifact_type": "materials",
+        "hashes": {
+          "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+        },
+        "path": "fork/authorized-story.txt",
+        "step": "fork-pack"
+      },
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+        },
+        "path": "fork/partner-brief.txt",
+        "step": "fork-pack"
+      }
+    ],
+    "rule_bases": [
+      {
+        "hash_compatible": true,
+        "rule": [
+          "MATCH",
+          "fork/story-seed.txt",
+          "WITH",
+          "PRODUCTS",
+          "FROM",
+          "fork-origin"
+        ],
+        "source": [
+          "fork-origin",
+          "products",
+          "fork/story-seed.txt"
+        ],
+        "target": [
+          "fork-copy",
+          "materials",
+          "fork/story-seed.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": {
+          "op": "cp",
+          "rule_type": "checked-copy-map"
+        },
+        "source": [
+          "fork-copy",
+          "materials",
+          "fork/story-seed.txt"
+        ],
+        "target": [
+          "fork-copy",
+          "products",
+          "fork/authorized-story.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": [
+          "MATCH",
+          "fork/authorized-story.txt",
+          "WITH",
+          "PRODUCTS",
+          "FROM",
+          "fork-copy"
+        ],
+        "source": [
+          "fork-copy",
+          "products",
+          "fork/authorized-story.txt"
+        ],
+        "target": [
+          "fork-pack",
+          "materials",
+          "fork/authorized-story.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": {
+          "rule_type": "checked-pack-map"
+        },
+        "source": [
+          "fork-pack",
+          "materials",
+          "fork/authorized-story.txt"
+        ],
+        "target": [
+          "fork-pack",
+          "products",
+          "fork/partner-brief.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      }
+    ]
+  },
+  "connected_rule_bases": [
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/story-seed.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-origin"
+      ],
+      "source": [
+        "fork-origin",
+        "products",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "op": "cp",
+        "rule_type": "checked-copy-map"
+      },
+      "source": [
+        "fork-copy",
+        "materials",
+        "fork/story-seed.txt"
+      ],
+      "target": [
+        "fork-copy",
+        "products",
+        "fork/authorized-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "fork/authorized-story.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-copy"
+      ],
+      "source": [
+        "fork-copy",
+        "products",
+        "fork/authorized-story.txt"
+      ],
+      "target": [
+        "fork-pack",
+        "materials",
+        "fork/authorized-story.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "checked-pack-map"
+      },
+      "source": [
+        "fork-pack",
+        "materials",
+        "fork/authorized-story.txt"
+      ],
+      "target": [
+        "fork-pack",
+        "products",
+        "fork/partner-brief.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "unauthorized_step",
+      "step": "fork-secret-copy"
+    },
+    {
+      "code": "unauthorized_step",
+      "step": "fork-hidden-pack"
+    }
+  ],
+  "schema": "in-toto/internal-disclosure-receipt/v1",
+  "status": "complete",
+  "steps": {
+    "fork-copy": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "two-tides-fiction",
+          "public_step": "authorized copy"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "cp",
+          "story-seed",
+          "authorized-story"
+        ],
+        "environment": {},
+        "materials": {
+          "fork/story-seed.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        },
+        "name": "fork-copy",
+        "products": {
+          "fork/authorized-story.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "fork-hidden-pack": {
+      "authorized": false,
+      "disclosure": {
+        "disclosed": false,
+        "fields": {},
+        "notice": null
+      },
+      "key_id": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "pack",
+          "hidden-dossier"
+        ],
+        "environment": {},
+        "materials": {
+          "fork/secret-story.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        },
+        "name": "fork-hidden-pack",
+        "products": {
+          "fork/hidden-dossier.txt": {
+            "sha256": "0e6458a866b40c0eae80edcef40762b94789f6884715443c551639763b7fe391"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "fork-origin": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "two-tides-fiction",
+          "public_step": "source registration"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "write",
+          "story-seed"
+        ],
+        "environment": {},
+        "materials": {},
+        "name": "fork-origin",
+        "products": {
+          "fork/story-seed.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "fork-pack": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "two-tides-fiction",
+          "public_step": "partner packaging"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "pack",
+          "partner-brief"
+        ],
+        "environment": {},
+        "materials": {
+          "fork/authorized-story.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        },
+        "name": "fork-pack",
+        "products": {
+          "fork/partner-brief.txt": {
+            "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "fork-secret-copy": {
+      "authorized": false,
+      "disclosure": {
+        "disclosed": false,
+        "fields": {},
+        "notice": null
+      },
+      "key_id": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "cp",
+          "story-seed",
+          "secret-story"
+        ],
+        "environment": {},
+        "materials": {
+          "fork/story-seed.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        },
+        "name": "fork-secret-copy",
+        "products": {
+          "fork/secret-story.txt": {
+            "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+          }
+        }
+      },
+      "source_divergent": false
+    }
+  },
+  "target": {
+    "artifact_type": "products",
+    "hashes": {
+      "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+    },
+    "path": "fork/partner-brief.txt",
+    "step": "fork-pack"
+  }
+}

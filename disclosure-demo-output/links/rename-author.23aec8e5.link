@@ -1,0 +1,24 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "05d9dea1e2067ff558124720bb5c7e7f3d26ba983d75b8d6ddca26241f3020708072b281435117407d468d36a20d18a8cf2dd9dd8f8db6c4d394d7057f560309"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "write",
+   "draft-notes"
+  ],
+  "environment": {},
+  "materials": {},
+  "name": "rename-author",
+  "products": {
+   "rename/draft-notes.txt": {
+    "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+   }
+  }
+ }
+}

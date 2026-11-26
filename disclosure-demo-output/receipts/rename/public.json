@@ -1,0 +1,25 @@
+{
+  "approved_use": "reading-club-distribution",
+  "provenance": {
+    "status": "complete"
+  },
+  "public_artifact": {
+    "label": "Lighthouse Notes reading copy"
+  },
+  "schema": "in-toto/disclosed-receipt/v1",
+  "steps": [
+    {
+      "approved_correlation": "lighthouse-reading",
+      "public_step": "drafting"
+    },
+    {
+      "approved_correlation": "lighthouse-reading",
+      "association": "same approved text after an approved rename",
+      "public_step": "rename and consistency check"
+    },
+    {
+      "approved_correlation": "lighthouse-reading",
+      "public_step": "reading copy packaging"
+    }
+  ]
+}

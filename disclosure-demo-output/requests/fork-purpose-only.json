@@ -1,0 +1,155 @@
+{
+  "approval": {
+    "hashes": {
+      "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+    },
+    "kind": "products",
+    "path": "fork/partner-brief.txt",
+    "public_label": "Two Tides brief",
+    "purpose": "classroom-reading-copy",
+    "step": "fork-pack"
+  },
+  "rule_bases": [
+    {
+      "rule": [
+        "MATCH",
+        "fork/story-seed.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-origin"
+      ],
+      "source_kind": "products",
+      "source_path": "fork/story-seed.txt",
+      "source_step": "fork-origin",
+      "target_kind": "materials",
+      "target_path": "fork/story-seed.txt",
+      "target_step": "fork-copy"
+    },
+    {
+      "material": "fork/story-seed.txt",
+      "product": "fork/authorized-story.txt",
+      "rule": {
+        "op": "cp",
+        "rule_type": "checked-copy-map"
+      },
+      "step": "fork-copy"
+    },
+    {
+      "rule": [
+        "MATCH",
+        "fork/authorized-story.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-copy"
+      ],
+      "source_kind": "products",
+      "source_path": "fork/authorized-story.txt",
+      "source_step": "fork-copy",
+      "target_kind": "materials",
+      "target_path": "fork/authorized-story.txt",
+      "target_step": "fork-pack"
+    },
+    {
+      "material": "fork/authorized-story.txt",
+      "product": "fork/partner-brief.txt",
+      "rule": {
+        "rule_type": "checked-pack-map"
+      },
+      "step": "fork-pack"
+    },
+    {
+      "rule": [
+        "MATCH",
+        "fork/story-seed.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-origin"
+      ],
+      "source_kind": "products",
+      "source_path": "fork/story-seed.txt",
+      "source_step": "fork-origin",
+      "target_kind": "materials",
+      "target_path": "fork/story-seed.txt",
+      "target_step": "fork-secret-copy"
+    },
+    {
+      "material": "fork/story-seed.txt",
+      "product": "fork/secret-story.txt",
+      "rule": {
+        "rule_type": "unchecked-branch-copy"
+      },
+      "step": "fork-secret-copy"
+    },
+    {
+      "rule": [
+        "MATCH",
+        "fork/secret-story.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "fork-secret-copy"
+      ],
+      "source_kind": "products",
+      "source_path": "fork/secret-story.txt",
+      "source_step": "fork-secret-copy",
+      "target_kind": "materials",
+      "target_path": "fork/secret-story.txt",
+      "target_step": "fork-hidden-pack"
+    },
+    {
+      "material": "fork/secret-story.txt",
+      "product": "fork/hidden-dossier.txt",
+      "rule": {
+        "rule_type": "hidden-pack-map"
+      },
+      "step": "fork-hidden-pack"
+    }
+  ],
+  "steps": [
+    {
+      "authorized": true,
+      "disclosure": {
+        "approved_correlation": "two-tides-fiction",
+        "public_step": "source registration"
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": "/Users/bill/领域专项项目/batches/ds-20261126-agent-eval-slot-refill/workspaces/ds20261126-agent-eval-slot-refill-02/disclosure-demo-output/links/fork-origin.23aec8e5.link",
+      "name": "fork-origin"
+    },
+    {
+      "authorized": true,
+      "disclosure": {
+        "approved_correlation": "two-tides-fiction",
+        "public_step": "authorized copy"
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": "/Users/bill/领域专项项目/batches/ds-20261126-agent-eval-slot-refill/workspaces/ds20261126-agent-eval-slot-refill-02/disclosure-demo-output/links/fork-copy.23aec8e5.link",
+      "name": "fork-copy"
+    },
+    {
+      "authorized": true,
+      "disclosure": {
+        "approved_correlation": "two-tides-fiction",
+        "public_step": "partner packaging"
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": "/Users/bill/领域专项项目/batches/ds-20261126-agent-eval-slot-refill/workspaces/ds20261126-agent-eval-slot-refill-02/disclosure-demo-output/links/fork-pack.23aec8e5.link",
+      "name": "fork-pack"
+    },
+    {
+      "authorized": false,
+      "key_id": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+      "link": "/Users/bill/领域专项项目/batches/ds-20261126-agent-eval-slot-refill/workspaces/ds20261126-agent-eval-slot-refill-02/disclosure-demo-output/links/fork-secret-copy.9d63ddba.link",
+      "name": "fork-secret-copy"
+    },
+    {
+      "authorized": false,
+      "key_id": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+      "link": "/Users/bill/领域专项项目/batches/ds-20261126-agent-eval-slot-refill/workspaces/ds20261126-agent-eval-slot-refill-02/disclosure-demo-output/links/fork-hidden-pack.9d63ddba.link",
+      "name": "fork-hidden-pack"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "b027eddc4ff4ccc0f56d250148d8340e86a7bbc60f731c6fc0bc516ee2bc138822d86c49a19307070ae3df8452d1bf02f4578f7da7e531c65d79eff84dedeb0c"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "cp",
+   "story-seed",
+   "authorized-story"
+  ],
+  "environment": {},
+  "materials": {
+   "fork/story-seed.txt": {
+    "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+   }
+  },
+  "name": "fork-copy",
+  "products": {
+   "fork/authorized-story.txt": {
+    "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+   }
+  }
+ }
+}

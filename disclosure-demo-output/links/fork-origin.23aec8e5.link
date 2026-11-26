@@ -1,0 +1,24 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "dae18c74e5e6a875ff331042c3b0c4443d207209e088e08187bedbfa6a5bb50c5e4e895884bf0b233be90803638fcb7a722536c0e846706f167ae609c1d46301"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "write",
+   "story-seed"
+  ],
+  "environment": {},
+  "materials": {},
+  "name": "fork-origin",
+  "products": {
+   "fork/story-seed.txt": {
+    "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+   }
+  }
+ }
+}

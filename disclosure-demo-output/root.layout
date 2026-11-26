@@ -1,0 +1,198 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "3996e832ffddff789cfe775dc823c853234f364ebf1b8d4a8396dc1dcaabcc2d73544e27ee24b754be5829c3a6fb30d179173b97fb714d80ac5dfb4ada87720e"
+  }
+ ],
+ "signed": {
+  "_type": "layout",
+  "expires": "2026-12-26T14:18:17Z",
+  "inspect": [],
+  "keys": {
+   "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db": {
+    "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+    "keytype": "ed25519",
+    "keyval": {
+     "public": "9cf699a72b1fa517e1c8471d61edcf4a342e57d86b69300db881e28018532be6"
+    },
+    "scheme": "ed25519"
+   }
+  },
+  "readme": "",
+  "steps": [
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [],
+    "expected_products": [
+     [
+      "CREATE",
+      "fork/story-seed.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "fork-origin",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "fork/story-seed.txt",
+      "WITH",
+      "PRODUCTS",
+      "FROM",
+      "fork-origin"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "CREATE",
+      "fork/authorized-story.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "fork-copy",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "fork/authorized-story.txt",
+      "WITH",
+      "PRODUCTS",
+      "FROM",
+      "fork-copy"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "CREATE",
+      "fork/partner-brief.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "fork-pack",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [],
+    "expected_products": [
+     [
+      "CREATE",
+      "rename/draft-notes.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "rename-author",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "rename/draft-notes.txt",
+      "WITH",
+      "PRODUCTS",
+      "FROM",
+      "rename-author"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "CREATE",
+      "rename/polished-notes.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "rename-step",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   },
+   {
+    "_type": "step",
+    "expected_command": [],
+    "expected_materials": [
+     [
+      "MATCH",
+      "rename/polished-notes.txt",
+      "WITH",
+      "PRODUCTS",
+      "FROM",
+      "rename-step"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "expected_products": [
+     [
+      "CREATE",
+      "rename/reading-copy.txt"
+     ],
+     [
+      "DISALLOW",
+      "*"
+     ]
+    ],
+    "name": "rename-pack",
+    "pubkeys": [
+     "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db"
+    ],
+    "threshold": 1
+   }
+  ]
+ }
+}

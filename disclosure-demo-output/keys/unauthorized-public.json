@@ -1,0 +1,8 @@
+{
+  "keyid": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+  "keytype": "ed25519",
+  "keyval": {
+    "public": "2e2eeb5a1222a4e0468644b1aa87fde7e02691ce6568adabc8398ed45bf47401"
+  },
+  "scheme": "ed25519"
+}

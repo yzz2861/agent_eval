@@ -1,0 +1,24 @@
+{
+  "approved_use": "partner-reading-copy",
+  "provenance": {
+    "status": "complete"
+  },
+  "public_artifact": {
+    "label": "Two Tides brief"
+  },
+  "schema": "in-toto/disclosed-receipt/v1",
+  "steps": [
+    {
+      "approved_correlation": "two-tides-fiction",
+      "public_step": "source registration"
+    },
+    {
+      "approved_correlation": "two-tides-fiction",
+      "public_step": "authorized copy"
+    },
+    {
+      "approved_correlation": "two-tides-fiction",
+      "public_step": "partner packaging"
+    }
+  ]
+}

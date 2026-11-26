@@ -1,0 +1,28 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "6b032f973f98656a37089155d99583a1f628fbb73916acfe17e09fff1173d2e4e3111b297760b188d2432814726826a21ac0f0b29cf05f50786e767853c3a405"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "pack",
+   "reading-copy"
+  ],
+  "environment": {},
+  "materials": {
+   "rename/polished-notes.txt": {
+    "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+   }
+  },
+  "name": "rename-pack",
+  "products": {
+   "rename/reading-copy.txt": {
+    "sha256": "896a6223fac1a076b2c43016ed92dc756321bbeb7c290a53e15f0e29551285a6"
+   }
+  }
+ }
+}

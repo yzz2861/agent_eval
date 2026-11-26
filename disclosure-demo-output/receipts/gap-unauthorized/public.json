@@ -1,0 +1,12 @@
+{
+  "approved_use": "partner-reading-copy",
+  "provenance": {
+    "notice": "Provenance for this approved artifact cannot be disclosed.",
+    "status": "evidence_gap"
+  },
+  "public_artifact": {
+    "label": "Two Tides brief"
+  },
+  "schema": "in-toto/disclosed-receipt/v1",
+  "steps": []
+}

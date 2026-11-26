@@ -1,0 +1,28 @@
+{
+ "signatures": [
+  {
+   "keyid": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+   "sig": "04736b88d2ab0501e170ca54403f311954284e95ee89af50074cad5c39903dbb72ff6a5c0ed5343554c4fe5ee362bca4fb6034c6785fff5f7035ee70a4fee208"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "pack",
+   "partner-brief"
+  ],
+  "environment": {},
+  "materials": {
+   "fork/authorized-story.txt": {
+    "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+   }
+  },
+  "name": "fork-pack",
+  "products": {
+   "fork/partner-brief.txt": {
+    "sha256": "732412f87227657c8e73327f043a85c55cfdfb4051c64b94e004c8ff5a243c1d"
+   }
+  }
+ }
+}

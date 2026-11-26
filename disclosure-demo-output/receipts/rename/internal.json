@@ -1,0 +1,435 @@
+{
+  "all_rule_bases": [
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "rename/draft-notes.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "rename-author"
+      ],
+      "source": [
+        "rename-author",
+        "products",
+        "rename/draft-notes.txt"
+      ],
+      "target": [
+        "rename-step",
+        "materials",
+        "rename/draft-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "command": [
+          "mv",
+          "rename/draft-notes.txt",
+          "rename/polished-notes.txt"
+        ],
+        "rule_type": "approved-rename"
+      },
+      "source": [
+        "rename-step",
+        "materials",
+        "rename/draft-notes.txt"
+      ],
+      "target": [
+        "rename-step",
+        "products",
+        "rename/polished-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "rename/polished-notes.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "rename-step"
+      ],
+      "source": [
+        "rename-step",
+        "products",
+        "rename/polished-notes.txt"
+      ],
+      "target": [
+        "rename-pack",
+        "materials",
+        "rename/polished-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "checked-pack-map"
+      },
+      "source": [
+        "rename-pack",
+        "materials",
+        "rename/polished-notes.txt"
+      ],
+      "target": [
+        "rename-pack",
+        "products",
+        "rename/reading-copy.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    }
+  ],
+  "approval": {
+    "artifact": {
+      "hashes": {
+        "sha256": "896a6223fac1a076b2c43016ed92dc756321bbeb7c290a53e15f0e29551285a6"
+      },
+      "kind": "products",
+      "path": "rename/reading-copy.txt",
+      "public_label": "Lighthouse Notes reading copy",
+      "step": "rename-pack"
+    },
+    "purpose": "reading-club-distribution"
+  },
+  "connected_provenance": {
+    "nodes": [
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+        },
+        "path": "rename/draft-notes.txt",
+        "step": "rename-author"
+      },
+      {
+        "artifact_type": "materials",
+        "hashes": {
+          "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+        },
+        "path": "rename/polished-notes.txt",
+        "step": "rename-pack"
+      },
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "896a6223fac1a076b2c43016ed92dc756321bbeb7c290a53e15f0e29551285a6"
+        },
+        "path": "rename/reading-copy.txt",
+        "step": "rename-pack"
+      },
+      {
+        "artifact_type": "materials",
+        "hashes": {
+          "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+        },
+        "path": "rename/draft-notes.txt",
+        "step": "rename-step"
+      },
+      {
+        "artifact_type": "products",
+        "hashes": {
+          "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+        },
+        "path": "rename/polished-notes.txt",
+        "step": "rename-step"
+      }
+    ],
+    "rule_bases": [
+      {
+        "hash_compatible": true,
+        "rule": [
+          "MATCH",
+          "rename/draft-notes.txt",
+          "WITH",
+          "PRODUCTS",
+          "FROM",
+          "rename-author"
+        ],
+        "source": [
+          "rename-author",
+          "products",
+          "rename/draft-notes.txt"
+        ],
+        "target": [
+          "rename-step",
+          "materials",
+          "rename/draft-notes.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": {
+          "command": [
+            "mv",
+            "rename/draft-notes.txt",
+            "rename/polished-notes.txt"
+          ],
+          "rule_type": "approved-rename"
+        },
+        "source": [
+          "rename-step",
+          "materials",
+          "rename/draft-notes.txt"
+        ],
+        "target": [
+          "rename-step",
+          "products",
+          "rename/polished-notes.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": [
+          "MATCH",
+          "rename/polished-notes.txt",
+          "WITH",
+          "PRODUCTS",
+          "FROM",
+          "rename-step"
+        ],
+        "source": [
+          "rename-step",
+          "products",
+          "rename/polished-notes.txt"
+        ],
+        "target": [
+          "rename-pack",
+          "materials",
+          "rename/polished-notes.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      },
+      {
+        "hash_compatible": true,
+        "rule": {
+          "rule_type": "checked-pack-map"
+        },
+        "source": [
+          "rename-pack",
+          "materials",
+          "rename/polished-notes.txt"
+        ],
+        "target": [
+          "rename-pack",
+          "products",
+          "rename/reading-copy.txt"
+        ],
+        "trusted": true,
+        "verified": true
+      }
+    ]
+  },
+  "connected_rule_bases": [
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "rename/draft-notes.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "rename-author"
+      ],
+      "source": [
+        "rename-author",
+        "products",
+        "rename/draft-notes.txt"
+      ],
+      "target": [
+        "rename-step",
+        "materials",
+        "rename/draft-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "command": [
+          "mv",
+          "rename/draft-notes.txt",
+          "rename/polished-notes.txt"
+        ],
+        "rule_type": "approved-rename"
+      },
+      "source": [
+        "rename-step",
+        "materials",
+        "rename/draft-notes.txt"
+      ],
+      "target": [
+        "rename-step",
+        "products",
+        "rename/polished-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": [
+        "MATCH",
+        "rename/polished-notes.txt",
+        "WITH",
+        "PRODUCTS",
+        "FROM",
+        "rename-step"
+      ],
+      "source": [
+        "rename-step",
+        "products",
+        "rename/polished-notes.txt"
+      ],
+      "target": [
+        "rename-pack",
+        "materials",
+        "rename/polished-notes.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    },
+    {
+      "hash_compatible": true,
+      "rule": {
+        "rule_type": "checked-pack-map"
+      },
+      "source": [
+        "rename-pack",
+        "materials",
+        "rename/polished-notes.txt"
+      ],
+      "target": [
+        "rename-pack",
+        "products",
+        "rename/reading-copy.txt"
+      ],
+      "trusted": true,
+      "verified": true
+    }
+  ],
+  "diagnostics": [],
+  "schema": "in-toto/internal-disclosure-receipt/v1",
+  "status": "complete",
+  "steps": {
+    "rename-author": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "lighthouse-reading",
+          "public_step": "drafting"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "write",
+          "draft-notes"
+        ],
+        "environment": {},
+        "materials": {},
+        "name": "rename-author",
+        "products": {
+          "rename/draft-notes.txt": {
+            "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "rename-pack": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "lighthouse-reading",
+          "public_step": "reading copy packaging"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "pack",
+          "reading-copy"
+        ],
+        "environment": {},
+        "materials": {
+          "rename/polished-notes.txt": {
+            "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+          }
+        },
+        "name": "rename-pack",
+        "products": {
+          "rename/reading-copy.txt": {
+            "sha256": "896a6223fac1a076b2c43016ed92dc756321bbeb7c290a53e15f0e29551285a6"
+          }
+        }
+      },
+      "source_divergent": false
+    },
+    "rename-step": {
+      "authorized": true,
+      "disclosure": {
+        "disclosed": true,
+        "fields": {
+          "approved_correlation": "lighthouse-reading",
+          "association": "same approved text after an approved rename",
+          "public_step": "rename and consistency check"
+        },
+        "notice": null
+      },
+      "key_id": "23aec8e597d6538564579dfba3bceac8bca665eb0c1a0ef0c6dff2236ecf09db",
+      "link": {
+        "_type": "link",
+        "byproducts": {},
+        "command": [
+          "mv",
+          "draft-notes.txt",
+          "polished-notes.txt"
+        ],
+        "environment": {},
+        "materials": {
+          "rename/draft-notes.txt": {
+            "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+          }
+        },
+        "name": "rename-step",
+        "products": {
+          "rename/polished-notes.txt": {
+            "sha256": "48f35d8851eaa1355e9f241794715d62fd9aced9257992d3ea37f0e1d38e897f"
+          }
+        }
+      },
+      "source_divergent": false
+    }
+  },
+  "target": {
+    "artifact_type": "products",
+    "hashes": {
+      "sha256": "896a6223fac1a076b2c43016ed92dc756321bbeb7c290a53e15f0e29551285a6"
+    },
+    "path": "rename/reading-copy.txt",
+    "step": "rename-pack"
+  }
+}

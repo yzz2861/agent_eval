@@ -1,0 +1,28 @@
+{
+ "signatures": [
+  {
+   "keyid": "9d63ddba71ed11293ecc2c181b0074f13e01703570f10c0ecf7cd90ad0dd35dd",
+   "sig": "b135678dcf671e25e1bab0af5ba84a74080c52698f3b26088fb2d706623567c1a9cd7e7c18c51213402cb7e479b638eb8d614d157ae6cc96da8e393fa658350e"
+  }
+ ],
+ "signed": {
+  "_type": "link",
+  "byproducts": {},
+  "command": [
+   "pack",
+   "hidden-dossier"
+  ],
+  "environment": {},
+  "materials": {
+   "fork/secret-story.txt": {
+    "sha256": "4892b34e3ae44ceeeb4e10e91fb39464318a689ae930cb2c1b312fcb564bc97e"
+   }
+  },
+  "name": "fork-hidden-pack",
+  "products": {
+   "fork/hidden-dossier.txt": {
+    "sha256": "0e6458a866b40c0eae80edcef40762b94789f6884715443c551639763b7fe391"
+   }
+  }
+ }
+}
