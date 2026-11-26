@@ -89,24 +89,29 @@ class Evtx(object):
         return wrapped
 
     @ensure_contexted
-    def chunks(self):
+    def chunks(self, *args, **kwargs):
         """
         Get each of the ChunkHeaders from within this EVTX file.
 
         @rtype generator of ChunkHeader
         @return A generator of ChunkHeaders from this EVTX file.
         """
-        for chunk in self._fh.chunks():
+        for chunk in self._fh.chunks(*args, **kwargs):
             yield chunk
 
     @ensure_contexted
-    def records(self):
+    def records(self, active_only=False, countable_only=True, **kwargs):
         """
         Get each of the Records from within this EVTX file.
 
         @rtype generator of Record
         @return A generator of Records from this EVTX file.
         """
+        if active_only or kwargs.get("only_active") or kwargs.get("active"):
+            for record in self.active_records(countable_only=countable_only):
+                yield record
+            return
+
         for chunk in self.chunks():
             for record in chunk.records():
                 yield record
@@ -127,6 +132,49 @@ class Evtx(object):
     @ensure_contexted
     def get_file_header(self):
         return self._fh
+
+    @ensure_contexted
+    def activity_report(self):
+        """
+        Build a read-only report separating active slots, physical slots,
+        residual records, and indeterminate evidence.
+
+        This does not alter the default semantics of :meth:`chunks` or
+        :meth:`records`.
+        """
+        from .activity import inspect_buffer
+
+        return inspect_buffer(self._buf, path=self._filename)
+
+    @ensure_contexted
+    def audit_activity(self):
+        """Alias for :meth:`activity_report`."""
+        return self.activity_report()
+
+    @ensure_contexted
+    def active_chunks(self, countable_only=True):
+        """
+        Yield chunks in header-declared active order.
+
+        By default only slots whose identity and checksums verify and whose
+        evidence is internally consistent are yielded.
+        """
+        report = self.activity_report()
+        for chunk in report.active_chunks(countable_only=countable_only):
+            yield chunk
+
+    @ensure_contexted
+    def active_records(self, countable_only=True):
+        """Yield records from countable active slots in logical active order."""
+        report = self.activity_report()
+        for record in report.active_records(countable_only=countable_only):
+            yield record
+
+    get_active_chunks = active_chunks
+    get_active_records = active_records
+    inspect_activity = activity_report
+    slot_report = activity_report
+    audit = audit_activity
 
 
 class FileHeader(Block):
@@ -220,7 +268,14 @@ class FileHeader(Block):
         ofs += self.current_chunk_number() * 0x10000
         return ChunkHeader(self._buf, ofs)
 
-    def chunks(self, include_inactive=False):
+    def chunks(
+        self,
+        include_inactive=False,
+        active_only=False,
+        logical_order=False,
+        countable_only=True,
+        **kwargs
+    ):
         """
         @return A generator that yields the chunks of the log file
           starting with the first chunk, which is always found directly
@@ -228,7 +283,22 @@ class FileHeader(Block):
 
         If `include_inactive` is set to true, enumerate chunks beyond those
         declared in the file header (and may therefore be corrupt).
+
+        The default call is unchanged.  `active_only`/`logical_order` opt into
+        the read-only activity report's wrapped slot order.
         """
+        if active_only or logical_order or kwargs.get("only_active") or kwargs.get("active"):
+            report = self.activity_report()
+            order = report.active_physical_order if countable_only else report.claimed_physical_order
+            for slot_number in order:
+                slot = report.slot_by_number(slot_number)
+                if slot is None or slot.chunk is None:
+                    continue
+                if countable_only and slot.classification != "active":
+                    continue
+                yield slot.chunk
+            return
+
         if include_inactive:
             chunk_count = sys.maxsize
         else:
@@ -260,6 +330,52 @@ class FileHeader(Block):
                 if record.record_num() == record_num:
                     return record
         return None
+
+    def activity_report(self):
+        """
+        Build a read-only activity/slot report for this buffer.
+
+        The existing :meth:`chunks` semantics remain unchanged.  The report is
+        the opt-in place where circular slot order, wrapped logical ordinals,
+        residual slack, truncation, and conflicts are represented separately.
+        """
+        from .activity import inspect_buffer
+
+        return inspect_buffer(self._buf, header_offset=self._offset)
+
+    def audit_activity(self):
+        """Alias for :meth:`activity_report`."""
+        return self.activity_report()
+
+    def active_slot_numbers(self, countable_only=True):
+        """Return the resolved physical slot order for the active log."""
+        report = self.activity_report()
+        if countable_only:
+            return [
+                slot.physical_slot
+                for slot in report.active_slot_reports(countable_only=True)
+                if slot.physical_slot is not None
+            ]
+        return list(report.claimed_physical_order)
+
+    def active_chunks(self, countable_only=True):
+        """Yield active :class:`ChunkHeader` objects in resolved active order."""
+        report = self.activity_report()
+        for chunk in report.active_chunks(countable_only=countable_only):
+            yield chunk
+
+    def active_records(self, countable_only=True):
+        """Yield active :class:`Record` objects in logical active order."""
+        report = self.activity_report()
+        for record in report.active_records(countable_only=countable_only):
+            yield record
+
+    get_active_chunks = active_chunks
+    get_active_records = active_records
+    get_active_slot_numbers = active_slot_numbers
+    inspect_activity = activity_report
+    slot_report = activity_report
+    audit = audit_activity
 
 
 class Template(object):

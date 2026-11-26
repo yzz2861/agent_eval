@@ -53,6 +53,7 @@ test = [
 
 [project.scripts]
 evtx_dump = "evtx_scripts.evtx_dump:main"
+evtx_activity = "evtx_scripts.evtx_activity:main"
 evtx_dump_json = "evtx_scripts.evtx_dump_json:main"
 evtx_dump_chunk_slack = "evtx_scripts.evtx_dump_chunk_slack:main"
 evtx_eid_record_numbers = "evtx_scripts.evtx_eid_record_numbers:main"
@@ -60,6 +61,7 @@ evtx_extract_record = "evtx_scripts.evtx_extract_record:main"
 evtx_filter_records = "evtx_scripts.evtx_filter_records:main"
 evtx_info = "evtx_scripts.evtx_info:main"
 evtx_record_structure = "evtx_scripts.evtx_record_structure:main"
+evtx_slot_audit = "evtx_scripts.evtx_slot_audit:main"
 evtx_structure = "evtx_scripts.evtx_structure:main"
 evtx_templates = "evtx_scripts.evtx_templates:main"
 
