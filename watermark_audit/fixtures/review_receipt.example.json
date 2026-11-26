@@ -1,0 +1,20 @@
+{
+  "receipt_id": "WM-REVIEW-EXAMPLE-037",
+  "claim": "All specified pages apply the template watermark.",
+  "archive": "watermark_audit/fixtures/two_page_shared_template.pdf",
+  "specified_pages": [
+    1,
+    2
+  ],
+  "page_claims": [
+    {
+      "page": 1,
+      "receipt_status": "watermark_applied"
+    },
+    {
+      "page": 2,
+      "receipt_status": "watermark_applied"
+    }
+  ],
+  "note": "Synthetic control receipt; page 2 intentionally only inherits /WM."
+}

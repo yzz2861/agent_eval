@@ -1,0 +1,378 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-11-26T18:36:24.581272+00:00",
+  "pdf": "watermark_audit/fixtures/two_page_shared_template.pdf",
+  "pdf_sha256": "04553164968c53e94082489bf224821877138747ddce3df84825fc202f7aedd8",
+  "page_count": 2,
+  "summary": {
+    "proven_watermark_pages": [
+      1
+    ],
+    "resource_only_pages": [
+      2
+    ],
+    "no_watermark_evidence_pages": []
+  },
+  "receipt_review": {
+    "claimed_pages": [
+      1,
+      2
+    ],
+    "supported_claims": [
+      1
+    ],
+    "unsupported_claims_resource_only": [
+      2
+    ],
+    "unsupported_claims_no_evidence": [],
+    "proven_but_not_claimed": []
+  },
+  "receipt": {
+    "receipt_id": "WM-REVIEW-EXAMPLE-037",
+    "claim": "All specified pages apply the template watermark.",
+    "archive": "watermark_audit/fixtures/two_page_shared_template.pdf",
+    "specified_pages": [
+      1,
+      2
+    ],
+    "page_claims": [
+      {
+        "page": 1,
+        "receipt_status": "watermark_applied"
+      },
+      {
+        "page": 2,
+        "receipt_status": "watermark_applied"
+      }
+    ],
+    "note": "Synthetic control receipt; page 2 intentionally only inherits /WM."
+  },
+  "receipt_path": "watermark_audit/fixtures/review_receipt.example.json",
+  "pages": [
+    {
+      "page_number": 1,
+      "page_object": [
+        4,
+        0
+      ],
+      "verdict": "proven_watermark_use",
+      "receipt_claim": {
+        "page": 1,
+        "receipt_status": "watermark_applied"
+      },
+      "raw_page_dictionary": {
+        "/Type": "/Page",
+        "/MediaBox": [
+          0.0,
+          0.0,
+          612,
+          792
+        ],
+        "/Parent": "12 0 R",
+        "/Contents": "10 0 R"
+      },
+      "contents": [
+        {
+          "object": [
+            10,
+            0
+          ],
+          "kind": "DecodedStreamObject",
+          "bytes": 158,
+          "sha256": "82efa3bef21d719c84328dab0e6948073ecde0f7fbf6524b0c23d09efdbaf8b5",
+          "decoded": "q\n0.12 0.31 0.58 RG\n2 w\n72 706 468 42 re S\nQ\nBT\n/FBody 18 Tf\n72 724 Td\n(Page 1: content invokes /WM) Tj\nET\nq\n/WM Do\nQ\nq\n0.2 0.55 0.25 rg\n72 120 180 10 re f\nQ\n"
+        }
+      ],
+      "direct_content": {
+        "operator_counts": {
+          "q": 3,
+          "RG": 1,
+          "w": 1,
+          "re": 2,
+          "S": 1,
+          "Q": 3,
+          "BT": 1,
+          "Tf": 1,
+          "Td": 1,
+          "Tj": 1,
+          "ET": 1,
+          "Do": 1,
+          "rg": 1,
+          "f": 1
+        },
+        "graphics_operator_count": 4,
+        "text_operator_count": 4,
+        "do_count": 1
+      },
+      "resource_scope_chain": [
+        {
+          "holder_object": [
+            4,
+            0
+          ],
+          "holder_type": "/Page",
+          "has_direct_resources": false,
+          "resources_object": null
+        },
+        {
+          "holder_object": [
+            12,
+            0
+          ],
+          "holder_type": "/Pages",
+          "has_direct_resources": true,
+          "resources_object": [
+            9,
+            0
+          ]
+        },
+        {
+          "holder_object": [
+            2,
+            0
+          ],
+          "holder_type": "/Pages",
+          "has_direct_resources": false,
+          "resources_object": null
+        }
+      ],
+      "effective_resources_from_holder": [
+        12,
+        0
+      ],
+      "xobject_declarations": [
+        {
+          "name": "/WM",
+          "object": [
+            8,
+            0
+          ],
+          "subtype": "/Form",
+          "length": 191,
+          "sha256": "e85f713711dd64c1f32bbe5ba4c9e98aaa17dd34957a421c9d4617a684edfcad",
+          "watermark_reasons": [
+            "resource name matches watermark pattern: /WM",
+            "decoded stream contains /Watermark marker or watermark text"
+          ],
+          "is_watermark_candidate": true,
+          "decoded_stream": "/Artifact << /Type /Pagination /Subtype /Watermark >> BDC\nq\n0.82 0.82 0.82 rg\n1 0 0 1 72 390 cm\n0.94 -0.34 0.34 0.94 0 0 cm\nBT\n/FWM 46 Tf\n1 0 0 1 0 0 Tm\n(TEMPLATE WM OBJECT 7F3A) Tj\nET\nQ\nEMC\n"
+        }
+      ],
+      "content_do_edges": [
+        {
+          "from": {
+            "label": "page /Contents",
+            "object": [
+              10,
+              0
+            ]
+          },
+          "operation_index": 12,
+          "name": "/WM",
+          "target_object": [
+            8,
+            0
+          ],
+          "target_subtype": "/Form",
+          "reference_chain": [
+            "page 1 object [4, 0]",
+            "page /Contents op#12: /WM Do"
+          ]
+        }
+      ],
+      "watermark_findings": [
+        {
+          "name": "/WM",
+          "object": [
+            8,
+            0
+          ],
+          "reachable_from_page_content": true,
+          "status": "used",
+          "reasons": [
+            "resource name matches watermark pattern: /WM",
+            "decoded stream contains /Watermark marker or watermark text"
+          ],
+          "reference_edges": [
+            {
+              "from": {
+                "label": "page /Contents",
+                "object": [
+                  10,
+                  0
+                ]
+              },
+              "operation_index": 12,
+              "name": "/WM",
+              "target_object": [
+                8,
+                0
+              ],
+              "target_subtype": "/Form",
+              "reference_chain": [
+                "page 1 object [4, 0]",
+                "page /Contents op#12: /WM Do"
+              ]
+            }
+          ]
+        }
+      ],
+      "watermark_markers": [
+        {
+          "source": {
+            "label": "Form XObject /WM",
+            "object": [
+              8,
+              0
+            ]
+          },
+          "operation_index": 0,
+          "operator": "BDC",
+          "watermark_marked_content": "['/Artifact', {'/Type': '/Pagination', '/Subtype': '/Watermark'}]"
+        }
+      ],
+      "direct_watermark_markers": [
+        {
+          "source": {
+            "label": "Form XObject /WM",
+            "object": [
+              8,
+              0
+            ]
+          },
+          "operation_index": 0,
+          "operator": "BDC",
+          "watermark_marked_content": "['/Artifact', {'/Type': '/Pagination', '/Subtype': '/Watermark'}]"
+        }
+      ]
+    },
+    {
+      "page_number": 2,
+      "page_object": [
+        5,
+        0
+      ],
+      "verdict": "watermark_resource_only_declared",
+      "receipt_claim": {
+        "page": 2,
+        "receipt_status": "watermark_applied"
+      },
+      "raw_page_dictionary": {
+        "/Type": "/Page",
+        "/MediaBox": [
+          0.0,
+          0.0,
+          612,
+          792
+        ],
+        "/Parent": "12 0 R",
+        "/Contents": "11 0 R"
+      },
+      "contents": [
+        {
+          "object": [
+            11,
+            0
+          ],
+          "kind": "DecodedStreamObject",
+          "bytes": 154,
+          "sha256": "686acbacb5ead683e86557584885433acb1adb65d677a6f214bb868b6037bb41",
+          "decoded": "q\n0.58 0.18 0.12 RG\n2 w\n72 706 468 42 re S\nQ\nBT\n/FBody 18 Tf\n72 724 Td\n(Page 2: inherited /WM is not invoked) Tj\nET\nq\n0.2 0.4 0.8 rg\n72 120 260 10 re f\nQ\n"
+        }
+      ],
+      "direct_content": {
+        "operator_counts": {
+          "q": 2,
+          "RG": 1,
+          "w": 1,
+          "re": 2,
+          "S": 1,
+          "Q": 2,
+          "BT": 1,
+          "Tf": 1,
+          "Td": 1,
+          "Tj": 1,
+          "ET": 1,
+          "rg": 1,
+          "f": 1
+        },
+        "graphics_operator_count": 4,
+        "text_operator_count": 4,
+        "do_count": 0
+      },
+      "resource_scope_chain": [
+        {
+          "holder_object": [
+            5,
+            0
+          ],
+          "holder_type": "/Page",
+          "has_direct_resources": false,
+          "resources_object": null
+        },
+        {
+          "holder_object": [
+            12,
+            0
+          ],
+          "holder_type": "/Pages",
+          "has_direct_resources": true,
+          "resources_object": [
+            9,
+            0
+          ]
+        },
+        {
+          "holder_object": [
+            2,
+            0
+          ],
+          "holder_type": "/Pages",
+          "has_direct_resources": false,
+          "resources_object": null
+        }
+      ],
+      "effective_resources_from_holder": [
+        12,
+        0
+      ],
+      "xobject_declarations": [
+        {
+          "name": "/WM",
+          "object": [
+            8,
+            0
+          ],
+          "subtype": "/Form",
+          "length": 191,
+          "sha256": "e85f713711dd64c1f32bbe5ba4c9e98aaa17dd34957a421c9d4617a684edfcad",
+          "watermark_reasons": [
+            "resource name matches watermark pattern: /WM",
+            "decoded stream contains /Watermark marker or watermark text"
+          ],
+          "is_watermark_candidate": true,
+          "decoded_stream": "/Artifact << /Type /Pagination /Subtype /Watermark >> BDC\nq\n0.82 0.82 0.82 rg\n1 0 0 1 72 390 cm\n0.94 -0.34 0.34 0.94 0 0 cm\nBT\n/FWM 46 Tf\n1 0 0 1 0 0 Tm\n(TEMPLATE WM OBJECT 7F3A) Tj\nET\nQ\nEMC\n"
+        }
+      ],
+      "content_do_edges": [],
+      "watermark_findings": [
+        {
+          "name": "/WM",
+          "object": [
+            8,
+            0
+          ],
+          "reachable_from_page_content": false,
+          "status": "declared_only",
+          "reasons": [
+            "resource name matches watermark pattern: /WM",
+            "decoded stream contains /Watermark marker or watermark text"
+          ],
+          "reference_edges": []
+        }
+      ],
+      "watermark_markers": [],
+      "direct_watermark_markers": []
+    }
+  ]
+}
