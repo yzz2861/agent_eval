@@ -32,6 +32,10 @@ pip install securesystemslib[hsm]
 ## Usage
 [python-securesystemslib.readthedocs.io](https://python-securesystemslib.readthedocs.io)
 
+For a signed-record retirement workflow, see
+[`docs/retirement.rst`](docs/retirement.rst) and the runnable example in
+[`examples/approval_retirement`](examples/approval_retirement).
+
 ## Contact
 - Questions and discussions:
   [`#securesystemslib-python`](https://cloud-native.slack.com/archives/C05PF3GA7AL)

@@ -1,0 +1,16 @@
+{
+  "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297": {
+    "keytype": "ed25519",
+    "keyval": {
+      "public": "883404d1c9f7fd510cf9951932c159cddf94ffbbf214ed933f22955e70d575f6"
+    },
+    "scheme": "ed25519"
+  },
+  "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9": {
+    "keytype": "ed25519",
+    "keyval": {
+      "public": "64ffacb1aa4f0174eab1855ac836bbce182e317df65861f0ac05d52396919706"
+    },
+    "scheme": "ed25519"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "authorization_record": "authz-case-2020-17",
+      "evidence": "success/evidence",
+      "reason": "retired",
+      "retained_digest": {
+        "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+      },
+      "retired_attachment": "att-2020-approval",
+      "retired_attachment_exists": false,
+      "scenario": "successful-retirement",
+      "status": "retired",
+      "verification": "valid"
+    },
+    {
+      "attachment_digest_matches": true,
+      "attachment_exists": true,
+      "evidence": "shared-reference/evidence",
+      "reason": "shared-reference",
+      "referencing_cases": [
+        "case-2020-17",
+        "case-2021-09"
+      ],
+      "scenario": "shared-reference-rejection",
+      "status": "rejected",
+      "verification": "valid"
+    }
+  ]
+}

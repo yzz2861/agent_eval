@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+* Signed approval attachment retirement workflow with preserved attachment
+  digests, approver-signed authorization records, shared-reference refusal, and
+  explicit missing-evidence status for legacy indexes and manifests
+
 ## 1.6.0
 
 ### Changed

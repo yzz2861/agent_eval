@@ -1,0 +1,234 @@
+{
+  "attachment_id": "att-2020-approval",
+  "authorization": {
+    "approved_at": "2021-06-01T09:30:00+00:00",
+    "approver_keyid": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+    "attachment_ids": [
+      "att-2020-approval"
+    ],
+    "authorized_digests": {
+      "att-2020-approval": {
+        "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+      }
+    },
+    "case_id": "case-2020-17",
+    "record_id": "authz-case-2020-17",
+    "signature": {
+      "keyid": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+      "sig": "04d1a131a6687d6348e4dbc53422c168ce7e68094bd66b853edc07c55017df03b19958f350557f2d30a09995032af2e580e775093595607514508e08723f5700"
+    }
+  },
+  "checks": [
+    {
+      "detail": "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297",
+      "name": "index-signature",
+      "passed": true
+    },
+    {
+      "detail": "",
+      "name": "index-evidence",
+      "passed": true
+    },
+    {
+      "detail": "att-2020-approval",
+      "name": "request-single-attachment",
+      "passed": true
+    },
+    {
+      "detail": "attachments/att-2020-approval.txt",
+      "name": "attachment-known",
+      "passed": true
+    },
+    {
+      "detail": "case-2020-17",
+      "name": "case-known",
+      "passed": true
+    },
+    {
+      "detail": "att-2020-approval",
+      "name": "case-reference",
+      "passed": true
+    },
+    {
+      "detail": "case-2020-17",
+      "name": "shared-reference",
+      "passed": true
+    },
+    {
+      "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+      "name": "attachment-present",
+      "passed": true
+    },
+    {
+      "detail": "expected {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, got {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+      "name": "attachment-digest",
+      "passed": true
+    },
+    {
+      "detail": "authz-case-2020-17",
+      "name": "authorization-record",
+      "passed": true
+    },
+    {
+      "detail": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+      "name": "authorization-signature",
+      "passed": true
+    },
+    {
+      "detail": "expected {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, got {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+      "name": "authorization-binding",
+      "passed": true
+    },
+    {
+      "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+      "name": "attachment-removed",
+      "passed": true
+    }
+  ],
+  "digest": {
+    "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+  },
+  "evidence_dir": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/evidence",
+  "index_digest": {
+    "sha256": "37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab"
+  },
+  "reason": "retired",
+  "referencing_cases": [
+    "case-2020-17"
+  ],
+  "request": {
+    "attachment_id": "att-2020-approval",
+    "case_id": "case-2020-17",
+    "request_id": "retire-2020-approval"
+  },
+  "status": "retired",
+  "verification": {
+    "checks": [
+      {
+        "detail": "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297",
+        "name": "index-signature",
+        "passed": true
+      },
+      {
+        "detail": "",
+        "name": "index-evidence",
+        "passed": true
+      },
+      {
+        "detail": "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297",
+        "name": "manifest-signature",
+        "passed": true
+      },
+      {
+        "detail": "",
+        "name": "manifest-evidence",
+        "passed": true
+      },
+      {
+        "detail": "att-2020-approval",
+        "name": "att-2020-approval.index-attachment",
+        "passed": true
+      },
+      {
+        "detail": "case-2020-17",
+        "name": "att-2020-approval.sole-reference",
+        "passed": true
+      },
+      {
+        "detail": "sha256:37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab",
+        "name": "att-2020-approval.index-digest",
+        "passed": true
+      },
+      {
+        "detail": "sha256:9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d",
+        "name": "att-2020-approval.retained-digest",
+        "passed": true
+      },
+      {
+        "detail": "authz-case-2020-17",
+        "name": "att-2020-approval.retained-authorization",
+        "passed": true
+      },
+      {
+        "detail": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+        "name": "att-2020-approval.authorization-signature",
+        "passed": true
+      },
+      {
+        "detail": "recorded {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, retained {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+        "name": "att-2020-approval.authorization-binding",
+        "passed": true
+      },
+      {
+        "detail": "attachments/att-2020-approval.txt",
+        "name": "att-2020-approval.index-binding",
+        "passed": true
+      },
+      {
+        "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+        "name": "att-2020-approval.attachment-withdrawn",
+        "passed": true
+      }
+    ],
+    "entries": [
+      {
+        "attachment_id": "att-2020-approval",
+        "authorization_record_id": "authz-case-2020-17",
+        "case_id": "case-2020-17",
+        "checks": [
+          {
+            "detail": "att-2020-approval",
+            "name": "att-2020-approval.index-attachment",
+            "passed": true
+          },
+          {
+            "detail": "case-2020-17",
+            "name": "att-2020-approval.sole-reference",
+            "passed": true
+          },
+          {
+            "detail": "sha256:37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab",
+            "name": "att-2020-approval.index-digest",
+            "passed": true
+          },
+          {
+            "detail": "sha256:9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d",
+            "name": "att-2020-approval.retained-digest",
+            "passed": true
+          },
+          {
+            "detail": "authz-case-2020-17",
+            "name": "att-2020-approval.retained-authorization",
+            "passed": true
+          },
+          {
+            "detail": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+            "name": "att-2020-approval.authorization-signature",
+            "passed": true
+          },
+          {
+            "detail": "recorded {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, retained {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+            "name": "att-2020-approval.authorization-binding",
+            "passed": true
+          },
+          {
+            "detail": "attachments/att-2020-approval.txt",
+            "name": "att-2020-approval.index-binding",
+            "passed": true
+          },
+          {
+            "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+            "name": "att-2020-approval.attachment-withdrawn",
+            "passed": true
+          }
+        ],
+        "digest": {
+          "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+        },
+        "valid": true
+      }
+    ],
+    "scope": "retirement",
+    "status": "valid"
+  }
+}

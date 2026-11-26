@@ -1,0 +1,129 @@
+{
+  "checks": [
+    {
+      "detail": "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297",
+      "name": "index-signature",
+      "passed": true
+    },
+    {
+      "detail": "",
+      "name": "index-evidence",
+      "passed": true
+    },
+    {
+      "detail": "d5fa88ee94ba69f648a03b89681f72df2760755a47888df7a8ba64647977f297",
+      "name": "manifest-signature",
+      "passed": true
+    },
+    {
+      "detail": "",
+      "name": "manifest-evidence",
+      "passed": true
+    },
+    {
+      "detail": "att-2020-approval",
+      "name": "att-2020-approval.index-attachment",
+      "passed": true
+    },
+    {
+      "detail": "case-2020-17",
+      "name": "att-2020-approval.sole-reference",
+      "passed": true
+    },
+    {
+      "detail": "sha256:37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab",
+      "name": "att-2020-approval.index-digest",
+      "passed": true
+    },
+    {
+      "detail": "sha256:9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d",
+      "name": "att-2020-approval.retained-digest",
+      "passed": true
+    },
+    {
+      "detail": "authz-case-2020-17",
+      "name": "att-2020-approval.retained-authorization",
+      "passed": true
+    },
+    {
+      "detail": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+      "name": "att-2020-approval.authorization-signature",
+      "passed": true
+    },
+    {
+      "detail": "recorded {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, retained {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+      "name": "att-2020-approval.authorization-binding",
+      "passed": true
+    },
+    {
+      "detail": "attachments/att-2020-approval.txt",
+      "name": "att-2020-approval.index-binding",
+      "passed": true
+    },
+    {
+      "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+      "name": "att-2020-approval.attachment-withdrawn",
+      "passed": true
+    }
+  ],
+  "entries": [
+    {
+      "attachment_id": "att-2020-approval",
+      "authorization_record_id": "authz-case-2020-17",
+      "case_id": "case-2020-17",
+      "checks": [
+        {
+          "detail": "att-2020-approval",
+          "name": "att-2020-approval.index-attachment",
+          "passed": true
+        },
+        {
+          "detail": "case-2020-17",
+          "name": "att-2020-approval.sole-reference",
+          "passed": true
+        },
+        {
+          "detail": "sha256:37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab",
+          "name": "att-2020-approval.index-digest",
+          "passed": true
+        },
+        {
+          "detail": "sha256:9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d",
+          "name": "att-2020-approval.retained-digest",
+          "passed": true
+        },
+        {
+          "detail": "authz-case-2020-17",
+          "name": "att-2020-approval.retained-authorization",
+          "passed": true
+        },
+        {
+          "detail": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+          "name": "att-2020-approval.authorization-signature",
+          "passed": true
+        },
+        {
+          "detail": "recorded {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}, retained {'sha256': '9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d'}",
+          "name": "att-2020-approval.authorization-binding",
+          "passed": true
+        },
+        {
+          "detail": "attachments/att-2020-approval.txt",
+          "name": "att-2020-approval.index-binding",
+          "passed": true
+        },
+        {
+          "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/success/attachments/att-2020-approval.txt",
+          "name": "att-2020-approval.attachment-withdrawn",
+          "passed": true
+        }
+      ],
+      "digest": {
+        "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+      },
+      "valid": true
+    }
+  ],
+  "scope": "retirement",
+  "status": "valid"
+}

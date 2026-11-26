@@ -1,0 +1,37 @@
+{
+  "attachment_id": "att-2020-approval",
+  "case_id": "case-2020-17",
+  "manifest_digest": {
+    "sha256": "ed3ef3fa0d0d8d4ad7c7394bb9f27b27e81383da21d8220b76d390529118d822"
+  },
+  "retained": {
+    "authorization": {
+      "approved_at": "2021-06-01T09:30:00+00:00",
+      "approver_keyid": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+      "attachment_ids": [
+        "att-2020-approval"
+      ],
+      "authorized_digests": {
+        "att-2020-approval": {
+          "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+        }
+      },
+      "case_id": "case-2020-17",
+      "record_id": "authz-case-2020-17",
+      "signature": {
+        "keyid": "ee9f72f8c9a39de941f993e8b204d2d9e62140ee8abdb622b1996605d40225a9",
+        "sig": "04d1a131a6687d6348e4dbc53422c168ce7e68094bd66b853edc07c55017df03b19958f350557f2d30a09995032af2e580e775093595607514508e08723f5700"
+      }
+    },
+    "digest": {
+      "sha256": "9d4ec65ffd771403653743eacfa68903d67ba963ef0252b6380bb7731f8c2c8d"
+    },
+    "index_digest": {
+      "sha256": "37e9cf8cd788c5d56135e4492ae55696ea17cc00f5d6ddc000c1bd32d3ee25ab"
+    }
+  },
+  "withdrawn": {
+    "attachment_id": "att-2020-approval",
+    "path": "attachments/att-2020-approval.txt"
+  }
+}

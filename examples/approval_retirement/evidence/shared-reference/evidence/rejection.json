@@ -1,0 +1,149 @@
+{
+  "attachment_id": "att-shared-evidence",
+  "authorization": {
+    "approved_at": "2021-06-01T09:30:00+00:00",
+    "approver_keyid": "21fb9bb41d76643327d9cc6eccc7ac7ab341cc625f267376f246b3ca01174fa6",
+    "attachment_ids": [
+      "att-shared-evidence"
+    ],
+    "authorized_digests": {
+      "att-shared-evidence": {
+        "sha256": "44eff68892874b102af56cc4a3fe5a73f6adcaa374f82be79f69fb3508c62a79"
+      }
+    },
+    "case_id": "case-2020-17",
+    "record_id": "authz-case-2020-17",
+    "signature": {
+      "keyid": "21fb9bb41d76643327d9cc6eccc7ac7ab341cc625f267376f246b3ca01174fa6",
+      "sig": "18ad74b526973fdf873d6d106f8d61ce7ef0cef242c5b0b2eba2e667c906bee616c2309e965b9c8d0e475427b0243350cf8817602f92cbd77cccec6776801300"
+    }
+  },
+  "checks": [
+    {
+      "detail": "b4208e1db47d9a82a4702e2469e149a353b8efc762cea5258c360945ad9c50cb",
+      "name": "index-signature",
+      "passed": true
+    },
+    {
+      "detail": "",
+      "name": "index-evidence",
+      "passed": true
+    },
+    {
+      "detail": "att-shared-evidence",
+      "name": "request-single-attachment",
+      "passed": true
+    },
+    {
+      "detail": "attachments/att-shared-evidence.txt",
+      "name": "attachment-known",
+      "passed": true
+    },
+    {
+      "detail": "case-2020-17",
+      "name": "case-known",
+      "passed": true
+    },
+    {
+      "detail": "att-shared-evidence",
+      "name": "case-reference",
+      "passed": true
+    },
+    {
+      "detail": "case-2020-17,case-2021-09",
+      "name": "shared-reference",
+      "passed": false
+    }
+  ],
+  "digest": {
+    "sha256": "44eff68892874b102af56cc4a3fe5a73f6adcaa374f82be79f69fb3508c62a79"
+  },
+  "evidence_dir": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/shared-reference/evidence",
+  "index_digest": {
+    "sha256": "de51292bc6c584b6618aed28feb36ad16bb53f39382e428c595ad675a3eb7132"
+  },
+  "reason": "shared-reference",
+  "referencing_cases": [
+    "case-2020-17",
+    "case-2021-09"
+  ],
+  "request": {
+    "attachment_id": "att-shared-evidence",
+    "case_id": "case-2020-17",
+    "request_id": "retire-shared-attempt"
+  },
+  "status": "rejected",
+  "verification": {
+    "attachment": {
+      "attachment_id": "att-shared-evidence",
+      "computed_digest": {
+        "sha256": "44eff68892874b102af56cc4a3fe5a73f6adcaa374f82be79f69fb3508c62a79"
+      },
+      "digest": {
+        "sha256": "44eff68892874b102af56cc4a3fe5a73f6adcaa374f82be79f69fb3508c62a79"
+      },
+      "digest_matches_index": true,
+      "path": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/shared-reference/attachments/att-shared-evidence.txt",
+      "present": true
+    },
+    "checks": [
+      {
+        "detail": "b4208e1db47d9a82a4702e2469e149a353b8efc762cea5258c360945ad9c50cb",
+        "name": "index-signature",
+        "passed": true
+      },
+      {
+        "detail": "",
+        "name": "index-evidence",
+        "passed": true
+      },
+      {
+        "detail": "shared-reference",
+        "name": "rejection-reason",
+        "passed": true
+      },
+      {
+        "detail": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/shared-reference/attachments/att-shared-evidence.txt",
+        "name": "attachment-preserved",
+        "passed": true
+      },
+      {
+        "detail": "{'sha256': '44eff68892874b102af56cc4a3fe5a73f6adcaa374f82be79f69fb3508c62a79'}",
+        "name": "attachment-digest",
+        "passed": true
+      },
+      {
+        "detail": "case-2020-17,case-2021-09",
+        "name": "shared-reference",
+        "passed": true
+      }
+    ],
+    "index": {
+      "evidence": {
+        "legacy": false,
+        "missing": [],
+        "status": "complete"
+      },
+      "format": "dsse",
+      "path": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-008/examples/approval_retirement/evidence/shared-reference/index.dsse.json",
+      "payload_digest": {
+        "sha256": "de51292bc6c584b6618aed28feb36ad16bb53f39382e428c595ad675a3eb7132"
+      },
+      "signature_verified": true,
+      "verified_keyids": [
+        "b4208e1db47d9a82a4702e2469e149a353b8efc762cea5258c360945ad9c50cb"
+      ]
+    },
+    "referencing_cases": [
+      "case-2020-17",
+      "case-2021-09"
+    ],
+    "request": {
+      "attachment_id": "att-shared-evidence",
+      "case_id": "case-2020-17",
+      "request_id": "retire-shared-attempt"
+    },
+    "scope": "shared-reference-rejection",
+    "status": "valid"
+  }
+}
