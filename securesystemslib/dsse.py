@@ -27,10 +27,14 @@ class Envelope:
         payload: bytes,
         payload_type: str,
         signatures: dict[str, Signature],
+        unrecognized_fields: dict[str, Any] | None = None,
     ):
         self.payload = payload
         self.payload_type = payload_type
         self.signatures = signatures
+        if unrecognized_fields is None:
+            unrecognized_fields = {}
+        self.unrecognized_fields = unrecognized_fields
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Envelope):
@@ -40,6 +44,7 @@ class Envelope:
             self.payload == other.payload
             and self.payload_type == other.payload_type
             and self.signatures == other.signatures
+            and self.unrecognized_fields == other.unrecognized_fields
         )
 
     def __hash__(self) -> int:
@@ -48,6 +53,7 @@ class Envelope:
                 self.payload,
                 self.payload_type,
                 make_hashable(self.signatures),
+                make_hashable(self.unrecognized_fields),
             )
         )
 
@@ -68,17 +74,18 @@ class Envelope:
             A "Envelope" instance.
         """
 
-        payload = b64dec(data["payload"])
-        payload_type = data["payloadType"]
+        envelope_dict = dict(data)
+        payload = b64dec(envelope_dict.pop("payload"))
+        payload_type = envelope_dict.pop("payloadType")
 
         signatures = {}
-        for signature in data["signatures"]:
+        for signature in envelope_dict.pop("signatures"):
             signature["sig"] = b64dec(signature["sig"]).hex()
             sig = Signature.from_dict(signature)
             if sig.keyid in signatures:
                 raise ValueError(f"Multiple signatures found for keyid {sig.keyid}")
             signatures[sig.keyid] = sig
-        return cls(payload, payload_type, signatures)
+        return cls(payload, payload_type, signatures, envelope_dict)
 
     def to_dict(self) -> dict:
         """Returns the JSON-serializable dictionary representation of self."""
@@ -93,6 +100,7 @@ class Envelope:
             "payload": b64enc(self.payload),
             "payloadType": self.payload_type,
             "signatures": signatures,
+            **self.unrecognized_fields,
         }
 
     def pae(self) -> bytes:

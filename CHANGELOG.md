@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+* Add offline legacy-signature to DSSE conversion review with field mapping,
+  claim evidence, and reusable/re-sign dispositions
+
+### Fixed
+
+* `Envelope` now preserves unrecognized top-level fields through
+  `from_dict()`/`to_dict()`
+
 ## 1.6.0
 
 ### Changed

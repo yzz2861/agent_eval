@@ -1,0 +1,52 @@
+{
+  "id": "same-text-different-encoding",
+  "field_mapping": {
+    "content": {
+      "source": "/legacy/signed/content_b64",
+      "source_encoding": "base64",
+      "target": "payload"
+    },
+    "media_type": {
+      "source": "/legacy/signed/media_type",
+      "source_encoding": "utf-8",
+      "target": "payload_type"
+    },
+    "signing_purpose": {
+      "source": "/legacy/signed/usage",
+      "source_encoding": "utf-8",
+      "target": "payload_json",
+      "target_path": "/usage",
+      "target_encoding": "utf-8"
+    }
+  },
+  "key": {
+    "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+    "keytype": "ed25519",
+    "scheme": "ed25519",
+    "keyval": {
+      "public": "4f66dabebcf30628963786001984c0b75c175cdcf3bc4855933a2628f0cd0a0f"
+    }
+  },
+  "legacy": {
+    "signed": {
+      "content_b64": "eyJtZXNzYWdlIjoiY2FmZcyBIiwidXNhZ2UiOiJyZWxlYXNlLWFwcHJvdmFsIn0=",
+      "media_type": "application/vnd.cafe\u0301+json",
+      "usage": "release-approval"
+    },
+    "signature": {
+      "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+      "sig": "ec8df66561aa5822daf2408373082fa230ae6b8b29faa61aceed4647b358963a42c16ad0cd9e0febedd4e4c763b1ce901fe3adfbf7eca0cde1ac0c68f803ed0a"
+    },
+    "signing_format": "canonical-json"
+  },
+  "envelope": {
+    "payload": "eyJtZXNzYWdlIjoiY2FmZcyBIiwidXNhZ2UiOiJyZWxlYXNlLWFwcHJvdmFsIn0=",
+    "payloadType": "application/vnd.cafe\u0301+json",
+    "signatures": [
+      {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "sig": "9tnv79e8zOZvBQk1lYRPU2q7VwiWYvUzzcwg5th/AxLxvSvjK1eCl+D2KcJiG0w8EJL87RgXJH7wsHuaqilhAg=="
+      }
+    ]
+  }
+}

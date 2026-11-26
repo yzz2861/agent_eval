@@ -1,0 +1,52 @@
+{
+  "id": "same-text-different-usage",
+  "field_mapping": {
+    "content": {
+      "source": "/legacy/signed/content_b64",
+      "source_encoding": "base64",
+      "target": "payload"
+    },
+    "media_type": {
+      "source": "/legacy/signed/media_type",
+      "source_encoding": "utf-8",
+      "target": "payload_type"
+    },
+    "signing_purpose": {
+      "source": "/legacy/signed/usage",
+      "source_encoding": "utf-8",
+      "target": "payload_json",
+      "target_path": "/usage",
+      "target_encoding": "utf-8"
+    }
+  },
+  "key": {
+    "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+    "keytype": "ed25519",
+    "scheme": "ed25519",
+    "keyval": {
+      "public": "4f66dabebcf30628963786001984c0b75c175cdcf3bc4855933a2628f0cd0a0f"
+    }
+  },
+  "legacy": {
+    "signed": {
+      "content_b64": "eyJtZXNzYWdlIjoiY2Fmw6kiLCJ1c2FnZSI6ImF1ZGl0LWV2aWRlbmNlIn0=",
+      "media_type": "application/vnd.caf\u00e9+json",
+      "usage": "artifact-signing"
+    },
+    "signature": {
+      "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+      "sig": "7809f23fc81672a076534ca8e1f1d32be336dba1cdd391fdb0bffacdfabddf282160f01fc86b1b9589a7c9a09d6875bb961b5c373d81f97062f4b4b39f3a270a"
+    },
+    "signing_format": "canonical-json"
+  },
+  "envelope": {
+    "payload": "eyJtZXNzYWdlIjoiY2Fmw6kiLCJ1c2FnZSI6ImF1ZGl0LWV2aWRlbmNlIn0=",
+    "payloadType": "application/vnd.caf\u00e9+json",
+    "signatures": [
+      {
+        "keyid": "c6d8bf2e4f48b41ac2ce8eca21415ca8ef68c133b47fc33df03d4070a7e1e9cc",
+        "sig": "DezaT+tOwX90L0lLcKqjHrZDzn6n91BUNmVKP6CyR0jJTsRH/9/CXatGzL5NAcV+K5Cn2tkcsgh/1LLtBJHXAQ=="
+      }
+    ]
+  }
+}
