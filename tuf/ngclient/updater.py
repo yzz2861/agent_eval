@@ -103,7 +103,7 @@ class Updater:
         RepositoryError: Local root.json is invalid
     """
 
-    def __init__(  # noqa: PLR0917
+    def __init__(
         self,
         metadata_dir: str,
         metadata_base_url: str,
@@ -213,6 +213,80 @@ class Updater:
         if Targets.type not in self._trusted_set:
             self.refresh()
         return self._preorder_depth_first_walk(target_path)
+
+    def get_targetinfo_with_role(
+        self, target_path: str
+    ) -> tuple[str, TargetFile] | None:
+        """Return a target and the trusted role that provides it."""
+        target = self._preorder_depth_first_walk(target_path, include_role=True)
+        if target is None:
+            return None
+        return cast("tuple[str, TargetFile]", target)
+
+    def get_targetinfos(self) -> list[tuple[str, TargetFile]]:
+        """Return all trusted targets and the delegated roles containing them.
+
+        Delegation order and terminating delegations are handled like in
+        ``get_targetinfo()``. The returned role names allow callers to apply
+        deployment policies without relying on target paths alone.
+        """
+
+        if Targets.type not in self._trusted_set:
+            self.refresh()
+
+        target_paths = self._collect_target_paths()
+        targets: list[tuple[str, TargetFile]] = []
+        seen_targets: set[tuple[str, str]] = set()
+        for target_path in sorted(target_paths):
+            target = self.get_targetinfo_with_role(target_path)
+            if target is None:
+                continue
+            target_key = (target[0], target[1].path)
+            if target_key not in seen_targets:
+                seen_targets.add(target_key)
+                targets.append(target)
+        return targets
+
+    def _collect_target_paths(self) -> set[str]:
+        """Collect target paths from all reachable and trusted roles."""
+        target_paths: set[str] = set()
+        delegations_to_visit = [(Targets.type, Root.type)]
+        visited_role_names: set[str] = set()
+
+        while delegations_to_visit:
+            role_name, parent_role = delegations_to_visit.pop()
+            if role_name in visited_role_names:
+                continue
+            if (
+                role_name != Targets.type
+                and len(visited_role_names) >= self.config.max_delegations
+            ):
+                break
+
+            role_targets = self._load_targets(role_name, parent_role)
+            target_paths.update(role_targets.targets)
+            if role_name != Targets.type:
+                visited_role_names.add(role_name)
+
+            if role_targets.delegations is None:
+                continue
+
+            child_roles: list[tuple[str, str]] = []
+            if role_targets.delegations.roles is not None:
+                child_roles = [
+                    (child_role.name, role_name)
+                    for child_role in role_targets.delegations.roles.values()
+                ]
+            elif role_targets.delegations.succinct_roles is not None:
+                child_roles = [
+                    (child_role, role_name)
+                    for child_role in (
+                        role_targets.delegations.succinct_roles.get_roles()
+                    )
+                ]
+            delegations_to_visit.extend(reversed(child_roles))
+
+        return target_paths
 
     def find_cached_target(
         self,
@@ -505,8 +579,8 @@ class Updater:
             return delegated_targets
 
     def _preorder_depth_first_walk(
-        self, target_filepath: str
-    ) -> TargetFile | None:
+        self, target_filepath: str, include_role: bool = False
+    ) -> TargetFile | tuple[str, TargetFile] | None:
         """
         Interrogates the tree of target delegations in order of appearance
         (which implicitly order trustworthiness), and returns the matching
@@ -539,7 +613,7 @@ class Updater:
 
             if target is not None:
                 logger.debug("Found target in current role %s", role_name)
-                return target
+                return (role_name, target) if include_role else target
 
             # After preorder check, add current role to set of visited roles.
             visited_role_names.add(role_name)
