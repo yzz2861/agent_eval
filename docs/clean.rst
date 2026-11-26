@@ -46,6 +46,41 @@ can be used in HTML as is.
 .. autofunction:: bleach.clean
 
 
+Auditing sanitizer stages
+=========================
+
+Pass an :py:class:`bleach.audit.AuditTrail` to
+:py:class:`bleach.sanitizer.Cleaner` to record the visible structure before and
+after the HTML parser, Bleach sanitizer, and any later html5lib filters. Each
+stage records the tags and attributes present in its output, its structural
+additions and removals, and the configured rule source.
+
+.. doctest::
+
+   >>> from bleach.audit import AuditTrail, validate_structure
+   >>> from bleach.sanitizer import Cleaner
+
+   >>> audit_trail = AuditTrail()
+   >>> cleaner = Cleaner(
+   ...     tags={'strong'},
+   ...     attributes={'strong': ['title']},
+   ...     strip=True,
+   ...     audit_trail=audit_trail,
+   ... )
+   >>> output = cleaner.clean(
+   ...     '<strong class="drop" title="kept">text</strong><u>draft</u>'
+   ... )
+   >>> output
+   '<strong title="kept">text</strong>draft'
+   >>> audit_trail.stage('bleach_sanitizer').changes['removed_attributes']
+   {('strong', 'class', 'drop'): 1}
+   >>> validate_structure(output, {'strong'}, {'strong': ['title']})
+   []
+
+The same audit object should be used for one input only. This keeps every
+stage in the recorded trail tied to a single before/after comparison.
+
+
 Allowed tags (``tags``)
 =======================
 

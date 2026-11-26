@@ -4,6 +4,7 @@ import warnings
 
 from xml.sax.saxutils import unescape
 
+from bleach import audit
 from bleach import html5lib_shim
 from bleach import parse_shim
 
@@ -92,6 +93,7 @@ class Cleaner:
         strip_comments=True,
         filters=None,
         css_sanitizer=None,
+        audit_trail=None,
     ):
         """Initializes a Cleaner
 
@@ -120,6 +122,9 @@ class Cleaner:
         :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
             sanitizing style attribute values and style text; defaults to None
 
+        :arg bleach.audit.AuditTrail audit_trail: optional recorder for the tags,
+            attributes, structural changes, and rule sources used by each stage
+
         """
         self.tags = tags
         self.attributes = attributes
@@ -128,6 +133,7 @@ class Cleaner:
         self.strip_comments = strip_comments
         self.filters = filters or []
         self.css_sanitizer = css_sanitizer
+        self.audit_trail = audit_trail
 
         self.parser = html5lib_shim.BleachHTMLParser(
             tags=self.tags,
@@ -189,21 +195,85 @@ class Cleaner:
             return ""
 
         dom = self.parser.parseFragment(text)
-        filtered = BleachSanitizerFilter(
-            source=self.walker(dom),
-            allowed_tags=self.tags,
-            attributes=self.attributes,
-            strip_disallowed_tags=self.strip,
-            strip_html_comments=self.strip_comments,
-            css_sanitizer=self.css_sanitizer,
-            allowed_protocols=self.protocols,
-        )
+        stream = self.walker(dom)
+
+        if self.audit_trail is not None:
+            stream = audit.AuditedStageFilter(
+                source=stream,
+                stage_factory=lambda source: source,
+                name="bleach_parser",
+                rule_source={
+                    "source": "bleach.html5lib_shim.BleachHTMLParser",
+                    "configured_by": "bleach.sanitizer.Cleaner",
+                    "allowed_tags": frozenset(self.tags),
+                    "strip_disallowed_tags": self.strip,
+                    "consume_entities": False,
+                    "namespace_html_elements": False,
+                },
+                audit_trail=self.audit_trail,
+                input_structure=audit.extract_visible_structure(text),
+            )
+
+        def sanitizer_factory(source):
+            return BleachSanitizerFilter(
+                source=source,
+                allowed_tags=self.tags,
+                attributes=self.attributes,
+                strip_disallowed_tags=self.strip,
+                strip_html_comments=self.strip_comments,
+                css_sanitizer=self.css_sanitizer,
+                allowed_protocols=self.protocols,
+            )
+
+        if self.audit_trail is not None:
+            stream = audit.AuditedStageFilter(
+                source=stream,
+                stage_factory=sanitizer_factory,
+                name="bleach_sanitizer",
+                rule_source={
+                    "source": "bleach.sanitizer.BleachSanitizerFilter",
+                    "configured_by": "bleach.sanitizer.Cleaner",
+                    "allowed_tags": frozenset(self.tags),
+                    "allowed_attributes": self.attributes,
+                    "allowed_protocols": frozenset(self.protocols),
+                    "strip_disallowed_tags": self.strip,
+                    "strip_html_comments": self.strip_comments,
+                    "css_sanitizer": (
+                        type(self.css_sanitizer).__name__
+                        if self.css_sanitizer is not None
+                        else None
+                    ),
+                },
+                audit_trail=self.audit_trail,
+            )
+        else:
+            stream = sanitizer_factory(stream)
 
         # Apply any filters after the BleachSanitizerFilter
         for filter_class in self.filters:
-            filtered = filter_class(source=filtered)
+            def filter_factory(source, filter_class=filter_class):
+                return filter_class(source=source)
 
-        return self.serializer.render(filtered)
+            if self.audit_trail is not None:
+                rule_source = {
+                    "source": f"{filter_class.__module__}.{filter_class.__qualname__}",
+                    "filter_type": "html5lib.Filter",
+                }
+                audit_rules = getattr(filter_class, "audit_rules", None)
+                if audit_rules is not None:
+                    rule_source["audit_rules"] = audit_rules
+
+                stream = audit.AuditedStageFilter(
+                    source=stream,
+                    stage_factory=filter_factory,
+                    name=filter_class.__name__,
+                    rule_source=rule_source,
+                    audit_trail=self.audit_trail,
+                )
+            else:
+                stream = filter_factory(stream)
+
+        return self.serializer.render(stream)
 
 
 def attribute_filter_factory(attributes):

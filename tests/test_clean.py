@@ -3,6 +3,7 @@ import os
 import pytest
 
 from bleach import clean
+from bleach.audit import AuditTrail, diff_structures, validate_structure
 from bleach.html5lib_shim import Filter
 from bleach.sanitizer import ALLOWED_PROTOCOLS, Cleaner, NoCssSanitizerWarning
 from bleach._vendor.html5lib.constants import rcdataElements
@@ -1266,3 +1267,109 @@ class TestCleaner:
 
         dirty = 'this is cute! <img src="http://example.com/puppy.jpg" rel="nofollow">'
         assert cleaner.clean(dirty) == 'this is cute! <img src="moo" rel="moo">'
+
+    def test_audit_trail_for_two_approved_formatting_routes(self):
+        class FormattingFilter(Filter):
+            audit_rules = {"wrap_text": "format", "allowed_tags": {"strong"}}
+            wrap_tag = "strong"
+
+            def __iter__(self):
+                for token in Filter.__iter__(self):
+                    if (
+                        token["type"] in ("Characters", "SpaceCharacters")
+                        and token["data"] == "format"
+                    ):
+                        parts = token["data"].split("format")
+                        for index, part in enumerate(parts):
+                            if part:
+                                yield {"type": token["type"], "data": part}
+
+                            if index < len(parts) - 1:
+                                yield {
+                                    "type": "StartTag",
+                                    "name": self.wrap_tag,
+                                    "data": {},
+                                }
+                                yield {"type": "Characters", "data": "format"}
+                                yield {"type": "EndTag", "name": self.wrap_tag}
+                    else:
+                        yield token
+
+        class BoldFormattingFilter(FormattingFilter):
+            wrap_tag = "b"
+
+        class EmphasisFormattingFilter(FormattingFilter):
+            wrap_tag = "em"
+
+        allowed_tags = {"strong", "b", "em"}
+        allowed_attributes = {"strong": ["title"]}
+        source = (
+            'Benign <strong class="drop" title="kept">format</strong> text '
+            '<u title="removed">format</u>'
+        )
+
+        bold_audit = AuditTrail()
+        bold_cleaner = Cleaner(
+            tags=allowed_tags,
+            attributes=allowed_attributes,
+            strip=True,
+            filters=[BoldFormattingFilter],
+            audit_trail=bold_audit,
+        )
+        bold_output = bold_cleaner.clean(source)
+
+        emphasis_audit = AuditTrail()
+        emphasis_cleaner = Cleaner(
+            tags=allowed_tags,
+            attributes=allowed_attributes,
+            strip=True,
+            filters=[EmphasisFormattingFilter],
+            audit_trail=emphasis_audit,
+        )
+        emphasis_output = emphasis_cleaner.clean(source)
+
+        assert bold_output == (
+            'Benign <strong title="kept"><b>format</b></strong> text format'
+        )
+        assert emphasis_output == (
+            'Benign <strong title="kept"><em>format</em></strong> text format'
+        )
+
+        assert [stage.name for stage in bold_audit.stages] == [
+            "bleach_parser",
+            "bleach_sanitizer",
+            "BoldFormattingFilter",
+        ]
+        parser_stage = bold_audit.stage("bleach_parser")
+        sanitizer_stage = bold_audit.stage("bleach_sanitizer")
+        bold_stage = bold_audit.stage("BoldFormattingFilter")
+
+        assert parser_stage.changes["removed_tags"] == {"u": 1}
+        assert sanitizer_stage.changes["removed_attributes"] == {
+            ("strong", "class", "drop"): 1
+        }
+        assert bold_stage.changes["added_tags"] == {"b": 1}
+        assert bold_stage.applied_tags == frozenset({"strong", "b"})
+        assert bold_stage.applied_attributes == (("strong", frozenset({"title"})),)
+        assert dict(parser_stage.rule_source)["source"] == (
+            "bleach.html5lib_shim.BleachHTMLParser"
+        )
+        assert dict(bold_stage.rule_source)["source"] == (
+            f"{BoldFormattingFilter.__module__}.{BoldFormattingFilter.__qualname__}"
+        )
+
+        route_diff = diff_structures(
+            bold_audit.stage("BoldFormattingFilter").output_structure,
+            emphasis_audit.stage("EmphasisFormattingFilter").output_structure,
+        )
+        assert route_diff["added_tags"] == {"em": 1}
+        assert route_diff["removed_tags"] == {"b": 1}
+        assert route_diff["added_attributes"] == {}
+        assert route_diff["removed_attributes"] == {}
+        assert (
+            validate_structure(bold_output, allowed_tags, allowed_attributes) == []
+        )
+        assert (
+            validate_structure(emphasis_output, allowed_tags, allowed_attributes)
+            == []
+        )
