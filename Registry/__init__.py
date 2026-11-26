@@ -21,5 +21,12 @@ __all__ = [
     'Registry',
     'RegistryParse',
     'RegistryLog',
-    'SettingsParse'
+    'SettingsParse',
+    'SequenceAudit',
+    'SequenceCompare',
+    'RegistrySequence'
 ]
+
+from . import SequenceAudit
+from . import SequenceCompare
+from . import RegistrySequence

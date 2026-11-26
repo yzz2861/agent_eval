@@ -1,0 +1,16 @@
+{
+  "aliases": {
+    "bob": ["rob", "robert", "bobby"]
+  },
+  "approvals": [
+    {
+      "id": "APR-094-01",
+      "key": "AuditConfig",
+      "value_name": "AuditRecipients",
+      "action": "append",
+      "baseline_ordinal": 3,
+      "member": "bob",
+      "note": "CHG-094 批准追加原序号 3（bob；别名 rob/robert/bobby）的又一声明。"
+    }
+  ]
+}

@@ -95,6 +95,12 @@ DEVPROP_MASK_TYPE = 0x00000FFF
 # This named tuple describes the recovery operations to be performed on a hive.
 RecoveryStatus = namedtuple('RecoveryStatus', ['recover_header', 'recover_data'])
 
+# One ordered REG_MULTI_SZ member.  ``ordinal`` is one-based and ``index`` is
+# zero-based.  ``byte_offset`` is relative to the start of the value data.
+MultiSZMember = namedtuple('MultiSZMember', [
+    'ordinal', 'index', 'value', 'byte_offset', 'byte_length', 'raw_bytes'
+])
+
 
 def parse_timestamp(ticks, resolution, epoch, mode=decimal.ROUND_HALF_EVEN):
     """
@@ -809,6 +815,65 @@ def decode_utf16le(s):
     return s
 
 
+def parse_multisz(data):
+    """
+    Parse REG_MULTI_SZ data while preserving every declared occurrence.
+
+    Windows encodes the list as aligned UTF-16LE, NUL code-unit terminated
+    strings, followed by one final NUL code unit.  Scanning code units rather
+    than searching for two zero bytes avoids a false terminator across the
+    boundary of two unrelated characters.
+
+    The final list terminator is not returned as a member.  Earlier empty
+    members are preserved because their terminator is followed by more data
+    (or by the additional list terminator for a trailing empty member).
+    """
+    if data is None:
+        data = b""
+    if len(data) % 2:
+        data += b"\x00"
+
+    code_unit_count = len(data) // 2
+    code_units = struct.unpack("<%dH" % code_unit_count, data) if code_unit_count else ()
+    members = []
+    start_unit = 0
+
+    for position, code_unit in enumerate(code_units):
+        if code_unit != 0:
+            continue
+
+        raw_value = data[start_unit * 2:position * 2]
+        members.append(MultiSZMember(
+            ordinal=len(members) + 1,
+            index=len(members),
+            value=raw_value.decode("utf-16-le"),
+            byte_offset=start_unit * 2,
+            byte_length=len(raw_value),
+            raw_bytes=raw_value,
+        ))
+        start_unit = position + 1
+
+    if start_unit < code_unit_count:
+        raw_value = data[start_unit * 2:code_unit_count * 2]
+        members.append(MultiSZMember(
+            ordinal=len(members) + 1,
+            index=len(members),
+            value=raw_value.decode("utf-16-le"),
+            byte_offset=start_unit * 2,
+            byte_length=len(raw_value),
+            raw_bytes=raw_value,
+        ))
+    elif code_units and code_units[-1] == 0 and members:
+        # The last NUL is the extra REG_MULTI_SZ list terminator, not a value.
+        members.pop()
+
+    return members
+
+
+parse_multi_sz = parse_multisz
+parse_multi_sz_data = parse_multisz
+
+
 class VKRecord(Record):
     """
     The VKRecord holds one name-value pair.  The data may be one of many types,
@@ -1081,9 +1146,8 @@ class VKRecord(Record):
             ret = self.unpack_binary(0x8, 0x4)
         elif data_type == RegMultiSZ:
             if data_length >= 0x80000000:
-                # this means data_length < 5, so it must be 4, and
-                # be composed of completely \x00, so the strings are empty
-                ret = b""
+                inline_length = data_length - 0x80000000
+                ret = self._buf[data_offset:data_offset + inline_length + overrun]
             elif 0x3fd8 < data_length < 0x80000000:
                 d = HBINCell(self._buf, data_offset, self)
                 if d.data_id() == b"db":
@@ -1187,8 +1251,7 @@ class VKRecord(Record):
         elif data_type == RegDWord:
             return struct.unpack_from(str("<I"), d, 0)[0]
         elif data_type == RegMultiSZ:
-            s = d.decode("utf16")
-            return s.split("\x00")
+            return [member.value for member in self.multisz_members(overrun)]
         elif data_type == RegQWord:
             return struct.unpack_from(str("<Q"), d, 0)[0]
         elif data_type == RegBigEndian:
@@ -1216,6 +1279,33 @@ class VKRecord(Record):
             return struct.unpack_from(str("<I"), d, 0)[0]
         else:
             raise UnknownTypeException("Unknown VK Record type 0x%x at 0x%x" % (data_type, self.offset()))
+
+    def multisz_members(self, overrun=0):
+        """
+        Return ordered, duplicate-preserving member records for a RegMultiSZ value.
+        """
+        if self.data_type() != RegMultiSZ:
+            raise UnknownTypeException(
+                "Value at 0x%x has type %s, not RegMultiSZ" %
+                (self.offset(), self.data_type_str())
+            )
+        return parse_multisz(self.raw_data(overrun=overrun))
+
+    def multi_sz_members(self, overrun=0):
+        """Snake_case alias for :meth:`multisz_members`."""
+        return self.multisz_members(overrun=overrun)
+
+    def multisz_records(self, overrun=0):
+        return self.multisz_members(overrun=overrun)
+
+    def multi_sz_records(self, overrun=0):
+        return self.multisz_members(overrun=overrun)
+
+    def multisz_items(self, overrun=0):
+        return self.multisz_members(overrun=overrun)
+
+    def multi_sz_items(self, overrun=0):
+        return self.multisz_members(overrun=overrun)
 
 
 class SKRecord(Record):

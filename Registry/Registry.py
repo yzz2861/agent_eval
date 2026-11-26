@@ -225,6 +225,28 @@ class RegistryValue(object):
     def value(self, overrun=0):
         return self._vkrecord.data(overrun)
 
+    def multisz_members(self, overrun=0):
+        """
+        Return ordered, duplicate-preserving REG_MULTI_SZ member records.
+        """
+        return self._vkrecord.multisz_members(overrun)
+
+    def multi_sz_members(self, overrun=0):
+        """Snake_case alias for multisz_members."""
+        return self._vkrecord.multi_sz_members(overrun)
+
+    def multisz_records(self, overrun=0):
+        return self._vkrecord.multisz_records(overrun)
+
+    def multi_sz_records(self, overrun=0):
+        return self._vkrecord.multi_sz_records(overrun)
+
+    def multisz_items(self, overrun=0):
+        return self._vkrecord.multisz_items(overrun)
+
+    def multi_sz_items(self, overrun=0):
+        return self._vkrecord.multi_sz_items(overrun)
+
     def raw_data(self, overrun=0):
         return self._vkrecord.raw_data(overrun)
 
