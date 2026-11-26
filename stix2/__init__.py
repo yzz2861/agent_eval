@@ -8,6 +8,7 @@
    environment
    equivalence
    exceptions
+   exchange_receipt
    markings
    parsing
    pattern_visitor
@@ -35,6 +36,7 @@ from .datastore.taxii import (
     TAXIICollectionSink, TAXIICollectionSource, TAXIICollectionStore,
 )
 from .environment import Environment, ObjectFactory
+from .exchange_receipt import build_exchange_receipt, build_offline_receipt
 from .markings import (
     add_markings, clear_markings, get_markings, is_marked, remove_markings,
     set_markings,

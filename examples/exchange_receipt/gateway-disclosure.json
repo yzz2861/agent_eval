@@ -1,0 +1,37 @@
+{
+  "schema": "stix2.exchange-gateway-disclosure/v1",
+  "gateway": "offline-exchange-gateway",
+  "object_id": "identity--91b7c2aa-6d4e-4f8a-9b21-0a1b2c3d4e90",
+  "rules": [
+    {
+      "selectors": [
+        "name"
+      ],
+      "classification": "explicitly_transformed",
+      "marking_ref": "marking-definition--7c6d90e2-7a41-4f3d-9b2a-0c1d2e3f4090",
+      "transform": "stable_truncated_keyed_contact_name_token",
+      "token_prefix": "tok_contact_v1_",
+      "pattern": "^tok_contact_v1_[0-9a-f]{32}$",
+      "stable": true
+    },
+    {
+      "selectors": [
+        "contact_information"
+      ],
+      "classification": "unverifiable",
+      "marking_ref": "marking-definition--8d7e01f3-8b52-404e-ac3b-1d2e3f4050a1",
+      "reason": "salted irreversible marker; per-transfer salt and key are unavailable to the offline receiver"
+    }
+  ],
+  "unordered_collections": {
+    "external_references": {
+      "key": [
+        "source_name",
+        "external_id"
+      ]
+    }
+  },
+  "revision_fields": [
+    "modified"
+  ]
+}

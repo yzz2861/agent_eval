@@ -1,0 +1,142 @@
+{
+  "schema": "stix2.exchange-receipt/v1",
+  "object_id": "identity--91b7c2aa-6d4e-4f8a-9b21-0a1b2c3d4e90",
+  "same_id": true,
+  "same_type": true,
+  "summary": {
+    "identity_preserved": [
+      "created",
+      "external_references",
+      "granular_markings[0].marking_ref",
+      "granular_markings[0].selectors[0]",
+      "granular_markings[1].marking_ref",
+      "granular_markings[1].selectors[0]",
+      "id",
+      "identity_class",
+      "roles[0]",
+      "sectors[0]",
+      "spec_version",
+      "type"
+    ],
+    "explicitly_transformed": [
+      "name"
+    ],
+    "unverifiable": [
+      "contact_information"
+    ],
+    "real_updates": [
+      "description"
+    ],
+    "revision_metadata_changes": [
+      "modified"
+    ],
+    "order_normalized": [
+      "external_references"
+    ],
+    "identity_mismatches": [],
+    "real_update_count": 1,
+    "only_real_update": "description",
+    "issues": []
+  },
+  "fields": [
+    {
+      "selector": "contact_information",
+      "status": "unverifiable",
+      "reason": "salted irreversible marker; per-transfer salt and key are unavailable to the offline receiver",
+      "marking_ref": "marking-definition--8d7e01f3-8b52-404e-ac3b-1d2e3f4050a1",
+      "wire_equal": false,
+      "before": "opaque_contact_v2$A17F$0c4e9a7d2b6f41e8a935c7d1f0b2a684",
+      "after": "opaque_contact_v2$E90B$7d2f4a91c8e64b059f2a7d3c1e8b6402",
+      "present_before": true,
+      "present_after": true
+    },
+    {
+      "selector": "created",
+      "status": "identity_preserved",
+      "value": "2026-11-20T08:00:00.000Z"
+    },
+    {
+      "selector": "description",
+      "status": "real_update",
+      "before": "初始交换联系人档案，等待接收端核验。",
+      "after": "接收端已完成核验，后续改由事件响应联络台承接。"
+    },
+    {
+      "selector": "external_references",
+      "status": "identity_preserved_order_insensitive",
+      "item_count": 2,
+      "key_fields": [
+        "source_name",
+        "external_id"
+      ]
+    },
+    {
+      "selector": "granular_markings[0].marking_ref",
+      "status": "identity_preserved",
+      "value": "marking-definition--7c6d90e2-7a41-4f3d-9b2a-0c1d2e3f4090"
+    },
+    {
+      "selector": "granular_markings[0].selectors[0]",
+      "status": "identity_preserved",
+      "value": "name"
+    },
+    {
+      "selector": "granular_markings[1].marking_ref",
+      "status": "identity_preserved",
+      "value": "marking-definition--8d7e01f3-8b52-404e-ac3b-1d2e3f4050a1"
+    },
+    {
+      "selector": "granular_markings[1].selectors[0]",
+      "status": "identity_preserved",
+      "value": "contact_information"
+    },
+    {
+      "selector": "id",
+      "status": "identity_preserved",
+      "value": "identity--91b7c2aa-6d4e-4f8a-9b21-0a1b2c3d4e90"
+    },
+    {
+      "selector": "identity_class",
+      "status": "identity_preserved",
+      "value": "organization"
+    },
+    {
+      "selector": "modified",
+      "status": "revision_metadata_changed",
+      "before": "2026-11-27T03:30:00.000Z",
+      "after": "2026-11-27T04:10:00.000Z"
+    },
+    {
+      "selector": "name",
+      "status": "explicitly_transformed",
+      "marking_ref": "marking-definition--7c6d90e2-7a41-4f3d-9b2a-0c1d2e3f4090",
+      "before": "tok_contact_v1_9f2c4a7e8b1d4f60a3c5e7d9b2f46810",
+      "after": "tok_contact_v1_9f2c4a7e8b1d4f60a3c5e7d9b2f46810",
+      "transform": "stable_truncated_keyed_contact_name_token",
+      "wire_equal": true,
+      "format_verified": true,
+      "stable": true,
+      "pseudonym_continuity_proven": true
+    },
+    {
+      "selector": "roles[0]",
+      "status": "identity_preserved",
+      "value": "incident-coordinator"
+    },
+    {
+      "selector": "sectors[0]",
+      "status": "identity_preserved",
+      "value": "technology"
+    },
+    {
+      "selector": "spec_version",
+      "status": "identity_preserved",
+      "value": "2.1"
+    },
+    {
+      "selector": "type",
+      "status": "identity_preserved",
+      "value": "identity"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "type": "bundle",
+  "id": "bundle--c2d3e4f5-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+  "objects": [
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--7c6d90e2-7a41-4f3d-9b2a-0c1d2e3f4090",
+      "created": "2026-11-20T08:00:00.000Z",
+      "definition_type": "statement",
+      "definition": {
+        "statement": "EXCHANGE-GATEWAY: name is replaced by a stable irreversible contact token."
+      }
+    },
+    {
+      "type": "marking-definition",
+      "spec_version": "2.1",
+      "id": "marking-definition--8d7e01f3-8b52-404e-ac3b-1d2e3f4050a1",
+      "created": "2026-11-20T08:00:00.000Z",
+      "definition_type": "statement",
+      "definition": {
+        "statement": "OFFLINE-PROOF-BLOCKED: contact_information uses a salted irreversible marker; equality cannot be proven offline."
+      }
+    }
+  ]
+}
