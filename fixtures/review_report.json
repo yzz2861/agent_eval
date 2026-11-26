@@ -1,0 +1,642 @@
+{
+  "assembly": "/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-016/fixtures/ReviewSample.dll",
+  "assembly_name": "ReviewSample",
+  "expected_statement": "CONFIDENTIAL-REVIEW-016",
+  "assembly_refs": [
+    {
+      "rid": 1,
+      "token": "0x23000001",
+      "name": "Missing.Contracts",
+      "version": "1.0.0.0",
+      "resolved_path": null,
+      "status": "pending_external_assembly"
+    }
+  ],
+  "external_member_refs": [
+    {
+      "token": "0x0A000003",
+      "name": "Mark",
+      "parent": {
+        "table": "TypeRef",
+        "rid": 1,
+        "token": "0x01000001",
+        "kind": "typeref",
+        "name": "Missing.Contracts.ISecure",
+        "assembly": {
+          "rid": 1,
+          "token": "0x23000001",
+          "name": "Missing.Contracts",
+          "version": "1.0.0.0",
+          "resolved_path": null,
+          "status": "pending_external_assembly"
+        },
+        "status": "pending_external_assembly"
+      },
+      "status": "pending_external_assembly"
+    }
+  ],
+  "generic_parameters": [
+    {
+      "rid": 1,
+      "token": "0x2A000001",
+      "name": "T",
+      "owner_table": "TypeDef",
+      "owner_rid": 4,
+      "owner_token": "0x02000004",
+      "constraints": [
+        {
+          "table": "TypeRef",
+          "rid": 1,
+          "token": "0x01000001",
+          "kind": "typeref",
+          "name": "Missing.Contracts.ISecure",
+          "assembly": {
+            "rid": 1,
+            "token": "0x23000001",
+            "name": "Missing.Contracts",
+            "version": "1.0.0.0",
+            "resolved_path": null,
+            "status": "pending_external_assembly"
+          },
+          "status": "pending_external_assembly"
+        }
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "reference": "0x0A000001",
+      "entry_token": "0x0A000001",
+      "entry_kind": "MemberRef",
+      "member_name": "Read",
+      "member_ref": {
+        "token": "0x0A000001",
+        "name": "Read",
+        "parent": {
+          "table": "TypeDef",
+          "rid": 5,
+          "token": "0x02000005",
+          "kind": "typedef",
+          "name": "ReviewAudit.IntBox",
+          "status": "metadata_verified"
+        }
+      },
+      "sources": [
+        {
+          "kind": "open_generic_definition",
+          "label": "开放泛型定义上的声明",
+          "owner_table": "MethodDef",
+          "owner_rid": 3,
+          "owner_token": "0x06000003",
+          "owner_name": "ReviewAudit.Box`1::Read",
+          "reason": "CustomAttribute.Parent directly names the resolved MethodDef",
+          "custom_attributes": [
+            {
+              "rid": 1,
+              "token": "0x0C000001",
+              "owner_table": "MethodDef",
+              "owner_rid": 3,
+              "owner_token": "0x06000003",
+              "attribute_type": "ReviewAudit.ConfidentialAttribute",
+              "statement": "CONFIDENTIAL-REVIEW-016"
+            }
+          ],
+          "statements": [
+            "CONFIDENTIAL-REVIEW-016"
+          ],
+          "reliability": "metadata_verified",
+          "closed_generic_arguments": [
+            {
+              "kind": "element_type",
+              "name": "int32"
+            }
+          ],
+          "generic_base_instance": null,
+          "generic_constraints": [
+            {
+              "rid": 1,
+              "token": "0x2A000001",
+              "name": "T",
+              "owner_table": "TypeDef",
+              "owner_rid": 4,
+              "owner_token": "0x02000004",
+              "constraints": [
+                {
+                  "table": "TypeRef",
+                  "rid": 1,
+                  "token": "0x01000001",
+                  "kind": "typeref",
+                  "name": "Missing.Contracts.ISecure",
+                  "assembly": {
+                    "rid": 1,
+                    "token": "0x23000001",
+                    "name": "Missing.Contracts",
+                    "version": "1.0.0.0",
+                    "resolved_path": null,
+                    "status": "pending_external_assembly"
+                  },
+                  "status": "pending_external_assembly"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "pending": [
+        {
+          "kind": "external_pending",
+          "label": "外部程序集来源，待证",
+          "reason": "Generic parameter T constraint references a missing assembly",
+          "external_type": {
+            "table": "TypeRef",
+            "rid": 1,
+            "token": "0x01000001",
+            "kind": "typeref",
+            "name": "Missing.Contracts.ISecure",
+            "assembly": {
+              "rid": 1,
+              "token": "0x23000001",
+              "name": "Missing.Contracts",
+              "version": "1.0.0.0",
+              "resolved_path": null,
+              "status": "pending_external_assembly"
+            },
+            "status": "pending_external_assembly"
+          },
+          "assembly": {
+            "rid": 1,
+            "token": "0x23000001",
+            "name": "Missing.Contracts",
+            "version": "1.0.0.0",
+            "resolved_path": null,
+            "status": "pending_external_assembly"
+          },
+          "reliability": "pending_external_assembly",
+          "generic_parameter": {
+            "token": "0x2A000001",
+            "name": "T"
+          }
+        }
+      ],
+      "entry_name": "ReviewAudit.IntBox::Read",
+      "resolution": {
+        "status": "metadata_verified",
+        "method_rid": 3,
+        "method_token": "0x06000003",
+        "owner_typedef_rid": 4,
+        "owner_token": "0x02000004",
+        "owner_name": "ReviewAudit.Box`1",
+        "generic_arguments": [
+          {
+            "kind": "element_type",
+            "name": "int32"
+          }
+        ],
+        "constraints": [
+          {
+            "rid": 1,
+            "token": "0x2A000001",
+            "name": "T",
+            "owner_table": "TypeDef",
+            "owner_rid": 4,
+            "owner_token": "0x02000004",
+            "constraints": [
+              {
+                "table": "TypeRef",
+                "rid": 1,
+                "token": "0x01000001",
+                "kind": "typeref",
+                "name": "Missing.Contracts.ISecure",
+                "assembly": {
+                  "rid": 1,
+                  "token": "0x23000001",
+                  "name": "Missing.Contracts",
+                  "version": "1.0.0.0",
+                  "resolved_path": null,
+                  "status": "pending_external_assembly"
+                },
+                "status": "pending_external_assembly"
+              }
+            ]
+          }
+        ],
+        "generic_base_instance": null,
+        "trace": [
+          {
+            "step": "search_typedef",
+            "table": "TypeDef",
+            "rid": 5,
+            "token": "0x02000005",
+            "kind": "typedef",
+            "name": "ReviewAudit.IntBox",
+            "status": "metadata_verified"
+          },
+          {
+            "step": "extends",
+            "table": "TypeSpec",
+            "rid": 1,
+            "token": "0x1B000001",
+            "kind": "generic_instance",
+            "value_kind": "class",
+            "open_type": {
+              "table": "TypeDef",
+              "rid": 4,
+              "token": "0x02000004",
+              "kind": "typedef",
+              "name": "ReviewAudit.Box`1",
+              "status": "metadata_verified"
+            },
+            "arguments": [
+              {
+                "kind": "element_type",
+                "name": "int32"
+              }
+            ],
+            "name": "ReviewAudit.Box<int32>",
+            "status": "metadata_verified",
+            "signature_hex": "1512100108"
+          },
+          {
+            "step": "search_typedef",
+            "table": "TypeDef",
+            "rid": 4,
+            "token": "0x02000004",
+            "kind": "typedef",
+            "name": "ReviewAudit.Box`1",
+            "status": "metadata_verified"
+          }
+        ]
+      },
+      "primary_kind": "open_generic_definition",
+      "primary_label": "开放泛型定义上的声明",
+      "statements": [
+        "CONFIDENTIAL-REVIEW-016"
+      ],
+      "statement_match": true,
+      "status": "supported_with_pending_external_evidence",
+      "pending_assembly_names": [
+        "Missing.Contracts"
+      ]
+    },
+    {
+      "reference": "0x0A000002",
+      "entry_token": "0x0A000002",
+      "entry_kind": "MemberRef",
+      "member_name": "Write",
+      "member_ref": {
+        "token": "0x0A000002",
+        "name": "Write",
+        "parent": {
+          "table": "TypeDef",
+          "rid": 6,
+          "token": "0x02000006",
+          "kind": "typedef",
+          "name": "ReviewAudit.StringBox",
+          "status": "metadata_verified"
+        }
+      },
+      "sources": [
+        {
+          "kind": "instance_implementation",
+          "label": "闭合/实例实现上的声明",
+          "owner_table": "MethodDef",
+          "owner_rid": 4,
+          "owner_token": "0x06000004",
+          "owner_name": "ReviewAudit.StringBox::Write",
+          "reason": "CustomAttribute.Parent directly names the resolved MethodDef",
+          "custom_attributes": [
+            {
+              "rid": 2,
+              "token": "0x0C000002",
+              "owner_table": "MethodDef",
+              "owner_rid": 4,
+              "owner_token": "0x06000004",
+              "attribute_type": "ReviewAudit.ConfidentialAttribute",
+              "statement": "CONFIDENTIAL-REVIEW-016"
+            }
+          ],
+          "statements": [
+            "CONFIDENTIAL-REVIEW-016"
+          ],
+          "reliability": "metadata_verified",
+          "closed_generic_arguments": [
+            {
+              "kind": "element_type",
+              "name": "string"
+            }
+          ],
+          "generic_base_instance": {
+            "type_spec": {
+              "kind": "generic_instance",
+              "value_kind": "class",
+              "open_type": {
+                "table": "TypeDef",
+                "rid": 4,
+                "token": "0x02000004",
+                "kind": "typedef",
+                "name": "ReviewAudit.Box`1",
+                "status": "metadata_verified"
+              },
+              "arguments": [
+                {
+                  "kind": "element_type",
+                  "name": "string"
+                }
+              ],
+              "name": "ReviewAudit.Box<string>",
+              "status": "metadata_verified",
+              "signature_hex": "151210010e"
+            },
+            "open_typedef_rid": 4,
+            "open_type_name": "ReviewAudit.Box`1",
+            "arguments": [
+              {
+                "kind": "element_type",
+                "name": "string"
+              }
+            ],
+            "constraints": [
+              {
+                "rid": 1,
+                "token": "0x2A000001",
+                "name": "T",
+                "owner_table": "TypeDef",
+                "owner_rid": 4,
+                "owner_token": "0x02000004",
+                "constraints": [
+                  {
+                    "table": "TypeRef",
+                    "rid": 1,
+                    "token": "0x01000001",
+                    "kind": "typeref",
+                    "name": "Missing.Contracts.ISecure",
+                    "assembly": {
+                      "rid": 1,
+                      "token": "0x23000001",
+                      "name": "Missing.Contracts",
+                      "version": "1.0.0.0",
+                      "resolved_path": null,
+                      "status": "pending_external_assembly"
+                    },
+                    "status": "pending_external_assembly"
+                  }
+                ]
+              }
+            ]
+          },
+          "generic_constraints": [
+            {
+              "rid": 1,
+              "token": "0x2A000001",
+              "name": "T",
+              "owner_table": "TypeDef",
+              "owner_rid": 4,
+              "owner_token": "0x02000004",
+              "constraints": [
+                {
+                  "table": "TypeRef",
+                  "rid": 1,
+                  "token": "0x01000001",
+                  "kind": "typeref",
+                  "name": "Missing.Contracts.ISecure",
+                  "assembly": {
+                    "rid": 1,
+                    "token": "0x23000001",
+                    "name": "Missing.Contracts",
+                    "version": "1.0.0.0",
+                    "resolved_path": null,
+                    "status": "pending_external_assembly"
+                  },
+                  "status": "pending_external_assembly"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "pending": [
+        {
+          "kind": "external_pending",
+          "label": "外部程序集来源，待证",
+          "reason": "Generic parameter T constraint references a missing assembly",
+          "external_type": {
+            "table": "TypeRef",
+            "rid": 1,
+            "token": "0x01000001",
+            "kind": "typeref",
+            "name": "Missing.Contracts.ISecure",
+            "assembly": {
+              "rid": 1,
+              "token": "0x23000001",
+              "name": "Missing.Contracts",
+              "version": "1.0.0.0",
+              "resolved_path": null,
+              "status": "pending_external_assembly"
+            },
+            "status": "pending_external_assembly"
+          },
+          "assembly": {
+            "rid": 1,
+            "token": "0x23000001",
+            "name": "Missing.Contracts",
+            "version": "1.0.0.0",
+            "resolved_path": null,
+            "status": "pending_external_assembly"
+          },
+          "reliability": "pending_external_assembly",
+          "generic_parameter": {
+            "token": "0x2A000001",
+            "name": "T"
+          }
+        }
+      ],
+      "entry_name": "ReviewAudit.StringBox::Write",
+      "resolution": {
+        "status": "metadata_verified",
+        "method_rid": 4,
+        "method_token": "0x06000004",
+        "owner_typedef_rid": 6,
+        "owner_token": "0x02000006",
+        "owner_name": "ReviewAudit.StringBox",
+        "generic_arguments": [],
+        "constraints": [],
+        "generic_base_instance": {
+          "type_spec": {
+            "kind": "generic_instance",
+            "value_kind": "class",
+            "open_type": {
+              "table": "TypeDef",
+              "rid": 4,
+              "token": "0x02000004",
+              "kind": "typedef",
+              "name": "ReviewAudit.Box`1",
+              "status": "metadata_verified"
+            },
+            "arguments": [
+              {
+                "kind": "element_type",
+                "name": "string"
+              }
+            ],
+            "name": "ReviewAudit.Box<string>",
+            "status": "metadata_verified",
+            "signature_hex": "151210010e"
+          },
+          "open_typedef_rid": 4,
+          "open_type_name": "ReviewAudit.Box`1",
+          "arguments": [
+            {
+              "kind": "element_type",
+              "name": "string"
+            }
+          ],
+          "constraints": [
+            {
+              "rid": 1,
+              "token": "0x2A000001",
+              "name": "T",
+              "owner_table": "TypeDef",
+              "owner_rid": 4,
+              "owner_token": "0x02000004",
+              "constraints": [
+                {
+                  "table": "TypeRef",
+                  "rid": 1,
+                  "token": "0x01000001",
+                  "kind": "typeref",
+                  "name": "Missing.Contracts.ISecure",
+                  "assembly": {
+                    "rid": 1,
+                    "token": "0x23000001",
+                    "name": "Missing.Contracts",
+                    "version": "1.0.0.0",
+                    "resolved_path": null,
+                    "status": "pending_external_assembly"
+                  },
+                  "status": "pending_external_assembly"
+                }
+              ]
+            }
+          ]
+        },
+        "trace": [
+          {
+            "step": "search_typedef",
+            "table": "TypeDef",
+            "rid": 6,
+            "token": "0x02000006",
+            "kind": "typedef",
+            "name": "ReviewAudit.StringBox",
+            "status": "metadata_verified"
+          }
+        ]
+      },
+      "primary_kind": "instance_implementation",
+      "primary_label": "闭合/实例实现上的声明",
+      "statements": [
+        "CONFIDENTIAL-REVIEW-016"
+      ],
+      "statement_match": true,
+      "status": "supported_with_pending_external_evidence",
+      "pending_assembly_names": [
+        "Missing.Contracts"
+      ]
+    },
+    {
+      "reference": "0x06000005",
+      "entry_token": "0x06000005",
+      "entry_kind": "MethodDef",
+      "entry_name": "ReviewAudit.ExplicitEndpoint::ConfirmExplicit",
+      "sources": [
+        {
+          "kind": "explicit_interface_declaration",
+          "label": "显式接口映射指向的接口声明",
+          "owner_table": "MethodDef",
+          "owner_rid": 2,
+          "owner_token": "0x06000002",
+          "owner_name": "ReviewAudit.IConfidential::Confirm",
+          "reason": "MethodImpl.MethodDeclaration names the interface MethodDef",
+          "custom_attributes": [
+            {
+              "rid": 3,
+              "token": "0x0C000003",
+              "owner_table": "MethodDef",
+              "owner_rid": 2,
+              "owner_token": "0x06000002",
+              "attribute_type": "ReviewAudit.ConfidentialAttribute",
+              "statement": "CONFIDENTIAL-REVIEW-016"
+            }
+          ],
+          "statements": [
+            "CONFIDENTIAL-REVIEW-016"
+          ],
+          "reliability": "metadata_verified",
+          "method_impl": {
+            "rid": 1,
+            "token": "0x19000001",
+            "class_rid": 7,
+            "class_token": "0x02000007",
+            "body_table": "MethodDef",
+            "body_rid": 5,
+            "body_token": "0x06000005",
+            "declaration_table": "MethodDef",
+            "declaration_rid": 2,
+            "declaration_token": "0x06000002",
+            "declaration_description": {
+              "table": "MethodDef",
+              "rid": 2,
+              "token": "0x06000002",
+              "name": "ReviewAudit.IConfidential::Confirm",
+              "status": "metadata_verified"
+            }
+          },
+          "interface_impl": {
+            "rid": 1,
+            "token": "0x09000001",
+            "class_rid": 7,
+            "interface": {
+              "table": "TypeDef",
+              "rid": 3,
+              "token": "0x02000003",
+              "kind": "typedef",
+              "name": "ReviewAudit.IConfidential",
+              "status": "metadata_verified"
+            }
+          }
+        }
+      ],
+      "pending": [],
+      "owner_typedef_token": "0x02000007",
+      "method_impls": [
+        {
+          "rid": 1,
+          "token": "0x19000001",
+          "class_rid": 7,
+          "class_token": "0x02000007",
+          "body_table": "MethodDef",
+          "body_rid": 5,
+          "body_token": "0x06000005",
+          "declaration_table": "MethodDef",
+          "declaration_rid": 2,
+          "declaration_token": "0x06000002",
+          "declaration_description": {
+            "table": "MethodDef",
+            "rid": 2,
+            "token": "0x06000002",
+            "name": "ReviewAudit.IConfidential::Confirm",
+            "status": "metadata_verified"
+          }
+        }
+      ],
+      "generic_constraints": [],
+      "primary_kind": "explicit_interface_declaration",
+      "primary_label": "显式接口映射指向的接口声明",
+      "statements": [
+        "CONFIDENTIAL-REVIEW-016"
+      ],
+      "statement_match": true,
+      "status": "supported",
+      "pending_assembly_names": []
+    }
+  ]
+}

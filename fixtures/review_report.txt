@@ -1,0 +1,32 @@
+程序集: ReviewSample (/Users/bill/领域专项项目/state/agent-eval-55-20261127.DYfYWv/workspaces/ds20261126-agent-eval-pydef100-016/fixtures/ReviewSample.dll)
+保密声明标识: CONFIDENTIAL-REVIEW-016
+
+[1] ReviewAudit.IntBox::Read (0x0A000001)
+    状态: supported_with_pending_external_evidence
+    分类: 开放泛型定义上的声明
+    可依赖来源: 开放泛型定义上的声明 -> ReviewAudit.Box`1::Read 0x06000003
+      - 0x0C000001 ReviewAudit.ConfidentialAttribute Owner=MethodDef:3 statement=CONFIDENTIAL-REVIEW-016
+      闭合实例: int32
+      约束: T : Missing.Contracts.ISecure [pending_external_assembly]
+    待证: Generic parameter T constraint references a missing assembly -> Missing.Contracts 0x23000001
+
+[2] ReviewAudit.StringBox::Write (0x0A000002)
+    状态: supported_with_pending_external_evidence
+    分类: 闭合/实例实现上的声明
+    可依赖来源: 闭合/实例实现上的声明 -> ReviewAudit.StringBox::Write 0x06000004
+      - 0x0C000002 ReviewAudit.ConfidentialAttribute Owner=MethodDef:4 statement=CONFIDENTIAL-REVIEW-016
+      闭合实例: string
+      约束: T : Missing.Contracts.ISecure [pending_external_assembly]
+    待证: Generic parameter T constraint references a missing assembly -> Missing.Contracts 0x23000001
+
+[3] ReviewAudit.ExplicitEndpoint::ConfirmExplicit (0x06000005)
+    状态: supported
+    分类: 显式接口映射指向的接口声明
+    可依赖来源: 显式接口映射指向的接口声明 -> ReviewAudit.IConfidential::Confirm 0x06000002
+      - 0x0C000003 ReviewAudit.ConfidentialAttribute Owner=MethodDef:2 statement=CONFIDENTIAL-REVIEW-016
+      接口实现证据: 0x09000001
+      显式映射: 0x19000001
+
+外部程序集引用:
+  - Missing.Contracts 1.0.0.0 0x23000001 -> 未交接/未找到，保留待证
+  - 外部成员 0x0A000003 Missing.Contracts.ISecure::Mark 依赖 Missing.Contracts，不得据其推断属性
