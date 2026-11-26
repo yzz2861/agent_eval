@@ -124,6 +124,16 @@ class MachO(object):
     def __repr__(self):
         return "<MachO filename=%r>" % (self.filename,)
 
+    def audit_lc_notes(self, registry=None, **options):
+        """Return a read-only :mod:`macholib.note_audit` report."""
+        from .note_audit import audit_lc_notes
+
+        return audit_lc_notes(self.filename, registry=registry, **options)
+
+    def audit_notes(self, registry=None, **options):
+        """Alias for :meth:`audit_lc_notes`."""
+        return self.audit_lc_notes(registry=registry, **options)
+
     def load(self, fh):
         assert fh.tell() == 0
         header = struct.unpack(">I", fh.read(4))[0]
