@@ -13,6 +13,11 @@ class InvalidFile(ValueError):
     pass
 
 
+class ConflictingExceptionError(ValueError):
+    """Raised when two exception records share a binding key but disagree."""
+    pass
+
+
 class SecretNotFoundOnSpecifiedLineError(Exception):
     def __init__(self, line: int) -> None:
         super().__init__(
