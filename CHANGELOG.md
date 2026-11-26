@@ -8,6 +8,17 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* Added the `pip-audit-review` command for offline, dual-time historical
+  review. Snapshots record each advisory's effective and received times, the
+  deployment scope (including never-deployed placeholder packages) and the
+  dispositions produced under the rules in force at the time. A historical
+  cross-section can be recomputed in both an "as known then"
+  (`--view as-of-known`) and a "looking back today" (`--view today`)
+  perspective, and `trace` attributes any change in a daily report's counts to
+  the exact snapshot that caused it.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash

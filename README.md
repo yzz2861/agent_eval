@@ -267,6 +267,49 @@ an audit (or fix) step is actually performed.
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
 
+### Offline dual-time review
+
+Daily reports sometimes need to answer two different questions about the same
+historical cross-section: what the team *could have known* when the report was
+written, and what the newest data shows when *looking back today*. The
+`pip-audit-review` command answers both without any network access, using
+append-only snapshot files.
+
+Each snapshot records:
+
+* every advisory with both its bulletin `effective_at` and the operational
+  `received_at`, so a bulletin that arrived late can't be folded into an
+  earlier "known risk" total;
+* the deployment scope, including `"deployed": false` placeholder packages
+  that are tracked but were never installed (and so never contribute to a
+  count);
+* the disposition produced under the snapshot's `rule_version`, preserving the
+  decision a historical report actually shipped.
+
+Create a snapshot from a local JSON document, then recompute a cross-section
+in either perspective:
+
+```console
+# Append a snapshot under ./.pip-audit-review
+pip-audit-review snapshot ./inputs/2026-11-01.json
+
+# What could actually have been known at the report cutoff?
+pip-audit-review review --cutoff 2026-11-02T00:00:00Z --view as-of-known
+
+# What does the newest snapshot reveal when looking back at the same cutoff?
+pip-audit-review review --cutoff 2026-11-02T00:00:00Z --view today
+```
+
+A corrected or withdrawn advisory is captured as a *new* snapshot; the original
+file is never rewritten. The `trace` subcommand recomputes one cutoff against
+every snapshot and names the precise snapshot (and advisory) at which a report's
+count changed, including whether the cause was a late receipt or a later
+correction:
+
+```console
+pip-audit-review trace --cutoff 2026-11-02T00:00:00Z --view today
+```
+
 ## Examples
 
 Audit dependencies for the current Python environment:
