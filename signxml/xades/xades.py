@@ -25,7 +25,7 @@ import datetime
 import os
 import secrets
 from base64 import b64decode, b64encode
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -90,8 +90,79 @@ class XAdESVerifyResult(VerifyResult):
     A subclass of :class:`signxml.VerifyResult`. See VerifyResult for attribute semantics not covered here.
     """
 
-    signed_properties: _Element
+    signed_properties: _Element | None = None
     "The XAdES SignedProperties element that was verified as signed by the signature"
+
+    signature_policy_identifier: str | None = None
+    "The signature policy identifier (often carrying a policy version) declared in the signature"
+
+    signature_policy_description: str | None = None
+    "The description of the declared signature policy"
+
+    signature_policy_digest_algorithm: DigestAlgorithm | None = None
+    "The digest algorithm used by the declared signature policy hash"
+
+    signature_policy_digest: str | None = None
+    "The base64-encoded digest value of the declared signature policy"
+
+    signing_certificate_digest: str | None = None
+    "The base64-encoded digest of the signing certificate declared in the signed properties"
+
+    claimed_roles: tuple[str, ...] = ()
+    "The roles claimed by the signer in the signed properties"
+
+    @property
+    def policy_identifier(self) -> str | None:
+        """Alias for :attr:`signature_policy_identifier`."""
+
+        return self.signature_policy_identifier
+
+    @property
+    def policy_version(self) -> str | None:
+        """The declared signature policy version/identifier."""
+
+        return self.signature_policy_identifier or self.clause_version
+
+    @property
+    def signer_roles(self) -> tuple[str, ...]:
+        """Alias for :attr:`claimed_roles`."""
+
+        return self.claimed_roles or self.roles
+
+    @property
+    def signing_certificate_digest_bytes(self) -> bytes | None:
+        """The decoded signing certificate digest, when present."""
+
+        if self.signing_certificate_digest is None:
+            return None
+        return b64decode(self.signing_certificate_digest)
+
+    @property
+    def signature_policy_digest_bytes(self) -> bytes | None:
+        """The decoded signature policy digest, when present."""
+
+        if self.signature_policy_digest is None:
+            return None
+        return b64decode(self.signature_policy_digest)
+
+    @property
+    def policy_digest(self) -> str | None:
+        """Alias for :attr:`signature_policy_digest`."""
+
+        return self.signature_policy_digest
+
+    @property
+    def signature_policy(self) -> XAdESSignaturePolicy | None:
+        """The declared signature policy as an :class:`XAdESSignaturePolicy` object."""
+
+        if self.signature_policy_identifier is None or self.signature_policy_digest is None:
+            return None
+        return XAdESSignaturePolicy(
+            Identifier=self.signature_policy_identifier,
+            Description=self.signature_policy_description or "",
+            DigestMethod=self.signature_policy_digest_algorithm or DigestAlgorithm.SHA256,
+            DigestValue=self.signature_policy_digest,
+        )
 
 
 class XAdESProcessor(XMLSignatureProcessor):
@@ -426,6 +497,83 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
             )
         return self._find(verify_result.signed_xml, "xades:SignedSignatureProperties")
 
+    def _get_signed_properties_metadata(self, signed_properties) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "signature_policy_identifier": None,
+            "signature_policy_description": None,
+            "signature_policy_digest_algorithm": None,
+            "signature_policy_digest": None,
+            "signing_certificate_digest": None,
+            "claimed_roles": (),
+        }
+        if signed_properties is None:
+            return metadata
+
+        policy_id = signed_properties.find(
+            "xades:SignaturePolicyIdentifier/xades:SignaturePolicyId", namespaces=namespaces
+        )
+        if policy_id is not None:
+            sig_policy_id = policy_id.find("xades:SigPolicyId", namespaces=namespaces)
+            if sig_policy_id is not None:
+                identifier = sig_policy_id.find("xades:Identifier", namespaces=namespaces)
+                description = sig_policy_id.find("xades:Description", namespaces=namespaces)
+                metadata["signature_policy_identifier"] = identifier.text if identifier is not None else None
+                metadata["signature_policy_description"] = description.text if description is not None else None
+            sig_policy_hash = policy_id.find("xades:SigPolicyHash", namespaces=namespaces)
+            if sig_policy_hash is not None:
+                digest_method = sig_policy_hash.find("ds:DigestMethod", namespaces=namespaces)
+                digest_value = sig_policy_hash.find("ds:DigestValue", namespaces=namespaces)
+                if digest_method is not None:
+                    metadata["signature_policy_digest_algorithm"] = DigestAlgorithm(digest_method.get("Algorithm"))
+                if digest_value is not None:
+                    metadata["signature_policy_digest"] = digest_value.text
+
+        for signing_certificate in (
+            signed_properties.find("xades:SigningCertificate", namespaces=namespaces),
+            signed_properties.find("xades:SigningCertificateV2", namespaces=namespaces),
+        ):
+            if signing_certificate is None:
+                continue
+            cert = signing_certificate.find("xades:Cert", namespaces=namespaces)
+            if cert is None:
+                continue
+            cert_digest = cert.find("xades:CertDigest", namespaces=namespaces)
+            if cert_digest is None:
+                continue
+            digest_value = cert_digest.find("ds:DigestValue", namespaces=namespaces)
+            if digest_value is not None:
+                metadata["signing_certificate_digest"] = digest_value.text
+                break
+
+        roles = []
+        for role in signed_properties.findall(
+            "xades:SignerRole/xades:ClaimedRoles/xades:ClaimedRole", namespaces=namespaces
+        ):
+            if role.text:
+                roles.append(role.text)
+        for role in signed_properties.findall(
+            "xades:SignerRoleV2/xades:ClaimedRoles/xades:ClaimedRole", namespaces=namespaces
+        ):
+            if role.text:
+                roles.append(role.text)
+        metadata["claimed_roles"] = tuple(roles)
+        return metadata
+
+    def _make_xades_verify_result(self, verify_result: VerifyResult, signed_properties) -> XAdESVerifyResult:
+        metadata = self._get_signed_properties_metadata(signed_properties)
+        base_fields = {field.name: getattr(verify_result, field.name) for field in dataclass_fields(VerifyResult)}
+        roles = metadata["claimed_roles"]
+        if roles:
+            base_fields["roles"] = roles
+            base_fields["responsibility"] = roles[0]
+        if metadata["signature_policy_identifier"] is not None:
+            base_fields["clause_version"] = metadata["signature_policy_identifier"]
+        return XAdESVerifyResult(
+            **base_fields,
+            signed_properties=signed_properties,
+            **metadata,
+        )
+
     def verify(
         self,
         data,
@@ -460,13 +608,20 @@ class XAdESVerifier(XAdESProcessor, XMLVerifier):
             if verify_result.signed_xml is None:
                 continue
             if verify_result.signed_xml.tag == xades_tag("SignedProperties"):
-                verify_results[i] = XAdESVerifyResult(
-                    signed_data=verify_result.signed_data,
-                    signed_xml=verify_result.signed_xml,
-                    signature_xml=verify_result.signature_xml,
-                    signature_key=verify_result.signature_key,
-                    signed_properties=self._verify_signed_properties(verify_result),
-                )
+                signed_properties = self._verify_signed_properties(verify_result)
+                metadata = self._get_signed_properties_metadata(signed_properties)
+                for j, candidate in enumerate(verify_results):
+                    if candidate.signature_xml is not verify_result.signature_xml:
+                        continue
+                    updates: dict[str, Any] = {}
+                    if metadata["claimed_roles"]:
+                        updates["roles"] = metadata["claimed_roles"]
+                        updates["responsibility"] = metadata["claimed_roles"][0]
+                    if metadata["signature_policy_identifier"] is not None:
+                        updates["clause_version"] = metadata["signature_policy_identifier"]
+                    if updates:
+                        verify_results[j] = replace(candidate, **updates)
+                verify_results[i] = self._make_xades_verify_result(verify_results[i], signed_properties)
                 break
         else:
             raise InvalidInput("Expected to find a xades:SignedProperties element")

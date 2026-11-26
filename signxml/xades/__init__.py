@@ -24,6 +24,7 @@ In SignXML, use :class:`signxml.xades.XAdESSigner` and :class:`signxml.xades.XAd
 signatures, respectively. See `XAdES Signatures <#xades-signatures>`_ for examples.
 """
 
+from ..receipts import CombinedVerification, VerifiedAttachment, combine_verifications
 from .xades import (
     XAdESDataObjectFormat,
     XAdESSignatureConfiguration,

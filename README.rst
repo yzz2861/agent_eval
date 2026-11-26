@@ -240,6 +240,35 @@ Similarly, whitespace in the signed document is significant for XML canonicaliza
 pretty-print the XML after generating the signature, since this can unfortunately render the signature invalid.
 
 
+Combining archived verification results
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Verified results can be archived and combined later without the original XML document or any cryptographic
+operations. Each result retains the reference URI, signed digest, signature method, and signer identity. The
+:func:`signxml.combine_verifications` helper indexes attachments by archive name and digest, so reordering results or
+leaving some attachments out does not change lookups for the attachments that are present:
+
+.. code-block:: python
+
+    from signxml import AttachmentDeclaration, XMLVerifier, combine_verifications
+
+    results = XMLVerifier().verify(signed_doc, expect_references=True, ...)
+    combined = combine_verifications(
+        results,
+        expected=[
+            AttachmentDeclaration(archive_name="invoice.xml"),
+            AttachmentDeclaration(archive_name="receipt.xml"),
+        ],
+    )
+    combined.get("invoice.xml")  # a VerifiedAttachment, or None if it was not verified
+    combined.missing             # declarations with no verified attachment
+    combined.independent_sources # distinct signing sources in the result set
+    combined.minimal_sources     # the smallest set of sources covering the group
+
+The same information is available directly on :class:`signxml.VerifyResult` through its ``archive_name``,
+``digest_value``, ``clause_version``, ``responsibility``, and ``verified_attachment`` attributes. XAdES results also
+expose their declared signature policy and claimed signer roles.
+
+
 XML parsing security and compatibility with ``xml.etree.ElementTree``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 SignXML uses the `lxml <https://github.com/lxml/lxml>`_ ElementTree library, not the

@@ -24,6 +24,14 @@ from .algorithms import (
 )
 from .exceptions import InvalidCertificate, InvalidDigest, InvalidInput, InvalidSignature, SignXMLException
 from .processor import XMLSignatureProcessor
+from .receipts import (  # noqa: F401
+    AttachmentDeclaration,
+    CombinedVerification,
+    VerifiedAttachment,
+    archive_name_from_uri,
+    combine_verifications,
+    source_id as _verification_source_id,
+)
 from .util import (
     X509CertChainVerifier,
     _remove_sig,
@@ -131,6 +139,144 @@ class VerifyResult:
 
     signature_key: bytes
     "The cryptographic key that was used to verify the signature, in PEM format (for asymmetric keys) or raw secret bytes (for HMAC keys)"
+
+    reference_uri: str | None = None
+    "The reference URI associated with this result, if the reference had one"
+
+    reference_id: str | None = None
+    "The ``Id`` attribute of the reference associated with this result"
+
+    reference_type: str | None = None
+    "The ``Type`` attribute of the reference associated with this result"
+
+    digest_algorithm: DigestAlgorithm | None = None
+    "The digest algorithm used to verify the referenced data"
+
+    digest_value: bytes | None = None
+    "The verified digest value of the referenced data"
+
+    signature_method: SignatureMethod | None = None
+    "The signature method used by the signature containing this reference"
+
+    clause_version: str | None = None
+    "A stable label for the signature method or signature policy that applies to this reference"
+
+    responsibility: str | None = None
+    "The primary signer responsibility/role associated with this result, when declared"
+
+    roles: tuple[str, ...] = ()
+    "The signer responsibilities/roles declared for this result"
+
+    signing_certificate: x509.Certificate | None = None
+    "The verified X.509 signing certificate, when the signature is certificate based"
+
+    reference_xml: etree._Element | None = None
+    "The reference element corresponding to this result"
+
+    @property
+    def archive_name(self) -> str | None:
+        """The ordinary archive/file name of the reference URI."""
+
+        return archive_name_from_uri(self.reference_uri)
+
+    @property
+    def name(self) -> str | None:
+        """Alias for :attr:`archive_name`."""
+
+        return self.archive_name
+
+    @property
+    def archive_path(self) -> str | None:
+        """The exact reference URI associated with this result."""
+
+        return self.reference_uri
+
+    @property
+    def digest(self) -> bytes | None:
+        """Alias for :attr:`digest_value`."""
+
+        return self.digest_value
+
+    @property
+    def signed_digest(self) -> bytes | None:
+        """Alias for :attr:`digest_value`."""
+
+        return self.digest_value
+
+    @property
+    def digest_hex(self) -> str | None:
+        """The signed digest as lowercase hexadecimal."""
+
+        return self.digest_value.hex() if self.digest_value is not None else None
+
+    @property
+    def policy_version(self) -> str | None:
+        """Alias for :attr:`clause_version`."""
+
+        return self.clause_version
+
+    @property
+    def role(self) -> str | None:
+        """Alias for :attr:`responsibility`."""
+
+        return self.responsibility
+
+    @property
+    def signer_role(self) -> str | None:
+        """Alias for :attr:`responsibility`."""
+
+        return self.responsibility
+
+    @property
+    def signature_algorithm(self) -> SignatureMethod | None:
+        """Alias for :attr:`signature_method`."""
+
+        return self.signature_method
+
+    @property
+    def source_id(self) -> str:
+        """A stable identifier for the independent signing source."""
+
+        return _verification_source_id(self)
+
+    @property
+    def verified_attachment(self) -> VerifiedAttachment:
+        """Return this result as an offline :class:`signxml.receipts.VerifiedAttachment`."""
+
+        return VerifiedAttachment.from_result(self)
+
+    def to_attachment(self) -> VerifiedAttachment:
+        """Alias for :attr:`verified_attachment`."""
+
+        return self.verified_attachment
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable archival record for this result."""
+
+        return self.verified_attachment.to_dict()
+
+    @property
+    def declaration(self):
+        """Return the declaration reconstructed from this result."""
+
+        return self.verified_attachment.declaration
+
+    def combine(self, *others, **kwargs) -> CombinedVerification:
+        """Combine this result with other already-verified results offline."""
+
+        return combine_verifications(self, *others, **kwargs)
+
+    @property
+    def association(self) -> dict[str, object]:
+        """The archive name, digest, clause version, and responsibility together."""
+
+        return self.declaration.association
+
+    @property
+    def association_key(self) -> tuple[str | None, bytes | None, str | None, str | None]:
+        """A tuple form of :attr:`association`."""
+
+        return self.declaration.association_key
 
 
 class XMLVerifier(XMLSignatureProcessor):
@@ -558,6 +704,7 @@ class XMLVerifier(XMLSignatureProcessor):
             signed_info, algorithm=c14n_algorithm, inclusive_ns_prefixes=inclusive_ns_prefixes
         )
 
+        signing_cert = None
         if x509_data is not None or self.config.require_x509:
             if self.x509_cert is None:
                 if x509_data is None:
@@ -661,7 +808,15 @@ class XMLVerifier(XMLSignatureProcessor):
             root_to_verify = self._fromstring(self._tostring(root)) if len(references) > 1 else root
             verify_results.append(
                 self._verify_reference(
-                    reference, idx, root_to_verify, uri_resolver, c14n_algorithm, signature, key_used
+                    reference,
+                    idx,
+                    root_to_verify,
+                    uri_resolver,
+                    c14n_algorithm,
+                    signature,
+                    key_used,
+                    signature_alg=signature_alg,
+                    signing_certificate=signing_cert,
                 )
             )
 
@@ -684,6 +839,9 @@ class XMLVerifier(XMLSignatureProcessor):
         c14n_algorithm,
         signature,
         signature_key_used,
+        *,
+        signature_alg=None,
+        signing_certificate=None,
     ):
         signature_ref = self._get_signature(root)
         transforms = self._find(reference, "Transforms", require=False)
@@ -703,7 +861,8 @@ class XMLVerifier(XMLSignatureProcessor):
         digest_alg = DigestAlgorithm(digest_method_alg_name)
         self.check_digest_alg_expected(digest_alg)
 
-        if b64decode(digest_value.text) != self._get_digest(payload_c14n, digest_alg):
+        decoded_digest_value = b64decode(digest_value.text)
+        if decoded_digest_value != self._get_digest(payload_c14n, digest_alg):
             raise InvalidDigest(f"Digest mismatch for reference {index} ({reference.get('URI')})")
 
         # We return the signed XML (and only that) to ensure no access to unsigned data happens.
@@ -720,7 +879,21 @@ class XMLVerifier(XMLSignatureProcessor):
             signature_key = signature_key_used
         else:
             signature_key = signature_key_used.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        return VerifyResult(payload_c14n, payload_c14n_xml, signature, signature_key=signature_key)
+        return VerifyResult(
+            payload_c14n,
+            payload_c14n_xml,
+            signature,
+            signature_key=signature_key,
+            reference_uri=reference.get("URI"),
+            reference_id=reference.get("Id"),
+            reference_type=reference.get("Type"),
+            digest_algorithm=digest_alg,
+            digest_value=decoded_digest_value,
+            signature_method=signature_alg,
+            clause_version=signature_alg.name if signature_alg is not None else None,
+            signing_certificate=signing_certificate,
+            reference_xml=reference,
+        )
 
     def validate_schema(self, signature):
         last_exception = None
