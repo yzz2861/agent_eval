@@ -41,6 +41,29 @@ SigmaMatch
    :undoc-members:
    :show-inheritance:
 
+Association Merge Layer
+-----------------------
+
+.. autoclass:: sigma.matching.AssociationMergeLayer
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.AssociationCondition
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.AssociationAlert
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.AssociationReplayResult
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 SigmaRuleMatcher
 ----------------
 

@@ -179,6 +179,47 @@ Each :class:`~sigma.matching.SigmaMatch` exposes:
         if m.group_values:
             print(f"Group  : {m.group_values}")
 
+Merging Matches into Alert Cards
+--------------------------------
+
+Use :class:`~sigma.matching.AssociationMergeLayer` when several local rule matches belong on one
+alert card but analysts still need the exact facts that proved each downstream confirmation.
+The layer is an explicit post-processor for :class:`~sigma.matching.SigmaMatch` objects; it does
+not infer a condition from every rule in the collection.
+
+Each :class:`~sigma.matching.AssociationCondition` lists rule names in causal order and the
+event fields that identify the association group. A condition is satisfied only when those rules
+have facts in non-decreasing timestamp order. The resulting
+:class:`~sigma.matching.AssociationAlert` keeps one fact per required rule and exposes the shared,
+de-duplicated event subset as ``minimal_events``.
+
+.. code-block:: python
+
+    from sigma.matching import AssociationCondition, AssociationMergeLayer
+
+    layer = AssociationMergeLayer(
+        [
+            AssociationCondition(
+                name="access_confirmation",
+                rule_names=("login_rule", "pivot_rule", "access_rule"),
+                group_by=("user",),
+            ),
+            AssociationCondition(
+                name="export_confirmation",
+                rule_names=("login_rule", "pivot_rule", "export_rule"),
+                group_by=("user",),
+            ),
+        ]
+    )
+
+    for match in matcher.bulk_match(events):
+        layer.receive_match(match)
+
+The replay methods do not mutate the layer. ``replay_fact_revocation`` removes one rule fact and
+rebuilds every affected condition, while ``replay_alert_revocation`` removes the minimal facts
+behind one parent alert. For a rule replacement, pass the replacement rule's local matches so the
+replay can prove the new causal chain instead of relabeling the old rule's facts.
+
 Using as a Context Manager
 --------------------------
 
