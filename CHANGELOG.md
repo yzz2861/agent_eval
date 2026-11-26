@@ -8,6 +8,16 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* Offline audit results can now be reconciled against dispute review records
+  (`pip_audit._dispute`): when a vendor disputes a finding (for example,
+  claiming that an advisory only covers a different distribution source), the
+  dispute is reviewed along independent version, distribution-source evidence,
+  and publisher statement dimensions. A disputed finding leaves the pending
+  queue only on conclusive distribution-source scope evidence; unresolved
+  disputes retain both the risk display and the prior first-line sign-off
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
