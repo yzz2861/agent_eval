@@ -1,0 +1,12 @@
+{
+  "source": "night-log.partial.evtx",
+  "file_order": [
+    "door-01",
+    "backup",
+    "printer",
+    "door-02",
+    "batch",
+    "usb",
+    "stop"
+  ]
+}

@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# ruff: noqa: F401,F403,F405
 #    This file is part of python-evtx.
 #
 #   Copyright 2012, 2013 Willi Ballenthin <william.ballenthin@mandiant.com>
@@ -110,6 +111,27 @@ class Evtx(object):
         for chunk in self.chunks():
             for record in chunk.records():
                 yield record
+
+    @ensure_contexted
+    def evidence_items(self):
+        """Yield alignment evidence records in chunk/file iteration order."""
+        from .alignment import evidence_from_evtx_record
+
+        for chunk_index, chunk in enumerate(self.chunks()):
+            for file_order, record in enumerate(chunk.records()):
+                yield evidence_from_evtx_record(
+                    record,
+                    source=self._filename,
+                    chunk_index=chunk_index,
+                    file_order=file_order,
+                )
+
+    @ensure_contexted
+    def align_evidence(self, markers=None, **kwargs):
+        """Align parsed EVTX records with optional shift/handoff markers."""
+        aligner = EvidenceAligner(markers=markers, **kwargs)
+        aligner.add_evidence(list(self.evidence_items()))
+        return aligner.align()
 
     @ensure_contexted
     def get_record(self, record_num):
@@ -260,6 +282,20 @@ class FileHeader(Block):
                 if record.record_num() == record_num:
                     return record
         return None
+
+    def align_evidence(self, markers=None, **kwargs):
+        """Align all records in this file header using evidence constraints."""
+        aligner = EvidenceAligner(markers=markers, **kwargs)
+        for chunk_index, chunk in enumerate(self.chunks()):
+            for file_order, record in enumerate(chunk.records()):
+                aligner.add_evidence(
+                    evidence_from_evtx_record(
+                        record,
+                        chunk_index=chunk_index,
+                        file_order=file_order,
+                    )
+                )
+        return aligner.align()
 
 
 class Template(object):
@@ -445,6 +481,19 @@ class ChunkHeader(Block):
             except InvalidRecordException:
                 return
 
+    def align_evidence(self, markers=None, chunk_index=0, **kwargs):
+        """Align surviving records in this chunk using evidence constraints."""
+        aligner = EvidenceAligner(markers=markers, **kwargs)
+        for file_order, record in enumerate(self.records()):
+            aligner.add_evidence(
+                evidence_from_evtx_record(
+                    record,
+                    chunk_index=chunk_index,
+                    file_order=file_order,
+                )
+            )
+        return aligner.align()
+
 
 class Record(Block):
     def __init__(self, buf, offset, chunk):
@@ -513,3 +562,6 @@ class Record(Block):
         import lxml.etree
 
         return lxml.etree.fromstring((e_views.XML_HEADER + self.xml()).encode("utf-8"))
+
+
+from .alignment import *  # noqa: E402,F401,F403

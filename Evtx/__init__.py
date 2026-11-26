@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F403,F405
 #    This file is part of python-evtx.
 #
 #   Copyright 2012 Willi Ballenthin <william.ballenthin@mandiant.com>
@@ -19,4 +20,14 @@ __all__ = [
     "BinaryParser",
     "Nodes",
     "Views",
+    "alignment",
+    "evidence_alignment",
+    "evidence_aligner",
+    "handoff_alignment",
+    "align",
 ]
+
+from .alignment import *  # noqa: F401,F403,E402
+from .alignment import __all__ as _alignment_all  # noqa: E402
+
+__all__ = __all__ + _alignment_all

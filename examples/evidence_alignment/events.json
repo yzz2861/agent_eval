@@ -1,0 +1,12 @@
+{
+  "source": "night-log.partial.evtx",
+  "events": [
+    {"id": "door-01", "label": "badge at outer door", "local_time": "01:05"},
+    {"id": "backup", "label": "backup snapshot started", "local_time": "01:12"},
+    {"id": "printer", "label": "printer jam (conflicting exhibit)", "local_time": "01:25"},
+    {"id": "door-02", "label": "server-room door opened", "local_time": "01:33"},
+    {"id": "batch", "label": "batch checkpoint, first clock pass", "local_time": "01:44"},
+    {"id": "usb", "label": "USB mount, repeated clock hour", "local_time": "01:17"},
+    {"id": "stop", "label": "service stopped, second clock pass", "local_time": "01:48"}
+  ]
+}

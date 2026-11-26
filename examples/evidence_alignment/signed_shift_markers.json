@@ -1,0 +1,26 @@
+{
+  "markers": [
+    {
+      "id": "signed-handoff",
+      "kind": "handoff",
+      "signed": true,
+      "label": "signed night-shift handover note, local 01:40",
+      "local_time": "2026-11-01T01:40:00",
+      "timezone_name": "America/New_York",
+      "outgoing_shift": "night-shift",
+      "incoming_shift": "day-shift",
+      "candidate_anchors": [
+        {
+          "name": "fold-0/EDT",
+          "after": ["door-02"],
+          "before": ["batch"]
+        },
+        {
+          "name": "fold-1/EST",
+          "after": ["usb"],
+          "before": ["stop"]
+        }
+      ]
+    }
+  ]
+}
