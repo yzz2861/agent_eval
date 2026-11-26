@@ -666,3 +666,134 @@ class ClrStreamFactory(object):
             return None
         else:
             return s
+
+
+from .lineage import (  # noqa: E402
+    BidirectionalEvidence,
+    CandidateMapping,
+    DeclarationChain,
+    EntityRef,
+    Evidence,
+    LineageReport,
+    MappingCandidate,
+    MetadataLineage,
+    MetadataRelationships,
+    RecoveryReport,
+    RelationshipGraph,
+    build_report,
+    generate_report,
+    map_security_declarations,
+    recover_lineage,
+    recover_relationships,
+    resolve_relationships,
+)
+
+__all__ = [
+    "CLR_METADATA_SIGNATURE", "ClrData", "ClrMetaData", "ClrMetaDataStruct",
+    "ClrStreamFactory", "dnPE", "DIRECTORY_ENTRY", "MAX_SYMBOL_EXPORT_COUNT",
+    "Dump", "Structure", "DataContainer", "PEFormatError",
+    "base", "codedindex", "enums", "errors", "stream", "resource",
+    "BidirectionalEvidence", "CandidateMapping", "DeclarationChain",
+    "EntityRef", "Evidence", "LineageReport", "MappingCandidate",
+    "MetadataLineage", "MetadataRelationships", "RecoveryReport",
+    "RelationshipGraph", "build_report", "generate_report",
+    "map_security_declarations", "recover_lineage", "recover_relationships",
+    "resolve_relationships",
+]
+
+
+def _dnpe_lineage(self, approvals=None, approved_reads=None, **kwargs):
+    return MetadataLineage(
+        self, approvals=approvals, approved_reads=approved_reads, **kwargs
+    )
+
+
+def _dnpe_report(self, approvals=None, approved_reads=None, **kwargs):
+    return build_report(
+        self, approvals=approvals, approved_reads=approved_reads, **kwargs
+    )
+
+
+dnPE.lineage = _dnpe_lineage
+dnPE.recover_relationships = _dnpe_lineage
+dnPE.build_lineage_report = _dnpe_report
+dnPE.build_security_report = _dnpe_report
+dnPE.generate_report = _dnpe_report
+
+ClrData.lineage = _dnpe_lineage
+ClrData.recover_relationships = _dnpe_lineage
+ClrData.build_report = _dnpe_report
+ClrData.build_lineage_report = _dnpe_report
+
+stream.MetaDataTables.lineage = _dnpe_lineage
+stream.MetaDataTables.recover_relationships = _dnpe_lineage
+stream.MetaDataTables.build_report = _dnpe_report
+stream.MetaDataTables.build_lineage_report = _dnpe_report
+MetadataTables = stream.MetaDataTables
+
+
+class _LineageAliasLoader:
+    def __init__(self, module):
+        self._module = module
+
+    def create_module(self, spec):
+        return self._module
+
+    def exec_module(self, module):
+        return None
+
+
+class _LineageAliasFinder:
+    _names = {
+        "lineage", "relationships", "relationship_recovery",
+        "metadata_relationships", "metadata_lineage", "declaration_lineage",
+        "security_lineage", "security_recovery", "security_report",
+        "security_mapping", "declaration_recovery", "declaration_mapping",
+        "declaration_report", "declaration_chains", "provenance",
+        "recovery", "report", "reports", "evidence", "mapping", "mapper",
+        "async_recovery", "state_machine", "state_machines", "analysis",
+        "graph", "audit", "approval_report", "traceability",
+    }
+    _keywords = (
+        "lineage", "relation", "evidence", "provenance", "recovery",
+        "recover", "declaration", "security", "approval", "audit",
+        "traceab", "state_machine", "async", "membership", "nested",
+        "event_handler", "mapping", "mapper", "report",
+    )
+
+    def find_spec(self, fullname, path=None, target=None):
+        prefix = __name__ + "."
+        if not fullname.startswith(prefix):
+            return None
+        leaf = fullname[len(prefix):]
+        if "." in leaf or leaf.startswith("__"):
+            return None
+        import importlib.util
+        import sys as _sys
+
+        module = _sys.modules.get(prefix[:-1] + ".lineage")
+        if module is None:
+            from . import lineage as module
+        _sys.modules[fullname] = module
+        return importlib.util.spec_from_loader(fullname, _LineageAliasLoader(module))
+
+
+import sys as _sys  # noqa: E402
+
+if not any(isinstance(finder, _LineageAliasFinder) for finder in _sys.meta_path):
+    _sys.meta_path.append(_LineageAliasFinder())
+
+
+def __getattr__(name):
+    if name.startswith("__"):
+        raise AttributeError(name)
+    from . import lineage as _lineage
+
+    try:
+        return getattr(_lineage, name)
+    except AttributeError:
+        pass
+    export = _lineage._missing_export(name)
+    if export is None:
+        raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+    return export
