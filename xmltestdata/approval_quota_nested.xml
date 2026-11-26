@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<controlledApproval job-id="JOB-QUOTA-039" total-quota="100">
+  <businessLayer>
+    <case reference="offline-normal-nested-fixture"/>
+    <declaration kind="quota-policy" version="1">
+      <parentJob id="JOB-QUOTA-039" quota="100" fair-reservation="true">
+        <acceptedSubtasks>
+          <subtask id="subtask-review" quota="25" weight="1"/>
+          <subtask id="subtask-verify" quota="25" weight="1"/>
+          <subtask id="subtask-release" quota="25" weight="1"/>
+          <subtask id="subtask-archive" quota="25" weight="1"/>
+        </acceptedSubtasks>
+      </parentJob>
+    </declaration>
+  </businessLayer>
+</controlledApproval>
