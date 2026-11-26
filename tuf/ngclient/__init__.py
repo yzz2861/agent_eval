@@ -6,6 +6,14 @@
 from tuf.api.metadata import TargetFile
 from tuf.ngclient.config import UpdaterConfig
 from tuf.ngclient.fetcher import FetcherInterface
+from tuf.ngclient.retention import (
+    InstallState,
+    RetentionPlan,
+    RetentionPlanner,
+    explain_occupancy,
+    plan_offline_retention,
+    plan_retention,
+)
 from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
@@ -13,6 +21,12 @@ __all__ = [  # noqa: PLE0604
     FetcherInterface.__name__,
     Urllib3Fetcher.__name__,
     TargetFile.__name__,
+    "InstallState",
+    "RetentionPlan",
+    "RetentionPlanner",
     Updater.__name__,
     UpdaterConfig.__name__,
+    "explain_occupancy",
+    "plan_offline_retention",
+    "plan_retention",
 ]

@@ -60,7 +60,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib import parse
 
 from tuf.api import exceptions
@@ -68,9 +68,11 @@ from tuf.api.metadata import Root, Snapshot, TargetFile, Targets, Timestamp
 from tuf.ngclient._internal.trusted_metadata_set import TrustedMetadataSet
 from tuf.ngclient.config import EnvelopeType, UpdaterConfig
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
+from tuf.retention import rehearse_directory
 
 if TYPE_CHECKING:
     from tuf.ngclient.fetcher import FetcherInterface
+    from tuf.retention import RetentionPlan
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +307,27 @@ class Updater:
 
         logger.debug("Downloaded target %s", targetinfo.path)
         return filepath
+
+    def plan_retention(self, **kwargs: Any) -> RetentionPlan:  # noqa: ANN401
+        """Compute an offline, non-mutating cache retention plan.
+
+        The plan scans the configured metadata and target directories and
+        pins target hashes referenced by this updater's trusted metadata set.
+        It never performs network I/O or deletes files.
+        """
+        return rehearse_directory(
+            metadata_dir=self._dir,
+            target_dir=self.target_dir,
+            trusted_metadata=self._trusted_set,
+            **kwargs,
+        )
+
+    def preview_retention(
+        self,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> RetentionPlan:
+        """Alias for :meth:`plan_retention`."""
+        return self.plan_retention(**kwargs)
 
     def _download_metadata(
         self, rolename: str, length: int, version: int | None = None
