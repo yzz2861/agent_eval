@@ -1,0 +1,40 @@
+{
+  "type": "bundle",
+  "id": "bundle--10101010-1010-4010-8010-101010101010",
+  "objects": [
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "created": "2024-03-05T07:30:00.000Z",
+      "modified": "2024-03-05T07:30:00.000Z",
+      "relationship_type": "targets",
+      "source_ref": "indicator--bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "target_ref": "identity--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "description": "Legacy case EVT-7781 still points at the pre-merge identifiers.",
+      "external_references": [
+        {
+          "source_name": "legacy-ticketing",
+          "external_id": "EVT-7781"
+        }
+      ]
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "created": "2024-06-15T07:30:00.000Z",
+      "modified": "2024-06-15T07:30:00.000Z",
+      "relationship_type": "targets",
+      "source_ref": "indicator--bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "target_ref": "identity--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "description": "Post-merge event EVT-7782.",
+      "external_references": [
+        {
+          "source_name": "legacy-ticketing",
+          "external_id": "EVT-7782"
+        }
+      ]
+    }
+  ]
+}

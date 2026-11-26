@@ -8,6 +8,7 @@
    environment
    equivalence
    exceptions
+   imports
    markings
    parsing
    pattern_visitor
@@ -35,6 +36,12 @@ from .datastore.taxii import (
     TAXIICollectionSink, TAXIICollectionSource, TAXIICollectionStore,
 )
 from .environment import Environment, ObjectFactory
+from .imports import (
+    AmbiguousCandidateError, AnchorError, AnchorRegistry, Attachment,
+    IdentityAnchor, IdentityResolutionError, ImportedCandidate, ImportService,
+    OccupancySlot, ReplayStep, Resolution, ResolutionStatus, attach_references,
+    fingerprint, resolve_reference,
+)
 from .markings import (
     add_markings, clear_markings, get_markings, is_marked, remove_markings,
     set_markings,

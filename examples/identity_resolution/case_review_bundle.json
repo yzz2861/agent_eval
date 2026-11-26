@@ -1,0 +1,41 @@
+{
+  "type": "bundle",
+  "id": "bundle--f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0",
+  "objects": [
+    {
+      "type": "identity",
+      "spec_version": "2.1",
+      "id": "identity--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "created": "2024-04-10T08:00:00.000Z",
+      "modified": "2024-04-10T08:00:00.000Z",
+      "revoked": true,
+      "name": "Acme Freight Desk (rejected duplicate)",
+      "identity_class": "organization",
+      "external_references": [
+        {
+          "source_name": "case-review",
+          "external_id": "TKT-0042"
+        }
+      ]
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "created": "2024-04-10T08:05:00.000Z",
+      "modified": "2024-04-10T08:05:00.000Z",
+      "revoked": true,
+      "name": "Acme login lure (rejected duplicate)",
+      "indicator_types": ["malicious-activity"],
+      "pattern": "[url:value = 'http://case.example/login']",
+      "pattern_type": "stix",
+      "valid_from": "2024-04-10T08:05:00.000Z",
+      "external_references": [
+        {
+          "source_name": "case-review",
+          "external_id": "TKT-0043"
+        }
+      ]
+    }
+  ]
+}
