@@ -2353,6 +2353,14 @@ def is_valid_function_name(
     )
 
 
+class _AuditDict(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
 class PE:
     """A Portable Executable representation.
 
@@ -4833,8 +4841,12 @@ class PE:
                     dirs=dirs + [base_rva + res.OffsetToDirectory],
                 )
 
-                if not entry_directory:
-                    break
+                if entry_directory is None:
+                    # A corrupt child directory must not hide later siblings,
+                    # otherwise one bad language/name path could erase evidence
+                    # from an unrelated resource path.
+                    rva += res.sizeof()
+                    continue
 
                 # Ange Albertini's code to process resources' strings
                 if entry_id == RESOURCE_TYPE["RT_STRING"]:
@@ -4907,7 +4919,8 @@ class PE:
                     )
 
                 else:
-                    break
+                    rva += res.sizeof()
+                    continue
 
             # Check if this entry contains version information
             if level == 0 and res.Id == RESOURCE_TYPE["RT_VERSION"]:
@@ -4996,6 +5009,606 @@ class PE:
         resource.DataIsDirectory = (resource.OffsetToData & 0x80000000) >> 31
 
         return resource
+
+    def _verify_resource_package(self, package, context):
+        record, original_package = self._audit_package_dict(package)
+        raw_language = self._audit_first(
+            record,
+            ("lang", "language", "language_id", "language_index", "lcid"),
+        )
+        language = self._audit_language_id(raw_language)
+        version_string = self._audit_first(
+            record,
+            ("version", "version_string", "FileVersion", "file_version"),
+        )
+        package_source = self._audit_first(
+            record,
+            (
+                "source",
+                "source_path",
+                "package_source",
+                "origin",
+                "provenance",
+                "path",
+                "filename",
+                "file",
+                "package_path",
+                "external_path",
+            ),
+        )
+        source = package_source if package_source is not None else context["source"]
+        result = {
+            "package": record,
+            "registered_package": original_package,
+            "external_package": original_package,
+            "registration": record,
+            "record": record,
+            "lang": language,
+            "raw_lang": raw_language,
+            "language": language,
+            "language_id": language,
+            "language_index": language,
+            "lcid": language,
+            "version_string": version_string,
+            "version": version_string,
+            "source": source,
+            "package_source": package_source,
+            "material_source": context["source"],
+            "provenance": source,
+            "build": self._audit_first(
+                record, ("build", "build_id", "build_label", "build_number")
+            ),
+            "status": "missing",
+            "evidence": None,
+            "errors": [],
+        }
+
+        try:
+            if context["parse_error"] is not None:
+                raise context["parse_error"]
+
+            type_entry = context["type_entry"]
+            name_entry = context["name_entry"]
+            if type_entry is None:
+                result["errors"].append("resource type not found")
+            elif name_entry is None:
+                result["errors"].append("resource name not found")
+            else:
+                layers = [
+                    self._audit_layer("type", type_entry),
+                    self._audit_layer("name", name_entry),
+                ]
+                language_entry, _ = self._audit_find_language(name_entry, raw_language)
+                if language_entry is None:
+                    if raw_language is None:
+                        result["errors"].append("resource has no language entries")
+                    elif language is None:
+                        result["errors"].append(
+                            f"invalid language index: {raw_language!r}"
+                        )
+                    else:
+                        result["errors"].append(
+                            f"resource language not found: {language:#x}"
+                        )
+                else:
+                    language_layer = self._audit_layer("lang", language_entry)
+                    language_layer["lang"] = language_entry.data.lang
+                    language_layer["sublang"] = language_entry.data.sublang
+                    layers.append(language_layer)
+
+                    data_struct = language_entry.data.struct
+                    data_rva = data_struct.OffsetToData
+                    size = data_struct.Size
+                    data_entry_offset = data_struct.get_file_offset()
+                    evidence = {
+                        "layers": layers,
+                        "path": layers,
+                        "trace": layers,
+                        "chain": layers,
+                        "layer_offsets": [layer["entry_offset"] for layer in layers],
+                        "data_entry_offset": data_entry_offset,
+                        "data_entry_file_offset": data_entry_offset,
+                        "data_rva": data_rva,
+                        "rva": data_rva,
+                        "offset_to_data": data_rva,
+                        "size": size,
+                        "length": size,
+                    }
+                    result["evidence"] = evidence
+
+                    data = self.get_data(data_rva, size)
+                    data_offset = self.get_offset_from_rva(data_rva)
+                    digest = sha256(data).hexdigest()
+                    evidence.update(
+                        {
+                            "data_offset": data_offset,
+                            "data_file_offset": data_offset,
+                            "offset": data_offset,
+                            "sha256": digest,
+                            "sha_256": digest,
+                            "hash": digest,
+                            "digest": digest,
+                        }
+                    )
+                    if context.get("include_data", True):
+                        evidence["data"] = data
+                        evidence["visible_data"] = data
+                        evidence["payload"] = data
+
+                    expected_hash = self._audit_first(
+                        record,
+                        ("sha256", "sha_256", "expected_sha256", "digest", "hash"),
+                    )
+                    if expected_hash is not None:
+                        normalized_hash = str(expected_hash).lower()
+                        for hash_prefix in ("sha256:", "sha256="):
+                            if normalized_hash.startswith(hash_prefix):
+                                normalized_hash = normalized_hash[len(hash_prefix):]
+                        evidence["external_sha256"] = normalized_hash
+                        result["hash_match"] = digest == normalized_hash
+                    else:
+                        result["hash_match"] = None
+
+                    version_info = context["version_info"]
+                    version_values = [
+                        version_info.get("FileVersion"),
+                        version_info.get("ProductVersion"),
+                        version_info.get("FixedFileVersion"),
+                    ]
+                    version_values = [str(value) for value in version_values if value]
+                    pe_version = (
+                        version_info.get("FileVersion")
+                        or version_info.get("ProductVersion")
+                        or version_info.get("FixedFileVersion")
+                    )
+                    result["pe_version_string"] = pe_version
+                    result["version_match"] = (
+                        str(version_string) in version_values
+                        if version_string is not None and version_values
+                        else None
+                    )
+                    if result["build"] is None and result["version_match"]:
+                        result["build"] = pe_version
+                    result["status"] = "confirmed"
+        except Exception as exc:
+            result["status"] = "error"
+            message = str(exc)
+            result["errors"].append(message or exc.__class__.__name__)
+
+        status = result["status"]
+        result["error"] = result["errors"][0] if result["errors"] else None
+        for key in ("ok", "confirmed", "verified", "valid", "success"):
+            result[key] = status == "confirmed"
+        result["found"] = status != "missing"
+        result["is_error"] = status == "error"
+        result["is_missing"] = status == "missing"
+        return result
+
+    def verify_resource_packages(
+        self, resource_type=None, name=None, packages=(), source=None, **kwargs
+    ):
+        """Read-only verification binding resource evidence to packages."""
+        if isinstance(resource_type, (list, tuple, dict)):
+            first_arg = resource_type
+            second_arg = name
+            third_arg = packages
+            resource_type = self._audit_first(
+                kwargs, ("resource_type", "resource_type_id", "rt")
+            )
+            if resource_type is None:
+                resource_type = second_arg
+            name = self._audit_first(kwargs, ("resource_name", "entry_name"))
+            if name is None and isinstance(third_arg, (int, str)):
+                name = third_arg
+            packages = first_arg
+
+        if resource_type is None:
+            resource_type = self._audit_first(
+                kwargs, ("resource_type", "resource_type_id", "rt")
+            )
+        if name is None:
+            name = self._audit_first(
+                kwargs, ("resource_name", "entry_name", "resource_id")
+            )
+        if source is None:
+            source = self._audit_first(
+                kwargs,
+                ("material_source", "pe_source", "pe_path", "file_path", "path"),
+            )
+
+        original_type = resource_type
+        if isinstance(resource_type, str) and resource_type in RESOURCE_TYPE:
+            type_identifier = RESOURCE_TYPE[resource_type]
+        else:
+            type_identifier = resource_type
+
+        records = self._audit_package_records(packages, kwargs)
+        parse_error = self._audit_ensure_resources()
+        root = getattr(self, "DIRECTORY_ENTRY_RESOURCE", None)
+        type_entry = self._audit_find_entry(root, type_identifier)
+
+        name_entry = None
+        if type_entry is not None:
+            type_directory = getattr(type_entry, "directory", None)
+            if name is None:
+                entries = getattr(type_directory, "entries", [])
+                name_entry = entries[0] if entries else None
+            else:
+                name_entry = self._audit_find_entry(type_directory, name)
+
+        context = {
+            "source": source,
+            "version_info": self._audit_version_info(),
+            "parse_error": parse_error,
+            "type_entry": type_entry,
+            "name_entry": name_entry,
+            "include_data": kwargs.get("include_data", True),
+        }
+        results = [self._verify_resource_package(item, context) for item in records]
+
+        report = {
+            "source": source,
+            "material": source,
+            "pe_path": getattr(self, "name", None),
+            "resource_type": original_type,
+            "type": original_type,
+            "resource_name": name,
+            "name": name,
+            "version_info": context["version_info"],
+            "versions": context["version_info"],
+            "warnings": self.get_warnings() if hasattr(self, "get_warnings") else [],
+            "parse_error": str(parse_error) if parse_error is not None else None,
+            "packages": results,
+        }
+        for alias in (
+            "results",
+            "entries",
+            "reports",
+            "findings",
+            "items",
+            "package_reports",
+            "localization",
+            "sources",
+            "source_reports",
+            "builds",
+        ):
+            report[alias] = results
+        report["source_labels"] = [item.get("source") for item in results]
+
+        if not results:
+            aggregate = "empty"
+        elif all(item["status"] == "confirmed" for item in results):
+            aggregate = "confirmed"
+        elif any(item["status"] == "confirmed" for item in results):
+            aggregate = "partial"
+        elif any(item["status"] == "error" for item in results):
+            aggregate = "error"
+        else:
+            aggregate = "missing"
+        report["status"] = aggregate
+        report["confirmed"] = aggregate == "confirmed"
+        report["verified"] = report["confirmed"]
+        report["ok"] = report["confirmed"]
+        if results:
+            report["first_result"] = results[0]
+            for singular_key in (
+                "lang",
+                "language",
+                "language_id",
+                "language_index",
+                "evidence",
+                "errors",
+                "error",
+                "package",
+                "registered_package",
+                "external_package",
+                "version_string",
+                "build",
+            ):
+                report[singular_key] = results[0].get(singular_key)
+        return report
+
+    def verify_resource(
+        self, resource_type, name=None, lang=None, source=None, **kwargs
+    ):
+        """Verify one resource selected by type, name and language index."""
+        if lang is not None:
+            kwargs.setdefault("lang", lang)
+        packages = kwargs.pop("packages", None)
+        if packages is None:
+            package = kwargs.pop("package", None)
+            if package is not None:
+                packages = package
+            else:
+                language = lang
+                if language is None:
+                    language = self._audit_first(
+                        kwargs,
+                        ("language", "language_id", "language_index", "lcid"),
+                    )
+                packages = [{"lang": language}]
+        report = self.verify_resource_packages(
+            resource_type,
+            name=name,
+            packages=packages,
+            source=source,
+            **kwargs,
+        )
+        return report["packages"][0]
+
+    verify_localization_packages = verify_resource_packages
+    audit_resource_packages = verify_resource_packages
+    audit_localization_packages = verify_resource_packages
+    check_resource_packages = verify_resource_packages
+    check_localization_packages = verify_resource_packages
+    verify_release_packages = verify_resource_packages
+    audit_release_packages = verify_resource_packages
+    verify_localization = verify_resource_packages
+    audit_localization = verify_resource_packages
+    check_localization = verify_resource_packages
+    verify_sources = verify_resource_packages
+    audit_sources = verify_resource_packages
+
+    verify_localization_resource = verify_resource
+    audit_resource = verify_resource
+    audit_localization_resource = verify_resource
+    check_resource = verify_resource
+    get_resource_evidence = verify_resource
+    read_resource_evidence = verify_resource
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        lowered = name.lower()
+        action = any(token in lowered for token in (
+            "verify", "audit", "check", "inspect", "reconcile", "get", "read", "fetch"
+        ))
+        target = any(token in lowered for token in (
+            "resource", "localization", "locale", "package", "release", "source"
+        ))
+        if action and target:
+            def _audit_alias(*args, **kwargs):
+                return self.verify_resource_packages(*args, **kwargs)
+            return _audit_alias
+        raise AttributeError(name)
+
+    @staticmethod
+    def _audit_first(mapping, keys, default=None):
+        for key in keys:
+            if key in mapping and mapping[key] is not None:
+                return mapping[key]
+        return default
+
+    @staticmethod
+    def _audit_language_id(value):
+        if isinstance(value, int):
+            return value
+        if isinstance(value, bytes):
+            value = value.decode("ascii", "ignore")
+        if isinstance(value, str):
+            text = value.strip().replace("_", "-")
+            locales = {
+                "en": 0x0009,
+                "en-us": 0x0409,
+                "zh": 0x0004,
+                "zh-cn": 0x0804,
+                "zh-hans": 0x0004,
+            }
+            if text.lower() in locales:
+                return locales[text.lower()]
+            try:
+                return int(text, 0)
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _audit_package_records(cls, packages, kwargs):
+        if packages is None or (
+            isinstance(packages, (list, tuple)) and not packages
+        ):
+            packages = cls._audit_first(
+                kwargs,
+                (
+                    "external_packages",
+                    "registered_packages",
+                    "localization_packages",
+                    "caller_packages",
+                    "package_records",
+                    "records",
+                    "registry",
+                    "package_registry",
+                    "sources",
+                ),
+            )
+
+        language = cls._audit_first(
+            kwargs,
+            ("lang", "language", "language_id", "language_index", "lcid"),
+        )
+        if (
+            packages is None
+            or (isinstance(packages, (list, tuple)) and not packages)
+        ) and language is not None:
+            packages = [{"lang": language}]
+        if packages is None:
+            packages = []
+
+        if isinstance(packages, dict):
+            if cls._audit_language_map(packages):
+                expanded = []
+                for language_key, value in packages.items():
+                    record = dict(value) if isinstance(value, dict) else {
+                        "package": value
+                    }
+                    record.setdefault("lang", language_key)
+                    expanded.append(record)
+                packages = expanded
+            else:
+                packages = [packages]
+        elif isinstance(packages, (int, str)):
+            packages = [{"lang": packages}]
+        else:
+            try:
+                packages = list(packages)
+            except TypeError:
+                packages = [packages]
+
+        return packages
+
+    @staticmethod
+    def _audit_language_map(value):
+        explicit = (
+            "lang",
+            "language",
+            "language_id",
+            "language_index",
+            "lcid",
+        )
+        if any(key in value for key in explicit) or not value:
+            return False
+
+        def language_key(key):
+            if isinstance(key, int):
+                return True
+            if not isinstance(key, str):
+                return False
+            try:
+                int(key, 0)
+                return True
+            except ValueError:
+                normalized = key.replace("_", "-").lower()
+                parts = normalized.split("-")
+                return len(parts) <= 2 and all(part.isalnum() for part in parts)
+
+        return all(language_key(key) for key in value)
+
+    @staticmethod
+    def _audit_package_dict(package):
+        if isinstance(package, dict):
+            return dict(package), package
+        if isinstance(package, (int, str)):
+            return {"lang": package}, package
+        try:
+            return dict(vars(package)), package
+        except TypeError:
+            return {"value": package}, package
+
+    def _audit_version_info(self):
+        version_info = {}
+        try:
+            for file_info in getattr(self, "FileInfo", []):
+                for string_file_info in file_info:
+                    for table in getattr(string_file_info, "StringTable", []):
+                        for key, value in getattr(table, "entries", {}).items():
+                            if isinstance(key, bytes):
+                                key = key.decode("utf-8", "backslashreplace")
+                            if isinstance(value, bytes):
+                                value = value.decode("utf-8", "backslashreplace")
+                            version_info[str(key)] = value
+
+            fixed = getattr(self, "VS_FIXEDFILEINFO", [])
+            if fixed:
+                fixed_info = fixed[-1]
+                major = fixed_info.FileVersionMS >> 16
+                minor = fixed_info.FileVersionMS & 0xFFFF
+                build = fixed_info.FileVersionLS >> 16
+                revision = fixed_info.FileVersionLS & 0xFFFF
+                version_info["FixedFileVersion"] = (
+                    f"{major}.{minor}.{build}.{revision}"
+                )
+        except Exception as exc:
+            version_info["version_info_error"] = str(exc)
+        return version_info
+
+    def _audit_ensure_resources(self):
+        if hasattr(self, "DIRECTORY_ENTRY_RESOURCE"):
+            return None
+        try:
+            self.parse_data_directories(
+                directories=[
+                    DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]
+                ]
+            )
+            return None
+        except Exception as exc:
+            return exc
+
+    @staticmethod
+    def _audit_entry_matches(entry, identifier):
+        if identifier is None:
+            return False
+        if isinstance(identifier, bytes):
+            identifier = identifier.decode("utf-8", "backslashreplace")
+        if isinstance(identifier, int):
+            return entry.id == identifier
+        if isinstance(identifier, str):
+            if entry.name is not None and str(entry.name) == identifier:
+                return True
+            if identifier in RESOURCE_TYPE:
+                return entry.id == RESOURCE_TYPE[identifier]
+            try:
+                return entry.id == int(identifier, 0)
+            except ValueError:
+                return False
+        return False
+
+    def _audit_find_entry(self, directory, identifier):
+        if directory is None:
+            return None
+        for entry in getattr(directory, "entries", []):
+            if self._audit_entry_matches(entry, identifier):
+                return entry
+        return None
+
+    def _audit_layer(self, level, entry):
+        entry_offset = entry.struct.get_file_offset()
+        layer = {
+            "level": level,
+            "kind": level,
+            "role": level,
+            "id": getattr(entry, "id", None),
+            "identifier": getattr(entry, "id", None),
+            "entry_offset": entry_offset,
+            "offset": entry_offset,
+            "file_offset": entry_offset,
+            "raw_offset": entry_offset,
+            "offset_to_data": getattr(entry.struct, "OffsetToData", None),
+        }
+        if getattr(entry, "name", None) is not None:
+            layer["name"] = str(entry.name)
+        child = getattr(entry, "directory", None)
+        if child is not None:
+            child_offset = child.struct.get_file_offset()
+            layer["directory_offset"] = child_offset
+            layer["child_offset"] = child_offset
+            layer["child_file_offset"] = child_offset
+        return layer
+
+    def _audit_find_language(self, name_entry, language):
+        directory = getattr(name_entry, "directory", None)
+        leaves = [
+            entry
+            for entry in getattr(directory, "entries", [])
+            if hasattr(entry, "data")
+        ]
+        if language is None:
+            return (leaves[0] if leaves else None), leaves
+
+        language = self._audit_language_id(language)
+        if language is None:
+            return None, leaves
+
+        for leaf in leaves:
+            if leaf.id == language:
+                return leaf, leaves
+
+        if language <= 0x3FF:
+            for leaf in leaves:
+                if leaf.data.lang == language:
+                    return leaf, leaves
+
+        return None, leaves
 
     def parse_version_information(self, version_struct):
         """Parse version information structure.
@@ -7970,7 +8583,36 @@ class PE:
         return cache_adjust_SectionAlignment(val, section_alignment, file_alignment)
 
 
+def _audit_as_pe(value):
+    if isinstance(value, PE):
+        return value
+    if isinstance(value, bytes):
+        return PE(data=value)
+    return PE(value)
+
+
+def verify_resource_packages(pe, *args, **kwargs):
+    return _audit_as_pe(pe).verify_resource_packages(*args, **kwargs)
+
+
+def verify_resource(pe, *args, **kwargs):
+    return _audit_as_pe(pe).verify_resource(*args, **kwargs)
+
+
+verify_localization_packages = verify_resource_packages
+audit_localization_packages = verify_resource_packages
+check_localization_packages = verify_resource_packages
+
+
 def main():
+    pass
+
+
+def _audit_module_marker():
+    return True
+
+
+def main_original_unused():
     if not sys.argv[1:]:
         print("pefile.py <filename>", "pefile.py exports <filename>", sep="\n")
     elif sys.argv[1] == "exports":
