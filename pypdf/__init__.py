@@ -11,12 +11,27 @@ from ._configuration import Configuration, apply_configuration, get_configuratio
 from ._crypt_providers import crypt_provider
 from ._doc_common import DocumentInformation
 from ._encryption import PasswordType
+from ._form_publish import (
+    FormPublishError,
+    SharedAppearanceError,
+    publish,
+    publish_form,
+    publish_pdf,
+    redact_form_fields,
+    remove_fields,
+    remove_form_fields,
+)
 from ._page import PageObject, Transformation
 from ._reader import PdfReader
 from ._text_extraction import mult
 from ._version import __version__
 from ._writer import ObjectDeletionFlag, PdfWriter
 from .constants import ImageType
+from .errors import AppearanceSharingError as AppearanceSharingError
+from .errors import FormPublishError as FormPublishError
+from .errors import SharedAppearanceError as SharedAppearanceError
+from .errors import SharedAppearanceStreamError as SharedAppearanceStreamError
+from .errors import UnsafeSharedAppearanceError as UnsafeSharedAppearanceError
 from .pagerange import PageRange, parse_filename_page_ranges
 from .papersizes import PaperSize
 
@@ -32,8 +47,10 @@ _debug_versions = (
 )
 
 __all__ = [
+    "AppearanceSharingError",
     "Configuration",
     "DocumentInformation",
+    "FormPublishError",
     "ImageType",
     "ObjectDeletionFlag",
     "PageObject",
@@ -42,7 +59,10 @@ __all__ = [
     "PasswordType",
     "PdfReader",
     "PdfWriter",
+    "SharedAppearanceError",
+    "SharedAppearanceStreamError",
     "Transformation",
+    "UnsafeSharedAppearanceError",
     "__version__",
     "_debug_versions",
     "apply_configuration",
@@ -50,4 +70,10 @@ __all__ = [
     "mult",
     "overwrite_configuration",
     "parse_filename_page_ranges",
+    "publish",
+    "publish_form",
+    "publish_pdf",
+    "redact_form_fields",
+    "remove_fields",
+    "remove_form_fields",
 ]

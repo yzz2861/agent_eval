@@ -72,3 +72,16 @@ class LimitReachedError(PyPdfError):
 
 class XmpDocumentError(PyPdfError, RuntimeError):
     """Raised when the XMP XML document context is invalid or missing."""
+
+
+class FormPublishError(PyPdfError):
+    """Raised when a form cannot be safely published."""
+
+
+class SharedAppearanceError(FormPublishError):
+    """Raised when an appearance cannot be removed without affecting a retained object."""
+
+
+UnsafeSharedAppearanceError = SharedAppearanceError
+SharedAppearanceStreamError = SharedAppearanceError
+AppearanceSharingError = SharedAppearanceError

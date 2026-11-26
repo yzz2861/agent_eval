@@ -1076,6 +1076,43 @@ class PdfWriter(PdfDocCommon):
                 if appearance_stream_obj and flatten:
                     self._add_apstream_object(page, appearance_stream_obj, field, rectangle[0], rectangle[1])
 
+    def publish_form_fields(
+        self,
+        field_objects: Iterable[Any],
+        *,
+        need_appearances: bool = True,
+    ) -> None:
+        """Remove caller-checked field objects before distributing a form."""
+        from ._form_publish import (  # noqa: PLC0415
+            publish_form_fields as _publish_form_fields,
+        )
+
+        _publish_form_fields(
+            self,
+            field_objects,
+            need_appearances=need_appearances,
+        )
+
+    remove_form_fields = publish_form_fields
+    remove_fields = publish_form_fields
+    publish_fields = publish_form_fields
+
+    def publish_form_field(
+        self,
+        field_object: Any,
+        *,
+        need_appearances: bool = True,
+    ) -> None:
+        """Remove one caller-checked field object."""
+        self.publish_form_fields(
+            [field_object], need_appearances=need_appearances
+        )
+
+    remove_form_field = publish_form_field
+    remove_field = publish_form_field
+    delete_form_field = publish_form_field
+    delete_form_fields = publish_form_fields
+
     def reattach_fields(
         self, page: PageObject | None = None
     ) -> list[DictionaryObject]:
