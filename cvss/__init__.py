@@ -7,5 +7,18 @@ from .cvss3 import CVSS3
 from .cvss4 import CVSS4
 from .exceptions import CVSS2Error, CVSS3Error, CVSS4Error, CVSSError
 from .interactive import ask_interactively
+from .migration import (
+    MigrationAuditor,
+    MigrationReport,
+    audit,
+    audit_migration,
+    audit_queue_migration,
+    compare,
+    compare_migration,
+    compare_queue_migration,
+    migrate,
+    migration_audit,
+    migration_report,
+)
 
 __version__ = "3.6"
