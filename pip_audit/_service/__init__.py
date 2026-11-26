@@ -3,6 +3,18 @@ Vulnerability service interfaces and implementations for `pip-audit`.
 """
 
 from .esms import EcosystemsService
+from .freeze import (
+    FreezeAdvisory,
+    FreezeFixtureError,
+    FreezeQuery,
+    FreezeService,
+    FreezeSnapshot,
+    FrozenService,
+    OfflineAdvisoryService,
+    load_freeze_fixture,
+    load_freeze_snapshot,
+    snapshot_from_dict,
+)
 from .interface import (
     ConnectionError,
     Dependency,
@@ -17,6 +29,13 @@ from .pypi import PyPIService
 
 __all__ = [
     "EcosystemsService",
+    "FreezeAdvisory",
+    "FreezeFixtureError",
+    "FreezeQuery",
+    "FreezeService",
+    "FreezeSnapshot",
+    "FrozenService",
+    "OfflineAdvisoryService",
     "ConnectionError",
     "Dependency",
     "ResolvedDependency",
@@ -26,4 +45,7 @@ __all__ = [
     "VulnerabilityService",
     "OsvService",
     "PyPIService",
+    "load_freeze_fixture",
+    "load_freeze_snapshot",
+    "snapshot_from_dict",
 ]

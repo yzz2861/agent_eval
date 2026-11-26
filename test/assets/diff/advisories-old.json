@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "snapshot": "advisories-2025-01",
+  "coverage": {
+    "alpha": ["1.0", "1.1"],
+    "beta": ["2.0"],
+    "gamma": ["3.0", "3.1"],
+    "delta": ["4.0"]
+  },
+  "advisories": [
+    {
+      "id": "PYSEC-2025-1",
+      "aliases": ["CVE-2025-0001"],
+      "package": "alpha",
+      "versions": ["1.0"],
+      "fix_versions": ["1.1"],
+      "description": "alpha 1.0 is affected; upgrading to 1.1 fixes it"
+    },
+    {
+      "id": "PYSEC-2025-2",
+      "aliases": ["CVE-2025-0002"],
+      "package": "beta",
+      "versions": ["2.0"],
+      "fix_versions": ["2.1"],
+      "description": "beta 2.0 appears only in the old advisory snapshot"
+    },
+    {
+      "id": "PYSEC-2025-3",
+      "aliases": ["CVE-2025-0003"],
+      "package": "delta",
+      "versions": ["4.0"],
+      "fix_versions": ["4.1"],
+      "description": "delta 4.0 is present in every cell"
+    }
+  ]
+}

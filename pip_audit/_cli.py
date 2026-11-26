@@ -442,6 +442,18 @@ def audit() -> None:  # pragma: no cover
     """
     The primary entrypoint for `pip-audit`.
     """
+    argv = sys.argv[1:]
+    if argv[:1] == ["diff"]:
+        from pip_audit._diff import diff_main
+
+        diff_main(argv[1:])
+        return
+    if "--diff" in argv:
+        from pip_audit._diff import diff_main
+
+        diff_main([arg for arg in argv if arg != "--diff"])
+        return
+
     parser = _parser()
     args = _parse_args(parser)
 

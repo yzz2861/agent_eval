@@ -32,6 +32,7 @@ with support from Google, and is currently maintained under the
   * [Environment variables](#environment-variables)
   * [Exit codes](#exit-codes)
   * [Dry runs](#dry-runs)
+  * [Differential attribution](#differential-attribution)
 * [Examples](#examples)
 * [Troubleshooting](#troubleshooting)
 * [Tips and Tricks](#tips-and-tricks)
@@ -50,6 +51,7 @@ with support from Google, and is currently maintained under the
   [SBOMs](https://en.wikipedia.org/wiki/Software_bill_of_materials) in
   [CycloneDX](https://cyclonedx.org/) XML or JSON
 * Support for automatically fixing vulnerable dependencies (`--fix`)
+* Differential attribution across old/new dependency manifests and advisory snapshots
 * Human and machine-readable output formats (columnar, Markdown, JSON)
 * Seamlessly reuses your existing local `pip` caches
 
@@ -266,6 +268,61 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Differential attribution
+
+When an alert disappears between two dependency manifests it is not always
+obvious whether the package changed or the advisory data changed. `pip-audit`
+can run the full 2x2 comparison using pinned requirements files and two
+offline advisory snapshots:
+
+```console
+$ pip-audit diff \
+    --old-requirements old-requirements.txt \
+    --new-requirements new-requirements.txt \
+    --old-advisories advisories-old.json \
+    --new-advisories advisories-new.json
+```
+
+The four cells are `old-old`, `old-new`, `new-old`, and `new-new` (dependency
+axis first, advisory axis second). Each alert is attributed to one of:
+
+* `dependency`: only the dependency change explains the result.
+* `advisory`: only the advisory change explains the result.
+* `both`: the alert appears (or disappears) only when both inputs change.
+* `mixed`: the four cells do not decompose into one axis alone.
+* `unchanged`: the alert is present in every cell.
+* `unknown`: a cell is missing or a frozen snapshot did not judge the package.
+
+The report includes each cell's coverage and the version actually queried, so
+an unjudged package stays visible as `unknown` instead of being mistaken for a
+clean result. Use `--write-results-dir DIR` to save the four audit results; the
+same comparison can then be replayed without re-reading the manifests or
+advisory fixtures:
+
+```console
+$ pip-audit diff --results-dir DIR
+# or pass the cells explicitly
+$ pip-audit diff \
+    --old-old DIR/old-old.json --old-new DIR/old-new.json \
+    --new-old DIR/new-old.json --new-new DIR/new-new.json
+```
+
+Saved results use the same `dependencies` and `fixes` keys as the default
+`pip-audit -f json` output, with additive `coverage` metadata. Existing JSON
+audit files can therefore be supplied directly; the CLI and the Python API
+(`pip_audit.diff.diff_audits`) both accept four saved results. If any cell is
+omitted or its file is missing, the report marks that cell `missing` and lists
+every observed alert under `unattributed_alerts` with the cell(s) that prevent
+attribution. The default report format is JSON; `--format text` and
+`--format markdown` are also available.
+
+A complete, replaceable 2x2 fixture set lives under `test/assets/diff/`:
+`old-requirements.txt`, `new-requirements.txt`, `advisories-old.json`,
+`advisories-new.json`, and the four replayable cells in `test/assets/diff/cells/`.
+Replace any one cell file (or remove it) and rerun `pip-audit diff --results-dir
+test/assets/diff/cells` to inspect the effect; removing a cell demonstrates the
+unattributed-alert reporting path.
 
 ## Examples
 

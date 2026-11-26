@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "audit": {
+    "manifest": "test/assets/diff/old-requirements.txt",
+    "advisory_snapshot": "advisories-2025-02",
+    "source": "test/assets/diff/old-requirements.txt"
+  },
+  "coverage": {
+    "manifest": "test/assets/diff/old-requirements.txt",
+    "advisory_snapshot": "advisories-2025-02",
+    "source": "test/assets/diff/old-requirements.txt",
+    "expected": [
+      "alpha",
+      "beta",
+      "delta",
+      "gamma",
+      "zeta"
+    ],
+    "expected_count": 5,
+    "queried_count": 5,
+    "audited_count": 4,
+    "queried": [
+      {
+        "name": "alpha",
+        "version": "1.0",
+        "queried_version": "1.0",
+        "status": "audited"
+      },
+      {
+        "name": "beta",
+        "version": "2.0",
+        "queried_version": "2.0",
+        "status": "audited"
+      },
+      {
+        "name": "delta",
+        "version": "4.0",
+        "queried_version": "4.0",
+        "status": "audited"
+      },
+      {
+        "name": "gamma",
+        "version": "3.0",
+        "queried_version": "3.0",
+        "status": "audited"
+      },
+      {
+        "name": "zeta",
+        "version": "6.0",
+        "queried_version": "6.0",
+        "status": "unknown"
+      }
+    ],
+    "unknown": [
+      {
+        "name": "zeta",
+        "version": "6.0",
+        "queried_version": "6.0",
+        "status": "unknown",
+        "reason": "advisories-2025-02 has no judgment for zeta==6.0"
+      }
+    ],
+    "skipped": [],
+    "missing": []
+  },
+  "dependencies": [
+    {
+      "name": "alpha",
+      "version": "1.0",
+      "status": "audited",
+      "queried_version": "1.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2025-1",
+          "aliases": [
+            "CVE-2025-0001"
+          ],
+          "fix_versions": [
+            "1.1"
+          ],
+          "description": "alpha 1.0 is affected; upgrading to 1.1 fixes it"
+        }
+      ]
+    },
+    {
+      "name": "beta",
+      "version": "2.0",
+      "status": "audited",
+      "queried_version": "2.0",
+      "vulns": []
+    },
+    {
+      "name": "delta",
+      "version": "4.0",
+      "status": "audited",
+      "queried_version": "4.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2025-3",
+          "aliases": [
+            "CVE-2025-0003"
+          ],
+          "fix_versions": [
+            "4.1"
+          ],
+          "description": "delta 4.0 is present in every cell"
+        }
+      ]
+    },
+    {
+      "name": "gamma",
+      "version": "3.0",
+      "status": "audited",
+      "queried_version": "3.0",
+      "vulns": []
+    },
+    {
+      "name": "zeta",
+      "version": "6.0",
+      "status": "unknown",
+      "queried_version": "6.0",
+      "vulns": [],
+      "reason": "advisories-2025-02 has no judgment for zeta==6.0"
+    }
+  ],
+  "fixes": []
+}
