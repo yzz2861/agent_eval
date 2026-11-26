@@ -187,3 +187,13 @@ class LineGetter:
 
         self._use_eager_transformers = status
         self._lines = None              # invalidate cache
+
+
+# Review-manifest importing/reconciliation implementation.
+from .reconcile import (  # noqa: E402,F401
+    import_review,
+    import_review_manifest,
+    load_manifest,
+    load_review_manifest,
+    reconcile_review,
+)

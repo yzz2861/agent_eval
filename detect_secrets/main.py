@@ -30,6 +30,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         handle_scan_action(args)
     elif args.action == 'audit':
         handle_audit_action(args)
+    elif args.action in REVIEW_COMMAND_NAMES:
+        handle_review_import_action(args)
 
     return 0
 
@@ -117,8 +119,36 @@ def scan_adhoc_string(line: str) -> str:
     ])
 
 
+REVIEW_COMMAND_NAMES = (
+    'import-review', 'review-import', 'import-manifest', 'reconcile',
+    'review-manifest', 'check-manifest',
+)
+
+
+def handle_review_import_action(args: argparse.Namespace) -> None:
+    manifest = getattr(args, 'review_manifest', None)
+    baseline = getattr(args, 'baseline_file', None)
+    report = audit.import_review_manifest(
+        baseline,
+        manifest,
+        save=bool(getattr(args, 'save_imported', False)) and bool(baseline),
+    )
+    print(report.to_json(indent=4))
+
+
 def handle_audit_action(args: argparse.Namespace) -> None:
     try:
+        review_manifest = getattr(args, 'review_manifest', None)
+        if review_manifest:
+            baseline_filename = args.filename[0] if getattr(args, 'filename', None) else None
+            report = audit.import_review_manifest(
+                baseline_filename,
+                review_manifest,
+                save=bool(getattr(args, 'save_imported', False)) and baseline_filename is not None,
+            )
+            print(report.to_json(indent=4))
+            return
+
         if args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
             if args.diff:

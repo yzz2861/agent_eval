@@ -9,6 +9,7 @@ from . import baseline
 from . import filters
 from . import plugins
 from . import scan
+from . import review as review_usage
 from ...settings import get_settings
 from .common import initialize_plugin_settings
 from detect_secrets.__version__ import VERSION
@@ -83,6 +84,8 @@ class ParserBuilder:
 
         audit.add_audit_action(subparser)
         self._post_processors.append(audit.parse_args)
+        review_usage.add_review_action(subparser)
+        self._post_processors.append(review_usage.parse_args)
         return self
 
     def add_pre_commit_arguments(self) -> 'ParserBuilder':

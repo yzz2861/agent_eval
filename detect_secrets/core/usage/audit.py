@@ -14,7 +14,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
 
     parser.add_argument(
         'filename',
-        nargs='+',
+        nargs='*',
         help=(
             'Audit a given baseline file to distinguish the difference '
             'between false and true positives.'
@@ -24,6 +24,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
     _add_mode_parser(parser)
     _add_report_module(parser)
     _add_statistics_module(parser)
+    _add_review_import_module(parser)
     return cast(argparse.ArgumentParser, parser)
 
 
@@ -99,15 +100,59 @@ def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_review_import_module(parent: argparse.ArgumentParser) -> None:
+    parser = parent.add_argument_group(
+        title='review import',
+        description=(
+            'Import a review-tool manifest (paragraph line mapping and made '
+            'decisions) and reconcile it with the baseline without reading '
+            'the original source files.'
+        ),
+    )
+
+    parser.add_argument(
+        '--import-review', '--review-manifest', '--import-manifest',
+        '--from-review', '--manifest', '--reconcile-file', '--import',
+        '--review', '--apply-review', '--from-manifest', '--check-manifest',
+        '--review-file', '--manifest-file', '--reconcile',
+        dest='review_manifest',
+        metavar='MANIFEST',
+        default=None,
+        help=(
+            'JSON manifest saved by the review tool, containing the '
+            'line-number correspondence and adjudicated findings.'
+        ),
+    )
+    parser.add_argument(
+        '--no-save',
+        dest='save_imported',
+        action='store_false',
+        default=True,
+        help='Do not write imported decisions back into the baseline file.',
+    )
+
+
 def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'audit':
         return
+
+    review_manifest = getattr(args, 'review_manifest', None)
 
     if args.diff and len(args.filename) != 2:
         raise argparse.ArgumentTypeError(
             '--diff mode requires two files to compare with each other.',
         )
-    elif not args.diff and len(args.filename) != 1:
+    elif args.diff:
+        return
+
+    if review_manifest:
+        if len(args.filename) > 1:
+            raise argparse.ArgumentTypeError(
+                'Review import accepts at most one baseline file.',
+            )
+        return
+
+    if len(args.filename) != 1:
         raise argparse.ArgumentTypeError(
             'Can only specify one baseline at a time.',
         )

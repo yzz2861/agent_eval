@@ -76,3 +76,14 @@ def get_prioritized_verified_result(
         return result1
     else:
         return result2
+
+
+# Review-manifest reconciliation lives in :mod:`detect_secrets.audit.reconcile`;
+# re-exported here for the report-oriented import path.
+from .reconcile import (  # noqa: E402,F401
+    generate_check_results,
+    generate_reconciliation_report,
+    generate_review_report,
+    generate_verification_report,
+    reconciliation_report,
+)
