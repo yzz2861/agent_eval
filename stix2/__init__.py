@@ -9,6 +9,7 @@
    equivalence
    exceptions
    markings
+   packaging
    parsing
    pattern_visitor
    patterns
@@ -38,6 +39,10 @@ from .environment import Environment, ObjectFactory
 from .markings import (
     add_markings, clear_markings, get_markings, is_marked, remove_markings,
     set_markings,
+)
+from .packaging import (
+    DeliveryPlan, PackagePlanningResult, PlannedPackage, ProofRequirement,
+    plan_stix_packages,
 )
 from .parsing import parse, parse_observable
 from .patterns import (
