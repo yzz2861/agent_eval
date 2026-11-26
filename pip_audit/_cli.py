@@ -228,6 +228,43 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         "flag only applies to auditing from project paths",
     )
     parser.add_argument(
+        "--audit-result",
+        "--audit-results",
+        "--audit-file",
+        type=Path,
+        metavar="FILE",
+        help="use an existing pip-audit JSON result for an offline allocation drill",
+    )
+    parser.add_argument(
+        "--allocation-plan",
+        "--plan",
+        "--plan-table",
+        type=Path,
+        metavar="FILE",
+        help="local TOML/JSON table describing atomic combinations, group scopes, and slots",
+    )
+    parser.add_argument(
+        "--pylock",
+        "--pylock-file",
+        type=Path,
+        action="append",
+        dest="pylock_files",
+        default=[],
+        metavar="FILE",
+        help="PEP 751 pylock environment input for allocation drills; may be repeated",
+    )
+    parser.add_argument(
+        "--allocation-format",
+        choices=("markdown", "json"),
+        default=argparse.SUPPRESS,
+        help="format for the offline allocation drill report; defaults to markdown, or json with -f json",
+    )
+    parser.add_argument(
+        "--allocation-check",
+        action="store_true",
+        help="exit non-zero when the allocation drill leaves conflict conditions",
+    )
+    parser.add_argument(
         "-f",
         "--format",
         type=OutputFormatChoice,
@@ -438,12 +475,73 @@ def _dep_source_from_project_path(
     _fatal(f"couldn't find a supported project file in {project_path}")
 
 
+def _run_allocation_drill(args: argparse.Namespace) -> None:  # pragma: no cover
+    """
+    Run the offline remediation allocation planner and terminate the CLI.
+    """
+
+    from pip_audit._allocation import (
+        AllocationDrillError,
+        render_json,
+        render_markdown,
+        run_drill,
+    )
+
+    if args.audit_result is None:
+        _fatal("--allocation-plan requires --audit-result")
+
+    pylock_paths = list(args.pylock_files)
+    if not pylock_paths and args.locked:
+        if args.project_path is None:
+            _fatal("--locked allocation drills require a project path or explicit --pylock files")
+        pylock_paths = list(args.project_path.glob("pylock.*.toml"))
+        generic_pylock = args.project_path / "pylock.toml"
+        if generic_pylock.is_file():
+            pylock_paths.append(generic_pylock)
+
+    if not pylock_paths:
+        _fatal("allocation drills require at least one --pylock FILE or --locked project path")
+    for pylock_path in pylock_paths:
+        if not pylock_path.is_file():
+            _fatal(f"invalid pylock input: {pylock_path}")
+    if not args.audit_result.is_file():
+        _fatal(f"invalid audit result: {args.audit_result}")
+    if not args.allocation_plan.is_file():
+        _fatal(f"invalid allocation plan: {args.allocation_plan}")
+
+    try:
+        result = run_drill(args.audit_result, pylock_paths, args.allocation_plan)
+        allocation_format = getattr(args, "allocation_format", None)
+        if allocation_format is None:
+            allocation_format = "json" if args.format is OutputFormatChoice.Json else "markdown"
+        rendered = render_json(result) if allocation_format == "json" else render_markdown(result)
+    except AllocationDrillError as exc:
+        _fatal(str(exc))
+
+    print(
+        f"Allocation drill: covered {result.summary['covered_instance_count']}/"
+        f"{result.summary['alert_instance_count']} alert environments with "
+        f"{len(result.assignments)} combination(s); {result.summary['conflict_count']} "
+        "allocation conflict(s)",
+        file=sys.stderr,
+    )
+    with _output_io(args.output) as io:
+        print(rendered, file=io)
+
+    if args.allocation_check and result.status == "conflicts":
+        sys.exit(1)
+
+
 def audit() -> None:  # pragma: no cover
     """
     The primary entrypoint for `pip-audit`.
     """
     parser = _parser()
     args = _parse_args(parser)
+
+    if args.allocation_plan is not None:
+        _run_allocation_drill(args)
+        return
 
     service: VulnerabilityService
     if args.vulnerability_service is VulnerabilityServiceChoice.Osv:

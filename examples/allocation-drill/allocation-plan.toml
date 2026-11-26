@@ -1,0 +1,63 @@
+version = 1
+
+[[shared_images]]
+name = "base-python-runtime"
+environments = ["web", "worker"]
+packages = ["django", "cryptography"]
+
+[[groups]]
+name = "django-4.2-line"
+owner = "Lin"
+capacity = 2
+cross_environment = false
+scopes = ["django@4.2"]
+
+[[groups]]
+name = "crypto-line"
+owner = "Chen"
+capacity = 1
+cross_environment = false
+scopes = ["cryptography@44.0"]
+
+[[groups]]
+name = "cross-env-release"
+owner = "Riley (only cross-environment release manager)"
+capacity = 1
+cross_environment = true
+scopes = ["*"]
+
+[[combinations]]
+id = "django-4.2.27-shared-batch"
+title = "Apply the complete Django 4.2.27 batch to both image consumers"
+findings = ["CVE-2026-51001", "CVE-2026-51002"]
+environments = ["web", "worker"]
+slot_cost = 1
+priority = 100
+
+[[combinations.image_decisions]]
+image = "base-python-runtime"
+version = "py3.12-2026.11.27-security-train"
+
+[[combinations.changes]]
+package = "django"
+line = "4.2"
+from_version = "4.2.26"
+to_version = "4.2.27"
+
+[[combinations]]
+id = "cryptography-44.0.3-shared-batch"
+title = "Move cryptography to 44.0.3 in lockstep across the shared image"
+findings = ["CVE-2026-51003"]
+environments = ["web", "worker"]
+slot_cost = 1
+priority = 90
+
+[[combinations.image_decisions]]
+image = "base-python-runtime"
+version = "py3.12-2026.11.27-security-train"
+
+[[combinations.changes]]
+package = "cryptography"
+line = "44.0"
+from_version = "44.0.2"
+to_version = "44.0.3"

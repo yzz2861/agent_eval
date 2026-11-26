@@ -1,0 +1,10 @@
+lock-version = "1.0"
+created-by = "allocation-drill-demo"
+
+[[packages]]
+name = "Django"
+version = "4.2.26"
+
+[[packages]]
+name = "cryptography"
+version = "44.0.2"

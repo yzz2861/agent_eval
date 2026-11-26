@@ -1,0 +1,35 @@
+{
+  "dependencies": [
+    {
+      "name": "Django",
+      "version": "4.2.26",
+      "vulns": [
+        {
+          "id": "ADV-2026-5101",
+          "aliases": ["CVE-2026-51001"],
+          "fix_versions": ["4.2.27"],
+          "description": "Demo advisory: coupled 4.2 LTS remediation batch."
+        },
+        {
+          "id": "ADV-2026-5102",
+          "aliases": ["CVE-2026-51002"],
+          "fix_versions": ["4.2.27"],
+          "description": "Demo advisory: second finding cleared by the same atomic release."
+        }
+      ]
+    },
+    {
+      "name": "cryptography",
+      "version": "44.0.2",
+      "vulns": [
+        {
+          "id": "ADV-2026-5103",
+          "aliases": ["CVE-2026-51003"],
+          "fix_versions": ["44.0.3"],
+          "description": "Demo advisory: separate shared-image upgrade."
+        }
+      ]
+    }
+  ],
+  "fixes": []
+}

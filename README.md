@@ -135,14 +135,17 @@ python -m pip_audit --help
 
 <!-- @begin-pip-audit-help@ -->
 ```
-usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
-                 [-s SERVICE] [--osv-url OSV_URL] [-d] [-S]
-                 [--desc [{on,off,auto}]] [--aliases [{on,off,auto}]]
-                 [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
-                 [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
-                 [--require-hashes] [--index-url INDEX_URL]
-                 [--extra-index-url URL] [--skip-editable] [--no-deps]
-                 [-o FILE] [--ignore-vuln ID] [--disable-pip]
+usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked]
+                 [--audit-result FILE] [--allocation-plan FILE]
+                 [--pylock FILE] [--allocation-format {markdown,json}]
+                 [--allocation-check] [-f FORMAT] [-s SERVICE]
+                 [--osv-url OSV_URL] [-d] [-S] [--desc [{on,off,auto}]]
+                 [--aliases [{on,off,auto}]] [--cache-dir CACHE_DIR]
+                 [--progress-spinner {on,off}] [--timeout TIMEOUT]
+                 [--path PATH] [-v] [--fix] [--require-hashes]
+                 [--index-url INDEX_URL] [--extra-index-url URL]
+                 [--skip-editable] [--no-deps] [-o FILE] [--ignore-vuln ID]
+                 [--disable-pip]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -162,6 +165,20 @@ options:
   --locked              audit lock files from the local Python project. This
                         flag only applies to auditing from project paths
                         (default: False)
+  --audit-result FILE, --audit-results FILE, --audit-file FILE
+                        use an existing pip-audit JSON result for an offline
+                        allocation drill (default: None)
+  --allocation-plan FILE, --plan FILE, --plan-table FILE
+                        local TOML/JSON table describing atomic combinations,
+                        group scopes, and slots (default: None)
+  --pylock FILE, --pylock-file FILE
+                        PEP 751 pylock environment input for allocation
+                        drills; may be repeated (default: [])
+  --allocation-format {markdown,json}
+                        format for the offline allocation drill report;
+                        defaults to markdown, or json with -f json
+  --allocation-check    exit non-zero when the allocation drill leaves
+                        conflict conditions (default: False)
   -f FORMAT, --format FORMAT
                         the format to emit audit results in (choices: columns,
                         json, cyclonedx-json, cyclonedx-xml, markdown)
@@ -266,6 +283,33 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Offline remediation allocation drills
+
+`pip-audit` can rehearse remediation ownership without querying a vulnerability
+service. Feed it an existing JSON audit result, one or more `pylock.*.toml`
+environment inputs, and a local TOML/JSON allocation table:
+
+```sh
+pip-audit \
+  --audit-result audit.json \
+  --allocation-plan allocation-plan.toml \
+  --pylock pylock.web.toml \
+  --pylock pylock.worker.toml
+```
+
+The drill joins audit findings to exact versions in each lockfile, assigns whole
+candidate change combinations to groups, checks package version-line scope and
+slot capacity, and enforces consistent package/image versions for shared
+images. The Markdown or JSON report lists each group's accepted combinations and
+the exact conflict conditions left unallocated. It also simulates naive
+alert-by-alert slot grabbing to show why independently claiming alerts can
+split an atomic batch or exhaust the only cross-environment slot.
+
+A runnable single-cross-environment-owner demo and plan-table schema are in
+[`examples/allocation-drill`](examples/allocation-drill/README.md). Use
+`--allocation-format json` for automation and `--allocation-check` to fail when
+allocation conflicts remain.
 
 ## Examples
 
