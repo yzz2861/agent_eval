@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "name": "windows-linux-path-contract",
+  "description": "Acceptance vectors for ordinary filenames that differ only by case, Unicode normalization, or path root convention.",
+  "platforms": [
+    {
+      "name": "linux",
+      "path_style": "posix",
+      "export": "relative",
+      "mapping": {
+        "docs/caf\u00e9.txt": "docs/cafe\u0301.txt",
+        "src/main.py": "./src/main.py"
+      }
+    },
+    {
+      "name": "windows",
+      "path_style": "windows",
+      "export": "relative",
+      "mapping": {
+        "src/App.py": "src\\App.py",
+        "docs/caf\u00e9.txt": "docs\\caf\u00e9.txt",
+        "src/main.py": "C:\\work\\src\\main.py",
+        "src/README.md": "src\\README.md",
+        "src/readme.md": "src\\readme.md"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "case-variant",
+      "description": "A rule spelling differs from the recorded file only by case.",
+      "steps": [
+        {
+          "name": "build",
+          "materials": [],
+          "products": [
+            {
+              "name": "src/App.py",
+              "content": "print('hello')\n"
+            }
+          ]
+        }
+      ],
+      "target": {
+        "step": "build",
+        "type": "products"
+      },
+      "policies": {
+        "before": {
+          "match_names": "original",
+          "rules": [
+            ["ALLOW", "src/app.py"],
+            ["DISALLOW", "*"]
+          ]
+        },
+        "after": {
+          "match_names": "normalized",
+          "normalization": {
+            "case": "casefold",
+            "unicode": "none",
+            "separator": "slash"
+          },
+          "rules": [
+            ["ALLOW", "src/app.py"],
+            ["DISALLOW", "*"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "unicode-equivalence",
+      "description": "The same logical filename is exported as NFC on Windows and NFD on Linux.",
+      "steps": [
+        {
+          "name": "build",
+          "materials": [],
+          "products": [
+            {
+              "name": "docs/caf\u00e9.txt",
+              "content": "caf\u00e9\n"
+            }
+          ]
+        }
+      ],
+      "target": {
+        "step": "build",
+        "type": "products"
+      },
+      "policies": {
+        "before": {
+          "match_names": "original",
+          "rules": [
+            ["ALLOW", "docs/caf\u00e9.txt"],
+            ["DISALLOW", "*"]
+          ]
+        },
+        "after": {
+          "match_names": "normalized",
+          "normalization": {
+            "case": "preserve",
+            "unicode": "NFC",
+            "separator": "slash"
+          },
+          "rules": [
+            ["ALLOW", "docs/caf\u00e9.txt"],
+            ["DISALLOW", "*"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "root-convention",
+      "description": "Linux records a working-directory-relative path while Windows records an absolute drive path.",
+      "steps": [
+        {
+          "name": "build",
+          "materials": [],
+          "products": [
+            {
+              "name": "src/main.py",
+              "content": "print('main')\n"
+            }
+          ]
+        }
+      ],
+      "target": {
+        "step": "build",
+        "type": "products"
+      },
+      "policies": {
+        "before": {
+          "match_names": "original",
+          "rules": [
+            ["ALLOW", "src/main.py"],
+            ["DISALLOW", "*"]
+          ]
+        },
+        "after": {
+          "match_names": "normalized",
+          "normalization": {
+            "case": "preserve",
+            "unicode": "none",
+            "separator": "slash",
+            "strip_prefixes": ["C:/work/"]
+          },
+          "rules": [
+            ["ALLOW", "src/main.py"],
+            ["DISALLOW", "*"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "material-product-match",
+      "description": "A MATCH rule links package materials to build products through prefixes.",
+      "steps": [
+        {
+          "name": "build",
+          "materials": [],
+          "products": [
+            {
+              "name": "lib/util.py",
+              "content": "def util():\n    return 1\n"
+            }
+          ]
+        },
+        {
+          "name": "package",
+          "materials": [
+            {
+              "name": "lib/util.py",
+              "content": "def util():\n    return 1\n"
+            }
+          ],
+          "products": []
+        }
+      ],
+      "target": {
+        "step": "package",
+        "type": "materials"
+      },
+      "policies": {
+        "before": {
+          "match_names": "original",
+          "rules": [
+            [
+              "MATCH",
+              "*.py",
+              "IN",
+              "lib",
+              "WITH",
+              "PRODUCTS",
+              "IN",
+              "lib",
+              "FROM",
+              "build"
+            ],
+            ["DISALLOW", "*"]
+          ]
+        },
+        "after": {
+          "match_names": "normalized",
+          "normalization": {
+            "case": "casefold",
+            "unicode": "none",
+            "separator": "slash"
+          },
+          "rules": [
+            [
+              "MATCH",
+              "*.py",
+              "IN",
+              "lib",
+              "WITH",
+              "PRODUCTS",
+              "IN",
+              "lib",
+              "FROM",
+              "build"
+            ],
+            ["DISALLOW", "*"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "mapping-ambiguity",
+      "description": "Two case-distinct files collapse to one Windows case-insensitive lookup key.",
+      "steps": [
+        {
+          "name": "build",
+          "materials": [],
+          "products": [
+            {
+              "name": "src/README.md",
+              "content": "upper\n"
+            },
+            {
+              "name": "src/readme.md",
+              "content": "lower\n"
+            }
+          ]
+        }
+      ],
+      "target": {
+        "step": "build",
+        "type": "products"
+      },
+      "policies": {
+        "before": {
+          "match_names": "original",
+          "rules": [
+            ["ALLOW", "src/README.md"],
+            ["DISALLOW", "*"]
+          ]
+        },
+        "after": {
+          "match_names": "original",
+          "rules": [
+            ["ALLOW", "src/README.md"],
+            ["DISALLOW", "*"]
+          ]
+        }
+      }
+    }
+  ]
+}

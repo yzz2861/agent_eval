@@ -36,4 +36,5 @@ in-toto-verify: perform final product supply chain verification <in-toto-verify>
 
 in-toto-mock: mock in-toto-run <in-toto-mock>
 in-toto-sign: sign/verify individual pieces of metadata <in-toto-sign>
+in-toto-contract-check: check cross-platform path contracts offline <in-toto-contract-check>
 ```

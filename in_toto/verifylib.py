@@ -642,6 +642,58 @@ def verify_all_steps_command_alignment(layout, chain_link_dict):
             verify_command_alignment(command, expected_command)
 
 
+def _filter_match_rule_artifacts(rule_data, artifacts_queue):
+    """Return pattern-matched source artifacts for a MATCH rule.
+
+    The optional source prefix is stripped before globbing, so that it is not
+    interpreted as a glob pattern. The returned pairs contain the path relative
+    to the source prefix, and the full path used to look up the source artifact.
+
+    <Arguments>
+      rule_data:
+              An unpacked "MATCH" rule (see in_toto.rulelib).
+
+      artifacts_queue:
+              Not yet consumed artifacts (paths only).
+
+    <Returns>
+      A list of ``(relative_path, full_source_path)`` tuples.
+
+    """
+    if rule_data["source_prefix"]:
+        # Add trailing slash to source prefix if it does not exist
+        normalized_source_prefix = os.path.join(
+            rule_data["source_prefix"], ""
+        ).replace("\\", "/")
+
+        filtered_source_paths = [
+            artifact_path[len(normalized_source_prefix) :]
+            for artifact_path in artifacts_queue
+            if artifact_path.startswith(normalized_source_prefix)
+        ]
+
+    else:
+        filtered_source_paths = artifacts_queue
+
+    # Filter part 2 - glob above filtered artifact paths
+    filtered_source_paths = fnmatch.filter(
+        filtered_source_paths, rule_data["pattern"]
+    )
+
+    if rule_data["source_prefix"]:
+        return [
+            (
+                path,
+                os.path.join(rule_data["source_prefix"], path).replace(
+                    "\\", "/"
+                ),
+            )
+            for path in filtered_source_paths
+        ]
+
+    return [(path, path) for path in filtered_source_paths]
+
+
 def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
     """
     <Purpose>
@@ -697,43 +749,11 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
     # Extract destination artifacts from destination link
     dest_artifacts = getattr(dest_link, rule_data["dest_type"])
 
-    # Filter part 1 - Filter artifacts using optional source prefix, and subtract
-    # prefix before filtering with rule pattern (see filter part 2) to prevent
-    # globbing in the prefix.
-    if rule_data["source_prefix"]:
-        # Add trailing slash to source prefix if it does not exist
-        normalized_source_prefix = os.path.join(
-            rule_data["source_prefix"], ""
-        ).replace("\\", "/")
-
-        filtered_source_paths = [
-            artifact_path[len(normalized_source_prefix) :]
-            for artifact_path in artifacts_queue
-            if artifact_path.startswith(normalized_source_prefix)
-        ]
-
-    else:
-        filtered_source_paths = artifacts_queue
-
-    # Filter part 2 - glob above filtered artifact paths
-    filtered_source_paths = fnmatch.filter(
-        filtered_source_paths, rule_data["pattern"]
-    )
-
     # Iterate over filtered source paths and try to match the corresponding
     # source artifact hash with the corresponding destination artifact hash
-    for path in filtered_source_paths:
-        # If a source prefix was specified, we subtracted the prefix above before
-        # globbing. We have to re-prepend the prefix in order to retrieve the
-        # corresponding source artifact below.
-        if rule_data["source_prefix"]:
-            full_source_path = os.path.join(
-                rule_data["source_prefix"], path
-            ).replace("\\", "/")
-
-        else:
-            full_source_path = path
-
+    for path, full_source_path in _filter_match_rule_artifacts(
+        rule_data, artifacts_queue
+    ):
         # If a destination prefix was specified, the destination artifact should
         # be queried with the full destination path, i.e. the prefix joined with
         # the globbed path.

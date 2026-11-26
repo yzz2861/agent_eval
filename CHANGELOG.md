@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* `in-toto-contract-check` for offline simulation of per-platform path
+  mappings and material/product rule matching. Reports original versus
+  normalized match bases, ambiguous mapping candidates, and policy-expanded
+  rule applicability sets.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

@@ -41,3 +41,17 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+## Offline Path Contract Checks
+
+```{eval-rst}
+.. autofunction:: in_toto.contract_check.parse_contract
+```
+
+```{eval-rst}
+.. autofunction:: in_toto.contract_check.check_contract
+```
+
+```{eval-rst}
+.. autofunction:: in_toto.contract_check.render_markdown
+```
