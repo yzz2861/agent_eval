@@ -8,6 +8,19 @@ from bleach.sanitizer import (
     ALLOWED_TAGS,
     Cleaner,
 )
+from bleach.review import (
+    ApprovalChange,
+    ApprovalScope,
+    ContentFragment,
+    MISSING_REFERENCE,
+    OfflinePublicationReview,
+    PublicationReviewResult,
+    PublishedFragment,
+    SANITIZED,
+    UNRESOLVED_REFERENCE,
+    WithdrawnFragment,
+    WITHDRAWN_APPROVAL,
+)
 
 
 # yyyymmdd
@@ -16,7 +29,21 @@ __releasedate__ = "20260605"
 __version__ = "6.4.0"
 
 
-__all__ = ["clean", "linkify"]
+__all__ = [
+    "ApprovalChange",
+    "ApprovalScope",
+    "ContentFragment",
+    "MISSING_REFERENCE",
+    "OfflinePublicationReview",
+    "PublicationReviewResult",
+    "PublishedFragment",
+    "SANITIZED",
+    "UNRESOLVED_REFERENCE",
+    "WithdrawnFragment",
+    "WITHDRAWN_APPROVAL",
+    "clean",
+    "linkify",
+]
 
 
 def clean(
