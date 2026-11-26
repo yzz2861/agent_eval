@@ -173,6 +173,78 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
         ),
     )
 
+    parser.add_argument(
+        "--offline",
+        dest="offline",
+        action="store_true",
+        help=(
+            "enable offline approval reporting, separating signature "
+            "threshold shortfalls from valid signed rejection tickets."
+        ),
+    )
+    parser.add_argument(
+        "--rejection-tickets",
+        "--offline-tickets",
+        "--veto-tickets",
+        "--rejections",
+        dest="rejection_tickets",
+        type=str,
+        nargs="+",
+        metavar="<path>",
+        help="paths to separately signed offline rejection ticket files.",
+    )
+    parser.add_argument(
+        "--rejection-ticket",
+        dest="rejection_ticket_paths",
+        action="append",
+        type=str,
+        metavar="<path>",
+        help="path to one separately signed offline rejection ticket file.",
+    )
+    parser.add_argument(
+        "--approver-keys",
+        "--approver-public-keys",
+        "--reviewer-keys",
+        dest="approver_keys",
+        type=str,
+        nargs="+",
+        metavar="<path>",
+        help="public key files trusted to sign offline rejection tickets.",
+    )
+    parser.add_argument(
+        "--approver-key",
+        dest="approver_key_paths",
+        action="append",
+        type=str,
+        metavar="<path>",
+        help="public key file trusted to sign offline rejection tickets.",
+    )
+    parser.add_argument(
+        "--verification-time",
+        "--now",
+        "--as-of",
+        "--at",
+        dest="verification_time",
+        type=str,
+        default=None,
+        help="ISO-8601 verification time used for ticket validity checks.",
+    )
+    parser.add_argument(
+        "--layout-version",
+        dest="layout_version",
+        type=str,
+        default=None,
+        help="expected externally assigned layout version for tickets.",
+    )
+    parser.add_argument(
+        "--offline-report",
+        dest="offline_report",
+        type=str,
+        default=None,
+        metavar="<path>",
+        help="optional path where the JSON offline report is written.",
+    )
+
     parser.add_argument(*GPG_HOME_ARGS, **GPG_HOME_KWARGS)
     parser.add_argument(
         "--inspection-timeout",
@@ -206,15 +278,27 @@ def main():
     """Parse arguments and call in_toto_verify."""
     parser = create_parser()
     args = parser.parse_args()
+    args.rejection_tickets = (args.rejection_tickets or []) + (
+        args.rejection_ticket_paths or []
+    )
+    args.approver_keys = (args.approver_keys or []) + (
+        args.approver_key_paths or []
+    )
 
     LOG.setLevelVerboseOrQuiet(args.verbose, args.quiet)
 
     # For verifying at least one public key must be specified
-    if not (args.gpg or args.verification_keys):
+    offline_with_approvers = (
+        args.offline or args.rejection_tickets
+    ) and args.approver_keys
+    if not (
+        args.gpg or args.verification_keys or offline_with_approvers
+    ):
         parser.print_help()
         parser.error(
-            "wrong arguments: specify at least one layout verification key:"
-            " '--verification-keys path [path ...]' and/or '--gpg id [id ...]'."
+            "wrong arguments: specify at least one verification key:"
+            " '--verification-keys path [path ...]', '--gpg id [id ...]',"
+            " or offline '--approver-keys path [path ...]'."
         )
 
     try:
@@ -232,6 +316,33 @@ def main():
             for path in args.verification_keys:
                 key = load_public_key_from_file(path)
                 layout_key_dict[key["keyid"]] = key
+
+        if args.offline or args.rejection_tickets:
+            approver_key_dict = {}
+            if args.approver_keys:
+                for path in args.approver_keys:
+                    key = load_public_key_from_file(path)
+                    approver_key_dict[key["keyid"]] = key
+
+            report = verifylib.verify_offline(
+                layout,
+                layout_key_dict,
+                link_dir_path=args.link_dir,
+                rejection_tickets=args.rejection_tickets,
+                approver_key_dict=approver_key_dict,
+                verification_time=args.verification_time,
+                layout_version=args.layout_version,
+            )
+
+            report_json = report.to_json(indent=2)
+            if args.offline_report:
+                with open(args.offline_report, "w", encoding="utf8") as handle:
+                    handle.write(report_json)
+            print(report_json)
+
+            if not report.verified:
+                sys.exit(1)
+            sys.exit(0)
 
         verifylib.in_toto_verify(
             layout,

@@ -41,3 +41,30 @@ class PrefixError(Error):
 
 class InvalidMetadata(Error):  # noqa: N818
     """Indicates that the metadata is not valid."""
+
+
+class RejectionTicketError(Error):
+    """Indicates that an offline rejection ticket is malformed or invalid."""
+
+
+class OfflineVerificationError(Error):
+    """Raised when offline verification has unmet signatures or rejections."""
+
+    def __init__(self, message="Offline verification failed", report=None):
+        super().__init__(message)
+        self.report = report
+
+
+class RejectionVerificationError(OfflineVerificationError):
+    """Offline verification failed because a rejection remains active."""
+
+
+class RejectedArtifactError(RejectionVerificationError):
+    """A verified rejection ticket blocks the bound artifact."""
+
+
+class ActiveRejectionError(RejectionVerificationError):
+    """One or more currently valid rejection tickets remain."""
+
+
+OfflineVerificationFailed = OfflineVerificationError

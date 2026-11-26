@@ -72,6 +72,10 @@ include = [
     "/requirements*.txt",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib --confcutdir=tests"
+
 [tool.ruff]
 line-length = 80
 

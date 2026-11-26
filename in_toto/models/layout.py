@@ -38,6 +38,7 @@ from datetime import datetime
 import attr
 import securesystemslib._gpg.functions
 import securesystemslib.exceptions
+import securesystemslib.formats
 from dateutil.parser import parse
 from dateutil.relativedelta import relativedelta
 
@@ -94,6 +95,7 @@ class Layout(Signable):
     keys = attr.ib()
     expires = attr.ib()
     readme = attr.ib()
+    version = attr.ib()
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -102,6 +104,13 @@ class Layout(Signable):
         self.inspect = kwargs.get("inspect", [])
         self.keys = kwargs.get("keys", {})
         self.readme = kwargs.get("readme", "")
+        # Optional offline-policy layout version.  It is omitted from canonical
+        # signed bytes when unset, preserving historical layout signatures.
+        self.version = kwargs.get("version", kwargs.get("layout_version"))
+        self.approvers = kwargs.get(
+            "approvers", kwargs.get("reviewers", [])
+        )
+        self.reviewers = kwargs.get("reviewers", self.approvers)
 
         # Assign a default expiration (one month) if not expiration date is passed
         # TODO: Is one month a sensible default? In any case, we need a valid
@@ -123,6 +132,23 @@ class Layout(Signable):
         # NOTE: Trailing underscore is used by convention (pep8) to avoid conflict
         # with Python's type keyword.
         return self._type
+
+    @property
+    def layout_version(self):
+        """Optional externally assigned layout version."""
+        return self.version
+
+    @layout_version.setter
+    def layout_version(self, value):
+        self.version = value
+
+    @property
+    def signable_bytes(self):
+        """Canonical layout bytes, omitting an unset optional version field."""
+        data = attr.asdict(self)
+        if data.get("version") is None:
+            data.pop("version", None)
+        return securesystemslib.formats.encode_canonical(data).encode("UTF-8")
 
     @staticmethod
     def read(data):
@@ -593,6 +619,10 @@ class Step(SupplyChainItem):
         self.pubkeys = kwargs.get("pubkeys", [])
         self.expected_command = kwargs.get("expected_command", [])
         self.threshold = kwargs.get("threshold", 1)
+        self.approvers = kwargs.get(
+            "approvers", kwargs.get("reviewers", [])
+        )
+        self.reviewers = kwargs.get("reviewers", self.approvers)
 
         self.validate()
 

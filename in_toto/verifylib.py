@@ -45,6 +45,11 @@ import in_toto.settings
 from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
+    OfflineVerificationError,
+    RejectedArtifactError,
+    RejectionTicketError,
+    RejectionVerificationError,
+    ActiveRejectionError,
     RuleVerificationError,
     SignatureVerificationError,
     ThresholdVerificationError,
@@ -56,6 +61,55 @@ from in_toto.models.metadata import Metadata
 LOG = logging.getLogger(__name__)
 
 RULE_TRACE = {}
+
+_LAZY_OFFLINE_EXPORTS = {
+    "OfflineVerificationReport",
+    "OfflineReport",
+    "VerificationReport",
+    "OfflineVerificationResult",
+    "VerificationResult",
+    "OfflineApprovalReport",
+    "ApprovalReport",
+    "RejectionReport",
+    "OfflineVerifier",
+    "OfflineApprovalVerifier",
+    "RejectionVerifier",
+    "OfflineMode",
+    "OfflineVerification",
+    "MissingSignatureMap",
+    "RejectionTicket",
+    "Rejection",
+    "RejectionReceipt",
+    "RejectionVote",
+    "VetoTicket",
+    "verify_offline",
+    "verify_offline_mode",
+    "offline_verify",
+    "verify_layout_and_links",
+    "verify_layout_and_links_offline",
+    "verify_with_rejection_tickets",
+    "collect_offline_report",
+    "build_verification_report",
+    "verify_approvals",
+    "verify_offline_approvals",
+    "verify_rejection_tickets",
+    "verify_rejection_ticket",
+    "verify_rejection",
+    "released_blocks_between",
+    "SignatureShortfall",
+    "create_rejection_ticket",
+    "sign_rejection_ticket",
+    "load_rejection_ticket",
+}
+
+
+def __getattr__(name):
+    """Lazily expose optional offline approval/reporting symbols."""
+    from in_toto import offline
+
+    if name in _LAZY_OFFLINE_EXPORTS or hasattr(offline, name):
+        return getattr(offline, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _raise_on_bad_retval(return_value, command=None):
@@ -97,7 +151,7 @@ def _raise_on_bad_retval(return_value, command=None):
         raise BadReturnValueError(msg.format(what="zero"))
 
 
-def load_links_for_layout(layout, link_dir_path):
+def load_links_for_layout(layout, link_dir_path, raise_on_threshold=True):
     """
     <Purpose>
       Try to load all existing metadata files for each Step of the Layout
@@ -164,7 +218,7 @@ def load_links_for_layout(layout, link_dir_path):
         # This is only a preliminary threshold check, based on (authorized)
         # filenames, to fail early. A more thorough signature-based threshold
         # check is indispensable.
-        if len(links_per_step) < step.threshold:
+        if raise_on_threshold and len(links_per_step) < step.threshold:
             raise in_toto.exceptions.LinkNotFoundError(
                 f"Step '{step.name}' requires '{step.threshold}'"
                 f" link metadata file(s), found '{len(links_per_step)}'."
@@ -1489,6 +1543,15 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    offline=False,
+    rejection_tickets=None,
+    approver_key_dict=None,
+    approver_keys=None,
+    verification_time=None,
+    now=None,
+    layout_version=None,
+    raise_on_offline_error=False,
+    **offline_kwargs,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1580,6 +1643,47 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     """
 
+    offline = offline or offline_kwargs.pop("offline_mode", False)
+    rejection_tickets = (
+        rejection_tickets
+        if rejection_tickets is not None
+        else offline_kwargs.pop("rejection_receipts", None)
+    )
+    rejection_tickets = (
+        rejection_tickets
+        if rejection_tickets is not None
+        else offline_kwargs.pop("veto_tickets", None)
+    )
+    approver_key_dict = approver_key_dict or offline_kwargs.pop(
+        "approver_public_keys", None
+    )
+    verification_time = verification_time or offline_kwargs.pop(
+        "current_time", None
+    )
+
+    if (
+        offline
+        or rejection_tickets is not None
+        or approver_key_dict is not None
+    ):
+        from in_toto.offline import verify_offline
+
+        report = verify_offline(
+            metadata,
+            layout_key_dict,
+            link_dir_path=link_dir_path,
+            substitution_parameters=substitution_parameters,
+            rejection_tickets=rejection_tickets,
+            approver_key_dict=approver_key_dict,
+            approver_keys=approver_keys,
+            verification_time=verification_time or now,
+            layout_version=layout_version,
+            **offline_kwargs,
+        )
+        if raise_on_offline_error:
+            report.raise_if_failed()
+        return report
+
     LOG.info("Verifying layout metadata signatures...")
     verify_metadata_signatures(metadata, layout_key_dict)
 
@@ -1640,3 +1744,123 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     # This is mostly relevant if the currently verified supply chain is embedded
     # in another supply chain
     return get_summary_link(layout, reduced_chain_link_dict, step_name)
+
+
+def collect_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR0912
+    """Collect per-step link signature threshold status without raising."""
+    main_keys_for_subkeys = {}
+    for main_key in list(layout.keys.values()):
+        for sub_keyid in main_key.get("subkeys", []):
+            main_keys_for_subkeys[sub_keyid] = main_key
+
+    reports = {}
+    verified_steps_metadata = {}
+
+    for step in layout.steps:
+        verified_key_link_dict = {}
+        used_main_keyids = []
+        valid_link_keyids = []
+        invalid_signatures = []
+        unauthorized_keyids = []
+
+        authorized_main_keyids = []
+        for authorized_keyid in step.pubkeys:
+            authorized_key = layout.keys.get(authorized_keyid)
+            main_key_for_subkey = main_keys_for_subkeys.get(authorized_keyid)
+            if authorized_key:
+                authorized_main_keyids.append(
+                    authorized_key.get("keyid", authorized_keyid)
+                )
+                for subkeyid in authorized_key.get("subkeys", {}):
+                    authorized_main_keyids.append(subkeyid)
+            elif main_key_for_subkey:
+                authorized_main_keyids.append(
+                    main_key_for_subkey.get("keyid", authorized_keyid)
+                )
+
+        for link_keyid, link in steps_metadata.get(step.name, {}).items():
+            for authorized_keyid in step.pubkeys:
+                authorized_key = layout.keys.get(authorized_keyid)
+                main_key_for_subkey = main_keys_for_subkeys.get(
+                    authorized_keyid
+                )
+
+                if authorized_key and link_keyid == authorized_keyid:
+                    verification_key = authorized_key
+                    break
+
+                if main_key_for_subkey and link_keyid == authorized_keyid:
+                    verification_key = main_key_for_subkey
+                    break
+
+                if (
+                    authorized_key
+                    and link_keyid in authorized_key.get("subkeys", {})
+                ):
+                    verification_key = authorized_key
+                    break
+            else:
+                unauthorized_keyids.append(link_keyid)
+                continue
+
+            try:
+                link.verify_signature(verification_key)
+
+            except (SignatureVerificationError, KeyExpirationError) as exc:
+                invalid_signatures.append(
+                    {"keyid": link_keyid, "error": str(exc)}
+                )
+                continue
+
+            main_keyid = verification_key["keyid"]
+            if main_keyid not in used_main_keyids:
+                used_main_keyids.append(main_keyid)
+
+            verified_key_link_dict[link_keyid] = link
+            valid_link_keyids.append(link_keyid)
+
+        valid_count = len(set(used_main_keyids))
+        missing_count = max(0, step.threshold - valid_count)
+        unused_authorized_keyids = sorted(
+            set(authorized_main_keyids) - set(used_main_keyids)
+        )
+        complete = valid_count >= step.threshold
+
+        reports[step.name] = {
+            "step": step.name,
+            "step_name": step.name,
+            "threshold": step.threshold,
+            "required": step.threshold,
+            "valid_count": valid_count,
+            "signed_count": valid_count,
+            "count": valid_count,
+            "received": valid_count,
+            "observed": valid_count,
+            "missing_count": missing_count,
+            "missing": missing_count,
+            "shortfall": missing_count,
+            "remaining": missing_count,
+            "pending_count": missing_count,
+            "unanswered": missing_count,
+            "required_signatures": step.threshold,
+            "valid_signatures": valid_count,
+            "signed": valid_count,
+            "complete": complete,
+            "satisfied": complete,
+            "ok": complete,
+            "valid_keyids": sorted(set(used_main_keyids)),
+            "valid_link_keyids": valid_link_keyids,
+            "signed_keyids": valid_link_keyids,
+            "authorized_keyids": sorted(set(authorized_main_keyids)),
+            "unsigned_authorized_keyids": unused_authorized_keyids,
+            "missing_keyids": (
+                unused_authorized_keyids[:missing_count]
+                if missing_count
+                else []
+            ),
+            "invalid_signatures": invalid_signatures,
+            "unauthorized_keyids": unauthorized_keyids,
+        }
+        verified_steps_metadata[step.name] = verified_key_link_dict
+
+    return verified_steps_metadata, reports
