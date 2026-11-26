@@ -1,0 +1,158 @@
+{
+  "schema": "archive-receipt-timeline/v1",
+  "summary": {
+    "case_name": "fixtures",
+    "material_count": 137,
+    "archive_record_count": 0,
+    "receipt_group_count": 1,
+    "receipt_variant_count": 1,
+    "verified_segment_count": 0,
+    "provable_runs": [],
+    "gap_count": 0,
+    "packaging_change_count": 0,
+    "has_complete_chain": false,
+    "conclusion": "时间表未完全连通；可证段为 无。"
+  },
+  "receipts": [
+    {
+      "receipt_id": "tsp_response",
+      "source_id": "tsp_response",
+      "source_file": "tsp_response",
+      "outer_kind": "time_stamp_response",
+      "encoding": "der",
+      "pem_label": null,
+      "gen_time": "2015-06-02T02:39:55+08:00",
+      "serial_number": "544918635",
+      "policy": "1.1.2",
+      "imprint_algorithm": "sha1",
+      "imprint_digest": "53c9dbc16ddb343b284eefa6030e02647931affb",
+      "outer_sha256": "f978dc6e7596cb75bdbd10fdceb9867f96af9fda0fc672cc11573df07bf5cbba",
+      "der_sha256": "f978dc6e7596cb75bdbd10fdceb9867f96af9fda0fc672cc11573df07bf5cbba",
+      "token_sha256": "dcac6b5f5c96d8a18bb4fe83437015b3b3e939eafa31cd9fc514ce166d361400",
+      "tst_info_sha256": "4029fcd5448848a95f58ec9db7f7dbf530200d97eba57e35d277655c50a65483",
+      "token_range": {
+        "source": "tsp_response",
+        "basis": "der",
+        "start": 9,
+        "end": 711,
+        "length": 702,
+        "role": "timestamp_token",
+        "record_id": null,
+        "note": null
+      },
+      "tst_info_range": {
+        "source": "tsp_response",
+        "basis": "der",
+        "start": 70,
+        "end": 237,
+        "length": 167,
+        "role": "tst_info_econtent",
+        "record_id": null,
+        "note": null
+      },
+      "cms_commitments": [
+        {
+          "kind": "cms_message_digest",
+          "signer_index": 0,
+          "attribute": "message_digest",
+          "algorithm": "sha1",
+          "claimed_digest": null,
+          "actual_digest": "22067da4fc7bc59480b4b078c2076602a30d62ae",
+          "verified": false,
+          "byte_range": {
+            "source": "tsp_response",
+            "basis": "der",
+            "start": 70,
+            "end": 237,
+            "length": 167,
+            "role": "tst_info_econtent",
+            "record_id": null,
+            "note": null
+          },
+          "signature_verification": "delegated_to_caller"
+        }
+      ],
+      "cms_digest_verified": false,
+      "imprint_commitment": {
+        "kind": "timestamp_message_imprint",
+        "algorithm": "sha1",
+        "claimed_digest": "53c9dbc16ddb343b284eefa6030e02647931affb",
+        "verified": true,
+        "byte_range": {
+          "source": "message.txt",
+          "basis": "raw",
+          "start": 0,
+          "end": 49,
+          "length": 49,
+          "role": "file",
+          "record_id": null,
+          "note": null
+        },
+        "matching_ranges": [
+          {
+            "source": "message.txt",
+            "basis": "raw",
+            "start": 0,
+            "end": 49,
+            "length": 49,
+            "role": "file",
+            "record_id": null,
+            "note": null
+          }
+        ],
+        "signature_verification": "delegated_to_caller"
+      },
+      "trust": {
+        "verdict": "not_provided",
+        "provided": false,
+        "basis": "caller"
+      },
+      "record": null,
+      "predecessor": null,
+      "packaging": {
+        "token_sha256": "dcac6b5f5c96d8a18bb4fe83437015b3b3e939eafa31cd9fc514ce166d361400",
+        "variant_count": 1,
+        "outer_packaging_changed": false,
+        "outer_package_count": 1,
+        "outer_kinds": [
+          "time_stamp_response"
+        ],
+        "commitment_still_verifiable": false,
+        "packaging_change_with_commitment_intact": false,
+        "variants": [
+          {
+            "source_id": "tsp_response",
+            "outer_kind": "time_stamp_response",
+            "encoding": "der",
+            "outer_sha256": "f978dc6e7596cb75bdbd10fdceb9867f96af9fda0fc672cc11573df07bf5cbba",
+            "trust": {
+              "verdict": "not_provided",
+              "provided": false,
+              "basis": "caller"
+            }
+          }
+        ]
+      },
+      "errors": [],
+      "proof": {
+        "cms_digest_verified": false,
+        "imprint_verified": true,
+        "segment_verified": false,
+        "signature_trusted_by_caller": false,
+        "trust_verdict": "not_provided",
+        "self_verifiable": false,
+        "self_provable": false
+      },
+      "chain": {
+        "expected_predecessor": null,
+        "status": "uncommitted_receipt",
+        "note": "Receipt parses, but no supplied archive record matches its imprint."
+      }
+    }
+  ],
+  "gaps": [],
+  "provable_runs": [],
+  "packaging_changes": [],
+  "records": [],
+  "parse_errors": []
+}

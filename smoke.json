@@ -1,0 +1,22 @@
+{
+  "schema": "archive-receipt-timeline/v1",
+  "summary": {
+    "case_name": "tsp_response",
+    "material_count": 0,
+    "archive_record_count": 0,
+    "receipt_group_count": 0,
+    "receipt_variant_count": 0,
+    "verified_segment_count": 0,
+    "provable_runs": [],
+    "gap_count": 0,
+    "packaging_change_count": 0,
+    "has_complete_chain": false,
+    "conclusion": "没有解析到 CMS 或时间回执。"
+  },
+  "receipts": [],
+  "gaps": [],
+  "provable_runs": [],
+  "packaging_changes": [],
+  "records": [],
+  "parse_errors": []
+}
