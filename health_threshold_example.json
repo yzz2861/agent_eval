@@ -1,0 +1,31 @@
+{
+  "expression": "shared_count = (uint16_t)((samples >= 0 && samples <= 16384) ? samples * 2 : 32766)",
+  "fields": {
+    "samples": "int16_t",
+    "shared_count": "uint16_t"
+  },
+  "business": {
+    "min": 0,
+    "max": 32768
+  },
+  "targets": [
+    {
+      "name": "board16",
+      "char_bits": 8,
+      "short_bits": 16,
+      "int_bits": 16,
+      "long_bits": 32,
+      "long_long_bits": 64,
+      "pointer_bits": 16
+    },
+    {
+      "name": "board32",
+      "char_bits": 8,
+      "short_bits": 16,
+      "int_bits": 32,
+      "long_bits": 32,
+      "long_long_bits": 64,
+      "pointer_bits": 32
+    }
+  ]
+}

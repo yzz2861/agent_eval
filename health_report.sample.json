@@ -1,0 +1,80 @@
+{
+  "expression": "shared_count = (uint16_t)((samples >= 0 && samples <= 16384) ? samples * 2 : 32766)",
+  "business_bounds": {
+    "min": 0,
+    "max": 32768
+  },
+  "reports": [
+    {
+      "target": "board16",
+      "status": "insufficient_evidence",
+      "reason": "possible undefined/runtime behavior blocks a business-invariant proof",
+      "result_type": "uint16_t",
+      "target_widths": {
+        "char_bits": 8,
+        "short_bits": 16,
+        "int_bits": 16,
+        "long_bits": 32,
+        "long_long_bits": 64
+      },
+      "computed_range": {
+        "min": 0,
+        "max": 32768,
+        "segments": [
+          [
+            0,
+            32768
+          ]
+        ]
+      },
+      "business_bounds": {
+        "min": 0,
+        "max": 32768
+      },
+      "outside_bounds": [],
+      "issues": [
+        {
+          "code": "signed_overflow_possible",
+          "severity": "blocker",
+          "message": "signed result envelope [0, 32768] exceeds int range [-32768, 32767]; C signed overflow is undefined behavior",
+          "node": "samples * 2"
+        }
+      ],
+      "blocker_count": 1,
+      "confirmation_count": 0,
+      "warning_count": 0
+    },
+    {
+      "target": "board32",
+      "status": "sufficient_evidence",
+      "reason": "sound range envelope is inside caller-supplied business bounds",
+      "result_type": "uint16_t",
+      "target_widths": {
+        "char_bits": 8,
+        "short_bits": 16,
+        "int_bits": 32,
+        "long_bits": 32,
+        "long_long_bits": 64
+      },
+      "computed_range": {
+        "min": 0,
+        "max": 32768,
+        "segments": [
+          [
+            0,
+            32768
+          ]
+        ]
+      },
+      "business_bounds": {
+        "min": 0,
+        "max": 32768
+      },
+      "outside_bounds": [],
+      "issues": [],
+      "blocker_count": 0,
+      "confirmation_count": 0,
+      "warning_count": 0
+    }
+  ]
+}
