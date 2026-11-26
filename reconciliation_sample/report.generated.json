@@ -1,0 +1,637 @@
+{
+  "schema_version": "observation-reconciliation/v1",
+  "as_of_settled_at": "2026-11-26T10:00:00+00:00",
+  "valid_at": null,
+  "identity_policy": "Exact dedup key is (report_group, numbering_domain, observation_number). STIX id, timestamp, count, and equal numeric labels without a confirmed shared domain are not observation identity evidence.",
+  "manifest_metadata": {},
+  "summary": {
+    "sighting_count": 7,
+    "manifest_count": 9,
+    "group_count": 6,
+    "exact_verified_groups": 2,
+    "bounded_groups": 3,
+    "claim_only_groups": 1,
+    "conflict_groups": 0,
+    "conflict_count": 0
+  },
+  "weekly_report": [
+    {
+      "group": "A-duplicate-shard",
+      "status": "exact_verified",
+      "weekly_writable": "exact_number",
+      "exact_number": 100,
+      "lower": 100,
+      "upper": 100,
+      "report_text": "可写确数 100：编号已在同一编号域内去重。",
+      "reason_codes": [],
+      "reasons": []
+    },
+    {
+      "group": "B-cross-domain",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 60,
+      "upper": 120,
+      "report_text": "只能写区间 60–120；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [],
+      "reasons": []
+    },
+    {
+      "group": "C-count-only",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 15,
+      "upper": 30,
+      "report_text": "只能写区间 15–30；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [
+        "observation_numbers_missing"
+      ],
+      "reasons": [
+        "只有 Sighting count 或清单计数，没有可逐条核实且归属编号域的观测编号。"
+      ]
+    },
+    {
+      "group": "D-partial-scope",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 8,
+      "upper": 20,
+      "report_text": "只能写区间 8–20；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [
+        "collection_scope_incomplete"
+      ],
+      "reasons": [
+        "该编号域已核实 8 个编号；采集范围不全，只能给出可支持上下界。"
+      ]
+    },
+    {
+      "group": "E-other-domain",
+      "status": "exact_verified",
+      "weekly_writable": "exact_number",
+      "exact_number": 6,
+      "lower": 6,
+      "upper": 6,
+      "report_text": "可写确数 6：编号已在同一编号域内去重。",
+      "reason_codes": [],
+      "reasons": []
+    },
+    {
+      "group": "indicator--11111111-1111-4111-8111-000000000107",
+      "status": "claim_only",
+      "weekly_writable": "supplier_claim_only_not_verified_exact",
+      "exact_number": null,
+      "lower": 40,
+      "upper": 40,
+      "report_text": "可引用供方声称 40，但不能写成逐笔核实后的确数。",
+      "reason_codes": [
+        "manifest_missing",
+        "stix_id_is_not_observation_identity"
+      ],
+      "reasons": [
+        "该 Sighting 没有采集清单；STIX ID、时间和 count 均不能证明底层观测相同。"
+      ]
+    }
+  ],
+  "groups": {
+    "A-duplicate-shard": {
+      "group": "A-duplicate-shard",
+      "status": "exact_verified",
+      "weekly_writable": "exact_number",
+      "exact_number": 100,
+      "lower": 100,
+      "upper": 100,
+      "report_text": "可写确数 100：编号已在同一编号域内去重。",
+      "reason_codes": [],
+      "reasons": [],
+      "components": [
+        {
+          "kind": "numbered_domain",
+          "domain": "joint-domain-a",
+          "lower": 100,
+          "upper": 100,
+          "verified_count": 100,
+          "verified_ranges": [
+            {
+              "start": 1,
+              "end": 100,
+              "count": 100
+            }
+          ],
+          "scope_intervals": [],
+          "coverage": "complete",
+          "evidence_packages": [
+            "PKG-A-EAST",
+            "PKG-A-WEST"
+          ],
+          "reason_codes": [],
+          "reasons": []
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-A-E1",
+          "package_id": "PKG-A-EAST",
+          "source": "supplier-east",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222201"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222201"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T01:00:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "joint-domain-a",
+          "number_range": [
+            1,
+            100
+          ],
+          "claimed_count": 100
+        },
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-A-W1",
+          "package_id": "PKG-A-WEST",
+          "source": "supplier-west",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222201"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222201"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T02:30:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "joint-domain-a",
+          "number_range": [
+            1,
+            100
+          ],
+          "claimed_count": 100
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    },
+    "B-cross-domain": {
+      "group": "B-cross-domain",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 60,
+      "upper": 120,
+      "report_text": "只能写区间 60–120；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [],
+      "reasons": [],
+      "components": [
+        {
+          "kind": "numbered_domain",
+          "domain": "north-domain-b",
+          "lower": 60,
+          "upper": 60,
+          "verified_count": 60,
+          "verified_ranges": [
+            {
+              "start": 1,
+              "end": 60,
+              "count": 60
+            }
+          ],
+          "scope_intervals": [],
+          "coverage": "complete",
+          "evidence_packages": [
+            "PKG-B-NORTH"
+          ],
+          "reason_codes": [],
+          "reasons": []
+        },
+        {
+          "kind": "numbered_domain",
+          "domain": "south-domain-b",
+          "lower": 60,
+          "upper": 60,
+          "verified_count": 60,
+          "verified_ranges": [
+            {
+              "start": 1,
+              "end": 60,
+              "count": 60
+            }
+          ],
+          "scope_intervals": [],
+          "coverage": "complete",
+          "evidence_packages": [
+            "PKG-B-SOUTH"
+          ],
+          "reason_codes": [],
+          "reasons": []
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-B-N1",
+          "package_id": "PKG-B-NORTH",
+          "source": "supplier-north",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222202"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222202"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T03:00:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "north-domain-b",
+          "number_range": [
+            1,
+            60
+          ],
+          "claimed_count": 60
+        },
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-B-S1",
+          "package_id": "PKG-B-SOUTH",
+          "source": "supplier-south",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222202"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222202"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T03:15:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "south-domain-b",
+          "number_range": [
+            1,
+            60
+          ],
+          "claimed_count": 60
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    },
+    "C-count-only": {
+      "group": "C-count-only",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 15,
+      "upper": 30,
+      "report_text": "只能写区间 15–30；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [
+        "observation_numbers_missing"
+      ],
+      "reasons": [
+        "只有 Sighting count 或清单计数，没有可逐条核实且归属编号域的观测编号。"
+      ],
+      "components": [
+        {
+          "kind": "count_claim",
+          "lower": 15,
+          "upper": 15,
+          "package_id": "PKG-C-1",
+          "reason_codes": [
+            "observation_numbers_missing"
+          ],
+          "reasons": [
+            "只有 Sighting count 或清单计数，没有可逐条核实且归属编号域的观测编号。"
+          ]
+        },
+        {
+          "kind": "count_claim",
+          "lower": 15,
+          "upper": 15,
+          "package_id": "PKG-C-2",
+          "reason_codes": [
+            "observation_numbers_missing"
+          ],
+          "reasons": [
+            "只有 Sighting count 或清单计数，没有可逐条核实且归属编号域的观测编号。"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-C-1",
+          "package_id": "PKG-C-1",
+          "source": "supplier-east",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222203"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222203"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T04:00:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": null,
+          "number_range": null,
+          "claimed_count": 15
+        },
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-C-2",
+          "package_id": "PKG-C-2",
+          "source": "supplier-west",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222204"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-222222222204"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T04:10:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": null,
+          "number_range": null,
+          "claimed_count": 15
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    },
+    "D-partial-scope": {
+      "group": "D-partial-scope",
+      "status": "bounded",
+      "weekly_writable": "range_only",
+      "exact_number": null,
+      "lower": 8,
+      "upper": 20,
+      "report_text": "只能写区间 8–20；跨编号域或无编号材料的重叠无法排除。",
+      "reason_codes": [
+        "collection_scope_incomplete"
+      ],
+      "reasons": [
+        "该编号域已核实 8 个编号；采集范围不全，只能给出可支持上下界。"
+      ],
+      "components": [
+        {
+          "kind": "numbered_domain",
+          "domain": "domain-d",
+          "lower": 8,
+          "upper": 20,
+          "verified_count": 8,
+          "verified_ranges": [
+            {
+              "start": 401,
+              "end": 408,
+              "count": 8
+            }
+          ],
+          "scope_intervals": [
+            [
+              401,
+              420
+            ]
+          ],
+          "coverage": "partial",
+          "evidence_packages": [
+            "PKG-D-PARTIAL"
+          ],
+          "reason_codes": [
+            "collection_scope_incomplete"
+          ],
+          "reasons": [
+            "该编号域已核实 8 个编号；采集范围不全，只能给出可支持上下界。"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-D-1",
+          "package_id": "PKG-D-PARTIAL",
+          "source": "collection-log",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-000000000005"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-000000000005"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T05:00:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "domain-d",
+          "number_range": [
+            401,
+            408
+          ],
+          "claimed_count": 8
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    },
+    "E-other-domain": {
+      "group": "E-other-domain",
+      "status": "exact_verified",
+      "weekly_writable": "exact_number",
+      "exact_number": 6,
+      "lower": 6,
+      "upper": 6,
+      "report_text": "可写确数 6：编号已在同一编号域内去重。",
+      "reason_codes": [],
+      "reasons": [],
+      "components": [
+        {
+          "kind": "numbered_domain",
+          "domain": "domain-e",
+          "lower": 6,
+          "upper": 6,
+          "verified_count": 6,
+          "verified_ranges": [
+            {
+              "start": 101,
+              "end": 106,
+              "count": 6
+            }
+          ],
+          "scope_intervals": [],
+          "coverage": "complete",
+          "evidence_packages": [
+            "PKG-E-GOOD"
+          ],
+          "reason_codes": [],
+          "reasons": []
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manifest_package",
+          "manifest_id": "M-E-1",
+          "package_id": "PKG-E-GOOD",
+          "source": "collection-log",
+          "sighting_ids": [
+            "sighting--22222222-2222-4222-8222-000000000006"
+          ],
+          "linked_sighting_ids": [
+            "sighting--22222222-2222-4222-8222-000000000006"
+          ],
+          "missing_sighting_ids": [],
+          "settled_at": "2026-11-24T05:30:00+00:00",
+          "replaces_from": "2026-11-17T16:00:00+00:00",
+          "domain": "domain-e",
+          "number_range": [
+            101,
+            106
+          ],
+          "claimed_count": 6
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    },
+    "indicator--11111111-1111-4111-8111-000000000107": {
+      "group": "indicator--11111111-1111-4111-8111-000000000107",
+      "status": "claim_only",
+      "weekly_writable": "supplier_claim_only_not_verified_exact",
+      "exact_number": null,
+      "lower": 40,
+      "upper": 40,
+      "report_text": "可引用供方声称 40，但不能写成逐笔核实后的确数。",
+      "reason_codes": [
+        "manifest_missing",
+        "stix_id_is_not_observation_identity"
+      ],
+      "reasons": [
+        "该 Sighting 没有采集清单；STIX ID、时间和 count 均不能证明底层观测相同。"
+      ],
+      "components": [
+        {
+          "kind": "unmanifested_count_claim",
+          "lower": 40,
+          "upper": 40,
+          "sighting_id": "sighting--22222222-2222-4222-8222-000000000007",
+          "reason_codes": [
+            "manifest_missing",
+            "stix_id_is_not_observation_identity"
+          ],
+          "reasons": [
+            "该 Sighting 没有采集清单；STIX ID、时间和 count 均不能证明底层观测相同。"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "unmanifested_sighting",
+          "sighting_id": "sighting--22222222-2222-4222-8222-000000000007",
+          "source": null,
+          "first_seen": "2026-11-19T00:00:00Z",
+          "last_seen": "2026-11-19T23:59:59Z",
+          "count": 40
+        }
+      ],
+      "numbering_domains": {},
+      "conflict_codes": []
+    }
+  },
+  "conflicts": [],
+  "audit": {
+    "selected_packages": [
+      {
+        "package_id": "PKG-A-EAST",
+        "manifest_id": "M-A-E1",
+        "op": "active",
+        "report_group": "A-duplicate-shard",
+        "settled_at": "2026-11-24T01:00:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "joint-domain-a"
+      },
+      {
+        "package_id": "PKG-A-WEST",
+        "manifest_id": "M-A-W1",
+        "op": "active",
+        "report_group": "A-duplicate-shard",
+        "settled_at": "2026-11-24T02:30:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "joint-domain-a"
+      },
+      {
+        "package_id": "PKG-B-NORTH",
+        "manifest_id": "M-B-N1",
+        "op": "active",
+        "report_group": "B-cross-domain",
+        "settled_at": "2026-11-24T03:00:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "north-domain-b"
+      },
+      {
+        "package_id": "PKG-B-SOUTH",
+        "manifest_id": "M-B-S1",
+        "op": "active",
+        "report_group": "B-cross-domain",
+        "settled_at": "2026-11-24T03:15:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "south-domain-b"
+      },
+      {
+        "package_id": "PKG-C-1",
+        "manifest_id": "M-C-1",
+        "op": "active",
+        "report_group": "C-count-only",
+        "settled_at": "2026-11-24T04:00:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": null
+      },
+      {
+        "package_id": "PKG-C-2",
+        "manifest_id": "M-C-2",
+        "op": "active",
+        "report_group": "C-count-only",
+        "settled_at": "2026-11-24T04:10:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": null
+      },
+      {
+        "package_id": "PKG-D-PARTIAL",
+        "manifest_id": "M-D-1",
+        "op": "active",
+        "report_group": "D-partial-scope",
+        "settled_at": "2026-11-24T05:00:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "domain-d"
+      },
+      {
+        "package_id": "PKG-E-GOOD",
+        "manifest_id": "M-E-1",
+        "op": "active",
+        "report_group": "E-other-domain",
+        "settled_at": "2026-11-24T05:30:00+00:00",
+        "replaces_from": "2026-11-17T16:00:00+00:00",
+        "replaces": [],
+        "numbering_domain": "domain-e"
+      }
+    ],
+    "active_package_ids": [
+      "PKG-A-EAST",
+      "PKG-A-WEST",
+      "PKG-B-NORTH",
+      "PKG-B-SOUTH",
+      "PKG-C-1",
+      "PKG-C-2",
+      "PKG-D-PARTIAL",
+      "PKG-E-GOOD"
+    ],
+    "withdrawn_package_ids": [],
+    "superseded_package_ids": {},
+    "duplicate_receipts": [
+      "M-A-E1"
+    ]
+  }
+}
