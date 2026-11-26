@@ -66,6 +66,8 @@ Capabilities
 * Formal validators for JSON string and XML string.
   Requires optional dependencies as described in :ref:`install instructions <install extras>`.
 * Shipped data model are serializable to and deserializable from both, JSON and XML.
+* Offline service-residency validation over primary and failover routes,
+  including proof tracing and circular-reference detection.
 
 .. _CycloneDX: https://cyclonedx.org/
 .. _CycloneDX Specification: https://github.com/CycloneDX/specification/#readme

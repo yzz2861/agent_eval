@@ -44,6 +44,7 @@ If you're looking for a CycloneDX tool to run to generate (SBOM) software bill-o
    responsibilities_capabilities
    install
    architecture
+   compliance
    examples
    contributing
    support
