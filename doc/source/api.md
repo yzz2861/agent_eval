@@ -41,3 +41,12 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+## Offline Handoff Review
+
+```{eval-rst}
+.. autofunction:: in_toto.handoff.review_handoff
+.. autofunction:: in_toto.handoff.minimal_supplement
+.. autoclass:: in_toto.handoff.HandoffReviewer
+   :members:
+```

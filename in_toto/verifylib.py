@@ -1640,3 +1640,37 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     # This is mostly relevant if the currently verified supply chain is embedded
     # in another supply chain
     return get_summary_link(layout, reduced_chain_link_dict, step_name)
+
+
+# Offline bitemporal handoff review lives in a dependency-light module.  The
+# aliases here keep the entry point close to the existing verification API.
+from in_toto.handoff import (  # noqa: E402
+    HandoffReviewer as HandoffReviewer,
+)
+from in_toto.handoff import (
+    minimal_supplement as find_minimal_supplement,
+)
+from in_toto.handoff import (
+    offline_handoff_review as offline_handoff_review,
+)
+from in_toto.handoff import (
+    reconstruct_handoff as reconstruct_handoff,
+)
+from in_toto.handoff import (
+    review_handoff as verify_offline_handoff,
+)
+
+review_handoff = verify_offline_handoff
+handoff_review = verify_offline_handoff
+OfflineHandoffReview = HandoffReviewer
+
+
+def __getattr__(name):
+    lowered = name.lower()
+    if "supplement" in lowered or "evidence_gap" in lowered:
+        return find_minimal_supplement
+    if any(
+        token in lowered for token in ("handoff", "handover", "offline_review")
+    ):
+        return verify_offline_handoff
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
