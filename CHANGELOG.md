@@ -2,6 +2,11 @@
 
 ## Development
 
+* Added ``ijson.probe``: a budgeted probing interface that checks whether
+  given prefixes appear in a JSON source within a read limit
+  (``max_bytes``), reporting FOUND/EXCLUDED/PENDING conclusions per prefix
+  along with human-readable explanations. Works with unbuffered streams
+  and any backend, and conclusions are independent of ``buf_size``.
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).

@@ -370,6 +370,45 @@ like this:
    process_accumulated_events(events)
 
 
+Probing for fields within a read budget
+=========================================
+
+For callers that may only read a bounded number of bytes from a stream
+while confirming whether certain managed fields appear in it
+(e.g. archive security reviews),
+the ``ijson.probe`` function scans a JSON source
+for one or more prefixes in a single pass::
+
+   import ijson
+
+   result = ijson.probe(source, 'docs.item.meta', 'credentials',
+                        max_bytes=1_000_000)
+   result.status_of('docs.item.meta')  # ProbeStatus.FOUND
+   result.status_of('credentials')     # ProbeStatus.EXCLUDED
+   print(result.explain())
+
+Each probed prefix gets one of three conclusions:
+
+- ``ProbeStatus.FOUND``: the prefix was observed in the stream.
+- ``ProbeStatus.EXCLUDED``: the stream reached its natural end (EOF)
+  within the read budget and the prefix never appeared,
+  so it is confirmed absent from the full range.
+- ``ProbeStatus.PENDING``: the read budget (``max_bytes``) was exhausted
+  before the stream ended,
+  so the prefix may still appear in the unread remainder
+  and no conclusion is available.
+
+Prefixes use the same syntax as ``ijson.items``
+and may point into nested objects and arrays.
+The source can be anything the synchronous ``ijson.parse`` accepts,
+including unbuffered raw streams that return short reads.
+Conclusions are independent of the ``buf_size`` read chunk size:
+tokens spanning chunk boundaries are reassembled by the incremental parser,
+so changing ``buf_size`` never turns an ``EXCLUDED`` or ``FOUND`` verdict
+into something else.
+Prefixes outside the probed selection report ``ProbeStatus.UNCHECKED``.
+
+
 Options
 =======
 
