@@ -18,4 +18,5 @@ Complete reference documentation for all pySigma modules, classes, and functions
    modifiers
    correlations
    matching
+   replay
    exceptions

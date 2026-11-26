@@ -11,6 +11,7 @@ against Sigma rules, without converting them to a query language.
    Rust-based Sigma engine `rsigma <https://github.com/timescale/rsigma>`_.
 
 See also: :doc:`/guides/matching` for a step-by-step introduction with examples.
+For replaying events around approved maintenance windows, see :doc:`replay`.
 
 Event
 -----
