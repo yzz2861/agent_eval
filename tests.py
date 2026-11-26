@@ -22,6 +22,8 @@ from defusedxml import (
     NotSupportedError,
 )
 
+from test_budget import BudgetedElementTreeTest, SecurityBudgetTest
+
 from xml.etree.ElementTree import Element as ElementAfterImport
 
 if sys.version_info < (3, 7):
@@ -591,6 +593,8 @@ def test_main():
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,
+        SecurityBudgetTest,
+        BudgetedElementTreeTest,
     ]
     for c in cls:
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(c))

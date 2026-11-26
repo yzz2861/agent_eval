@@ -11,6 +11,7 @@ import sys
 import warnings
 from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import TreeBuilder as _TreeBuilder
+from xml.etree.ElementTree import XMLPullParser as _XMLPullParser
 from xml.etree.ElementTree import parse as _parse
 from xml.etree.ElementTree import tostring
 
@@ -18,6 +19,10 @@ import importlib
 
 
 from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .budget import (
+    BudgetedReader,
+    SecurityBudget,
+)
 
 __origin__ = "xml.etree.ElementTree"
 
@@ -174,12 +179,215 @@ def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_exte
     return parser.close()
 
 
+class BudgetedXMLParser(object):
+    """Full-tree XML parser guarded by a :class:`SecurityBudget`.
+
+    Every chunk handed to :meth:`feed` is charged to the shared budget before
+    it reaches the underlying defused parser. A document counts as accepted
+    only after :meth:`close` parses the complete stream; abandoning the parser
+    early is recorded as a cancellation instead of a successful decision.
+    """
+
+    def __init__(
+        self,
+        budget,
+        target=None,
+        encoding=None,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
+        if not isinstance(budget, SecurityBudget):
+            raise TypeError("budget must be a SecurityBudget instance")
+        self._budget = budget
+        self._parser = DefusedXMLParser(
+            target=_TreeBuilder() if target is None else target,
+            encoding=encoding,
+            forbid_dtd=forbid_dtd,
+            forbid_entities=forbid_entities,
+            forbid_external=forbid_external,
+        )
+
+    @property
+    def budget(self):
+        return self._budget
+
+    @property
+    def parser(self):
+        return self._parser
+
+    def feed(self, data):
+        if data:
+            self._budget.charge(len(data))
+        return self._parser.feed(data)
+
+    def close(self):
+        root = self._parser.close()
+        self._budget.complete()
+        return root
+
+    def cancel(self):
+        """Release the parser and record an early cancellation."""
+        self._budget.cancel()
+
+    def __getattr__(self, name):
+        return getattr(self._parser, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._budget.is_active:
+            if exc_type is None:
+                self.close()
+            else:
+                self.cancel()
+
+
+class BudgetedPullParser(object):
+    """Incremental pull parser guarded by a :class:`SecurityBudget`.
+
+    The adapter mirrors :class:`xml.etree.ElementTree.XMLPullParser` while
+    charging every fed chunk to the same budget ledger used by
+    :class:`BudgetedXMLParser`. Events already produced by a complete element
+    remain readable even when the next chunk would exceed the budget.
+    """
+
+    def __init__(
+        self,
+        budget,
+        events=None,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
+        if not isinstance(budget, SecurityBudget):
+            raise TypeError("budget must be a SecurityBudget instance")
+        self._budget = budget
+        parser = DefusedXMLParser(
+            target=_TreeBuilder(),
+            forbid_dtd=forbid_dtd,
+            forbid_entities=forbid_entities,
+            forbid_external=forbid_external,
+        )
+        self._pull = _XMLPullParser(events=events, _parser=parser)
+
+    @property
+    def budget(self):
+        return self._budget
+
+    @property
+    def parser(self):
+        return self._pull
+
+    def feed(self, data):
+        if data:
+            self._budget.charge(len(data))
+        self._pull.feed(data)
+
+    def read_events(self):
+        return self._pull.read_events()
+
+    def drain_events(self):
+        """Return all currently available events as a list."""
+        return list(self._pull.read_events())
+
+    def flush(self):
+        return self._pull.flush()
+
+    def close(self):
+        self._pull.close()
+        self._budget.complete()
+
+    def cancel(self):
+        """Stop consuming and record an early cancellation."""
+        self._budget.cancel()
+
+    def __getattr__(self, name):
+        return getattr(self._pull, name)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for event in self._pull.read_events():
+            return event
+        raise StopIteration
+
+    next = __next__
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._budget.is_active:
+            if exc_type is None:
+                self.close()
+            else:
+                self.cancel()
+
+
+def budgeted_iterparse(
+    source,
+    budget,
+    events=None,
+    chunk_size=16 * 1024,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+):
+    """Incrementally parse a file object while charging bytes to ``budget``.
+
+    The returned iterator records completion once the whole stream has been
+    consumed. Abandoning the iterator before exhaustion cancels the budget so
+    that a partially read document is never mistaken for an accepted one.
+    """
+    if not hasattr(source, "read"):
+        raise TypeError("source must be a file-like object with a read() method")
+    parser = DefusedXMLParser(
+        target=_TreeBuilder(),
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+    )
+    reader = BudgetedReader(source, budget, chunk_size=chunk_size)
+    iterator = iter(_iterparse(reader, events, parser))
+
+    def budgeted_iterator():
+        try:
+            for item in iterator:
+                yield item
+            budget.complete()
+        except GeneratorExit:
+            budget.cancel()
+            raise
+
+    return budgeted_iterator()
+
+
+def fromstring_budget(text, budget, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+    """Parse ``text`` in one shot against an explicit security budget."""
+    parser = BudgetedXMLParser(
+        budget,
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+    )
+    parser.feed(text)
+    return parser.close()
+
+
 __all__ = [
     "ParseError",
+    "BudgetedPullParser",
+    "BudgetedXMLParser",
     "XML",
     "XMLParse",
     "XMLParser",
     "XMLTreeBuilder",
+    "SecurityBudget",
+    "budgeted_iterparse",
+    "fromstring_budget",
     "fromstring",
     "fromstringlist",
     "iterparse",
