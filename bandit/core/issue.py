@@ -104,6 +104,8 @@ class Issue:
         self.col_offset = col_offset
         self.end_col_offset = end_col_offset
         self.linerange = []
+        self.suppressed = False
+        self.suppressed_by = []
 
     def __str__(self):
         return (

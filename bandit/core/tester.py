@@ -15,13 +15,23 @@ LOG = logging.getLogger(__name__)
 
 
 class BanditTester:
-    def __init__(self, testset, debug, nosec_lines, metrics):
+    def __init__(
+        self, testset, debug, nosec_lines, metrics, record_suppressed=False
+    ):
         self.results = []
+        self.suppressed_results = []
         self.testset = testset
         self.last_result = None
         self.debug = debug
         self.nosec_lines = nosec_lines
         self.metrics = metrics
+        self.record_suppressed = record_suppressed
+
+    def _record_suppressed_result(self, result, nosec_tests_to_skip):
+        result.suppressed = True
+        result.suppressed_by = sorted(nosec_tests_to_skip)
+        if self.record_suppressed:
+            self.suppressed_results.append(result)
 
     def run_tests(self, raw_context, checktype):
         """Runs all tests for a certain type of check, for example
@@ -85,12 +95,18 @@ class BanditTester:
                         if not nosec_tests_to_skip:
                             LOG.debug("skipped, nosec without test number")
                             self.metrics.note_nosec()
+                            self._record_suppressed_result(
+                                result, nosec_tests_to_skip
+                            )
                             continue
                         if result.test_id in nosec_tests_to_skip:
                             LOG.debug(
                                 f"skipped, nosec for test {result.test_id}"
                             )
                             self.metrics.note_skipped_test()
+                            self._record_suppressed_result(
+                                result, nosec_tests_to_skip
+                            )
                             continue
 
                     self.results.append(result)

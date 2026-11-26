@@ -15,7 +15,16 @@ LOG = logging.getLogger(__name__)
 
 class BanditNodeVisitor:
     def __init__(
-        self, fname, fdata, metaast, testset, debug, nosec_lines, metrics
+        self,
+        fname,
+        fdata,
+        metaast,
+        testset,
+        debug,
+        nosec_lines,
+        metrics,
+        python_version=None,
+        record_suppressed=False,
     ):
         self.debug = debug
         self.nosec_lines = nosec_lines
@@ -31,7 +40,11 @@ class BanditNodeVisitor:
         self.imports = set()
         self.import_aliases = {}
         self.tester = b_tester.BanditTester(
-            self.testset, self.debug, nosec_lines, metrics
+            self.testset,
+            self.debug,
+            nosec_lines,
+            metrics,
+            record_suppressed=record_suppressed,
         )
 
         # in some cases we can't determine a qualified name
@@ -41,9 +54,10 @@ class BanditNodeVisitor:
             LOG.warning(
                 "Unable to find qualified name for module: %s", self.fname
             )
-            self.namespace = ""
+        self.namespace = ""
         LOG.debug("Module qualified name: %s", self.namespace)
         self.metrics = metrics
+        self.python_version = python_version
 
     def visit_ClassDef(self, node):
         """Visitor for AST ClassDef node
@@ -282,7 +296,12 @@ class BanditNodeVisitor:
         :param lines: lines code to process
         :return score: the aggregated score for the current file
         """
-        f_ast = ast.parse(data)
+        if self.python_version is None:
+            f_ast = ast.parse(data)
+        else:
+            f_ast = ast.parse(
+                data, feature_version=tuple(self.python_version)
+            )
         self.generic_visit(f_ast)
         # Run tests that do not require access to the AST,
         # but only to the whole file source:

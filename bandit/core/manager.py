@@ -41,6 +41,8 @@ class BanditManager:
         quiet=False,
         profile=None,
         ignore_nosec=False,
+        python_version=None,
+        record_suppressed=False,
     ):
         """Get logger, config, AST handler, and result store ready
 
@@ -66,11 +68,15 @@ class BanditManager:
         self.b_ma = b_meta_ast.BanditMetaAst()
         self.skipped = []
         self.results = []
+        self.suppressed_results = []
         self.baseline = []
         self.agg_type = agg_type
         self.metrics = metrics.Metrics()
         self.b_ts = b_test_set.BanditTestSet(config, profile)
         self.scores = []
+        self.python_version = python_version
+        self.record_suppressed = record_suppressed
+        self.multi_version_report = None
 
     def get_skipped(self):
         ret = []
@@ -360,10 +366,13 @@ class BanditManager:
             self.debug,
             nosec_lines,
             self.metrics,
+            python_version=self.python_version,
+            record_suppressed=self.record_suppressed,
         )
 
         score = res.process(data)
         self.results.extend(res.tester.results)
+        self.suppressed_results.extend(res.tester.suppressed_results)
         return score
 
 
