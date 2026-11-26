@@ -8,6 +8,17 @@ from bleach.sanitizer import (
     ALLOWED_TAGS,
     Cleaner,
 )
+from bleach.provenance import (
+    AmbiguousFragmentError,
+    AttributeProvenance,
+    AuditCleaner,
+    ProvenanceCleaner,
+    ProvenanceReport,
+    PublicRecord,
+    FragmentRecord,
+    clean_and_trace,
+    clean_with_provenance,
+)
 
 
 # yyyymmdd
@@ -16,7 +27,20 @@ __releasedate__ = "20260605"
 __version__ = "6.4.0"
 
 
-__all__ = ["clean", "linkify"]
+__all__ = [
+    "AmbiguousFragmentError",
+    "AttributeProvenance",
+    "AuditCleaner",
+    "Cleaner",
+    "FragmentRecord",
+    "ProvenanceCleaner",
+    "ProvenanceReport",
+    "PublicRecord",
+    "clean",
+    "clean_and_trace",
+    "clean_with_provenance",
+    "linkify",
+]
 
 
 def clean(
@@ -27,6 +51,8 @@ def clean(
     strip=False,
     strip_comments=True,
     css_sanitizer=None,
+    provenance=False,
+    **provenance_options,
 ):
     """Clean an HTML fragment of malicious content and return it
 
@@ -71,6 +97,17 @@ def clean(
     :returns: cleaned text as unicode
 
     """
+    if provenance:
+        return clean_with_provenance(
+            text,
+            tags=tags,
+            attributes=attributes,
+            protocols=protocols,
+            strip=strip,
+            strip_comments=strip_comments,
+            css_sanitizer=css_sanitizer,
+            **provenance_options,
+        )
     cleaner = Cleaner(
         tags=tags,
         attributes=attributes,

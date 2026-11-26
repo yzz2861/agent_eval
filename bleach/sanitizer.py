@@ -92,6 +92,8 @@ class Cleaner:
         strip_comments=True,
         filters=None,
         css_sanitizer=None,
+        provenance=False,
+        provenance_options=None,
     ):
         """Initializes a Cleaner
 
@@ -128,6 +130,8 @@ class Cleaner:
         self.strip_comments = strip_comments
         self.filters = filters or []
         self.css_sanitizer = css_sanitizer
+        self.provenance = provenance
+        self.provenance_options = dict(provenance_options or {})
 
         self.parser = html5lib_shim.BleachHTMLParser(
             tags=self.tags,
@@ -168,7 +172,18 @@ class Cleaner:
                     category=NoCssSanitizerWarning,
                 )
 
-    def clean(self, text):
+    def clean(self, text, provenance=None, **provenance_options):
+        if provenance or (provenance is None and self.provenance):
+            return self.clean_with_provenance(text, **provenance_options)
+        return self.clean_html(text)
+
+    def clean_with_provenance(self, text, **options):
+        from bleach.provenance import clean_with_provenance
+
+        merged = {**self.provenance_options, **options}
+        return clean_with_provenance(text, cleaner=self, **merged)
+
+    def clean_html(self, text):
         """Cleans text and returns sanitized result as unicode
 
         :arg str text: text to be cleaned
@@ -637,3 +652,34 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
 
         del token["name"]
         return token
+
+
+_PROVENANCE_EXPORTED_NAMES = {
+    "AmbiguousFragmentError",
+    "AttributeProvenance",
+    "AttributeSource",
+    "AuditCleaner",
+    "AuditReport",
+    "CleaningResult",
+    "DuplicateGroup",
+    "FragmentNotFoundError",
+    "FragmentProvenance",
+    "FragmentRecord",
+    "ProvenanceCleaner",
+    "ProvenanceReport",
+    "PublicRecord",
+    "TraceableCleaner",
+    "audit_clean",
+    "clean_and_trace",
+    "clean_with_provenance",
+    "publish",
+    "trace_clean",
+}
+
+
+def __getattr__(name):
+    if name in _PROVENANCE_EXPORTED_NAMES:
+        from bleach import provenance
+
+        return getattr(provenance, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
