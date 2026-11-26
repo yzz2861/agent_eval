@@ -21,5 +21,9 @@ __all__ = [
     'Registry',
     'RegistryParse',
     'RegistryLog',
-    'SettingsParse'
+    'SettingsParse',
+    'SecurityDescriptor',
+    'StructuredComparison',
+    'security_descriptor',
+    'structured_comparison',
 ]

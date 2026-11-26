@@ -67,6 +67,24 @@ Advanced users who wish to study the structure of the Windows
 Registry may find the `Registry.RegistryParse` module useful.
 This module implements all known structures of the Windows Registry.
 
+Structured offline comparison
+-----------------------------
+
+`Registry.StructuredComparison` parses selected known registry value
+types and compares semantic fields instead of treating every raw byte
+difference as a permission change.  The included acceptance set covers
+Windows Firewall `v2` rules and service security descriptors:
+
+    .venv/bin/python samples/structured_acceptance.py
+    .venv/bin/python samples/structured_report.py
+    .venv/bin/python -m Registry.StructuredComparison \
+        acceptance/snapshots/firewall-rule-baseline.json \
+        acceptance/snapshots/firewall-rule-security-action.json
+
+See `acceptance/structured-comparison-report.md` for the generated
+explanation of two display-only snapshots and one security-change
+snapshot.
+
 Wanted
 ------
   - Bug reports.

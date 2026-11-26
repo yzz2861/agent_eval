@@ -1,0 +1,131 @@
+{
+  "schema": "structured-registry-comparison/service-record-v1",
+  "snapshot_id": "service-rasman-security-dacl-bit",
+  "kind": "windows_service_record_v1",
+  "label": "One RasMan DACL access-mask bit changed",
+  "service_path": "ControlSet001\\Services\\RasMan",
+  "values": {
+    "DisplayName": {
+      "name": "DisplayName",
+      "value_type": "RegSZ",
+      "raw_hex": "40002500530079007300740065006d0072006f006f00740025005c00730079007300740065006d00330032005c007200610073006d0061006e0073002e0064006c006c002c002d003200300030000000",
+      "raw_length": 80,
+      "raw_data_byte_offset": 1859348,
+      "vk_record_byte_offset": 1859308,
+      "text": "@%Systemroot%\\system32\\rasmans.dll,-200"
+    },
+    "ErrorControl": {
+      "name": "ErrorControl",
+      "value_type": "RegDWord",
+      "raw_hex": "01000000",
+      "raw_length": 4,
+      "raw_data_byte_offset": 1859492,
+      "vk_record_byte_offset": 1859484
+    },
+    "ImagePath": {
+      "name": "ImagePath",
+      "value_type": "RegExpandSZ",
+      "raw_hex": "2500530079007300740065006d0052006f006f00740025005c00530079007300740065006d00330032005c0073007600630068006f00730074002e0065007800650020002d006b0020006e006500740073007600630073000000",
+      "raw_length": 90,
+      "raw_data_byte_offset": 1859620,
+      "vk_record_byte_offset": 1859524,
+      "text": "%SystemRoot%\\System32\\svchost.exe -k netsvcs"
+    },
+    "Start": {
+      "name": "Start",
+      "value_type": "RegDWord",
+      "raw_hex": "03000000",
+      "raw_length": 4,
+      "raw_data_byte_offset": 1859724,
+      "vk_record_byte_offset": 1859716
+    },
+    "Type": {
+      "name": "Type",
+      "value_type": "RegDWord",
+      "raw_hex": "20000000",
+      "raw_length": 4,
+      "raw_data_byte_offset": 1859756,
+      "vk_record_byte_offset": 1859748
+    },
+    "Description": {
+      "name": "Description",
+      "value_type": "RegSZ",
+      "raw_hex": "40002500530079007300740065006d0072006f006f00740025005c00730079007300740065006d00330032005c007200610073006d0061006e0073002e0064006c006c002c002d003200300031000000",
+      "raw_length": 80,
+      "raw_data_byte_offset": 1859820,
+      "vk_record_byte_offset": 1859780,
+      "text": "@%Systemroot%\\system32\\rasmans.dll,-201"
+    },
+    "DependOnService": {
+      "name": "DependOnService",
+      "value_type": "RegMultiSZ",
+      "raw_hex": "530073007400700053007600630000000000",
+      "raw_length": 18,
+      "raw_data_byte_offset": 1859564,
+      "vk_record_byte_offset": 1859908,
+      "text": [
+        "SstpSvc",
+        "",
+        ""
+      ]
+    },
+    "ObjectName": {
+      "name": "ObjectName",
+      "value_type": "RegSZ",
+      "raw_hex": "6c006f00630061006c00530079007300740065006d000000",
+      "raw_length": 24,
+      "raw_data_byte_offset": 1859988,
+      "vk_record_byte_offset": 1859948,
+      "text": "localSystem"
+    },
+    "ServiceSidType": {
+      "name": "ServiceSidType",
+      "value_type": "RegDWord",
+      "raw_hex": "01000000",
+      "raw_length": 4,
+      "raw_data_byte_offset": 1860028,
+      "vk_record_byte_offset": 1860020
+    },
+    "RequiredPrivileges": {
+      "name": "RequiredPrivileges",
+      "value_type": "RegMultiSZ",
+      "raw_hex": "5300650049006d0070006500720073006f006e00610074006500500072006900760069006c0065006700650000005300650049006e00630072006500610073006500510075006f0074006100500072006900760069006c00650067006500000053006500540063006200500072006900760069006c006500670065000000530065004300680061006e00670065004e006f007400690066007900500072006900760069006c0065006700650000005300650043007200650061007400650047006c006f00620061006c00500072006900760069006c00650067006500000053006500410073007300690067006e005000720069006d0061007200790054006f006b0065006e00500072006900760069006c0065006700650000000000",
+      "raw_length": 284,
+      "raw_data_byte_offset": 1860108,
+      "vk_record_byte_offset": 1860060,
+      "text": [
+        "SeImpersonatePrivilege",
+        "SeIncreaseQuotaPrivilege",
+        "SeTcbPrivilege",
+        "SeChangeNotifyPrivilege",
+        "SeCreateGlobalPrivilege",
+        "SeAssignPrimaryTokenPrivilege",
+        "",
+        ""
+      ]
+    },
+    "FailureActions": {
+      "name": "FailureActions",
+      "value_type": "RegBin",
+      "raw_hex": "805101000000000000000000030000001400000001000000c0d4010001000000e09304000000000000000000",
+      "raw_length": 44,
+      "raw_data_byte_offset": 1860436,
+      "vk_record_byte_offset": 1860396
+    }
+  },
+  "security_descriptor": {
+    "kind": "self_relative_security_descriptor",
+    "raw_hex": "01000480480000005400000000000000140000000200340002000000000014008d01020001010000000000050b00000000001800ff010f0001020000000000052000000020020000010100000000000512000000010100000000000512000000",
+    "base_byte_offset": 6244332,
+    "source": {
+      "value_name": "Security",
+      "key_path": "ControlSet001\\Services\\RasMan\\Security",
+      "raw_data_byte_offset": 6244332
+    }
+  },
+  "source": {
+    "generator": "python-registry",
+    "hive_path": "testing/reg_samples/new_log_1/SYSTEM",
+    "service_path": "ControlSet001\\Services\\RasMan"
+  }
+}

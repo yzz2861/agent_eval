@@ -1,0 +1,250 @@
+{
+  "firewall": [
+    {
+      "snapshot_file": "firewall-rule-display-name.json",
+      "snapshot_id": "firewall-display-name-only",
+      "verdict": "display_only",
+      "raw_changed": true,
+      "display_only": true,
+      "security_change": false,
+      "permission_change": false,
+      "unknown_versions": [],
+      "changed_tokens": [
+        "Name"
+      ],
+      "raw_byte_changes": [
+        {
+          "operation": "replace",
+          "offset": 290,
+          "byte_offset": 290,
+          "length": 1,
+          "baseline_offset": 290,
+          "candidate_offset": 290,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "30",
+          "candidate_hex": "39",
+          "baseline_fields": [
+            "Name"
+          ],
+          "baseline_field": "Name",
+          "candidate_fields": [
+            "Name"
+          ],
+          "candidate_field": "Name"
+        },
+        {
+          "operation": "replace",
+          "offset": 292,
+          "byte_offset": 292,
+          "length": 1,
+          "baseline_offset": 292,
+          "candidate_offset": 292,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "30",
+          "candidate_hex": "39",
+          "baseline_fields": [
+            "Name"
+          ],
+          "baseline_field": "Name",
+          "candidate_fields": [
+            "Name"
+          ],
+          "candidate_field": "Name"
+        }
+      ]
+    },
+    {
+      "snapshot_file": "firewall-rule-display-description.json",
+      "snapshot_id": "firewall-display-description-only",
+      "verdict": "display_only",
+      "raw_changed": true,
+      "display_only": true,
+      "security_change": false,
+      "permission_change": false,
+      "unknown_versions": [],
+      "changed_tokens": [
+        "Desc"
+      ],
+      "raw_byte_changes": [
+        {
+          "operation": "replace",
+          "offset": 348,
+          "byte_offset": 348,
+          "length": 1,
+          "baseline_offset": 348,
+          "candidate_offset": 348,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "30",
+          "candidate_hex": "39",
+          "baseline_fields": [
+            "Desc"
+          ],
+          "baseline_field": "Desc",
+          "candidate_fields": [
+            "Desc"
+          ],
+          "candidate_field": "Desc"
+        },
+        {
+          "operation": "replace",
+          "offset": 350,
+          "byte_offset": 350,
+          "length": 1,
+          "baseline_offset": 350,
+          "candidate_offset": 350,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "31",
+          "candidate_hex": "38",
+          "baseline_fields": [
+            "Desc"
+          ],
+          "baseline_field": "Desc",
+          "candidate_fields": [
+            "Desc"
+          ],
+          "candidate_field": "Desc"
+        }
+      ]
+    },
+    {
+      "snapshot_file": "firewall-rule-security-action.json",
+      "snapshot_id": "firewall-security-action-block",
+      "verdict": "security_change",
+      "raw_changed": true,
+      "display_only": false,
+      "security_change": true,
+      "permission_change": true,
+      "unknown_versions": [],
+      "changed_tokens": [
+        "Action"
+      ],
+      "raw_byte_changes": [
+        {
+          "operation": "replace",
+          "offset": 26,
+          "byte_offset": 26,
+          "length": 1,
+          "baseline_offset": 26,
+          "candidate_offset": 26,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "41",
+          "candidate_hex": "42",
+          "baseline_fields": [
+            "Action"
+          ],
+          "baseline_field": "Action",
+          "candidate_fields": [
+            "Action"
+          ],
+          "candidate_field": "Action"
+        },
+        {
+          "operation": "replace",
+          "offset": 30,
+          "byte_offset": 30,
+          "length": 1,
+          "baseline_offset": 30,
+          "candidate_offset": 30,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "6c",
+          "candidate_hex": "6f",
+          "baseline_fields": [
+            "Action"
+          ],
+          "baseline_field": "Action",
+          "candidate_fields": [
+            "Action"
+          ],
+          "candidate_field": "Action"
+        },
+        {
+          "operation": "replace",
+          "offset": 32,
+          "byte_offset": 32,
+          "length": 1,
+          "baseline_offset": 32,
+          "candidate_offset": 32,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "6f",
+          "candidate_hex": "63",
+          "baseline_fields": [
+            "Action"
+          ],
+          "baseline_field": "Action",
+          "candidate_fields": [
+            "Action"
+          ],
+          "candidate_field": "Action"
+        },
+        {
+          "operation": "replace",
+          "offset": 34,
+          "byte_offset": 34,
+          "length": 1,
+          "baseline_offset": 34,
+          "candidate_offset": 34,
+          "baseline_length": 1,
+          "candidate_length": 1,
+          "baseline_hex": "77",
+          "candidate_hex": "6b",
+          "baseline_fields": [
+            "Action"
+          ],
+          "baseline_field": "Action",
+          "candidate_fields": [
+            "Action"
+          ],
+          "candidate_field": "Action"
+        }
+      ]
+    }
+  ],
+  "service": [
+    {
+      "snapshot_file": "service-rasman-display-name.json",
+      "snapshot_id": "service-rasman-display-name-only",
+      "verdict": "display_only",
+      "raw_changed": true,
+      "display_only": true,
+      "security_change": false,
+      "permission_change": false,
+      "unknown_versions": [],
+      "changed_fields": [
+        "DisplayName"
+      ]
+    },
+    {
+      "snapshot_file": "service-rasman-display-description.json",
+      "snapshot_id": "service-rasman-display-description-only",
+      "verdict": "display_only",
+      "raw_changed": true,
+      "display_only": true,
+      "security_change": false,
+      "permission_change": false,
+      "unknown_versions": [],
+      "changed_fields": [
+        "Description"
+      ]
+    },
+    {
+      "snapshot_file": "service-rasman-security-dacl.json",
+      "snapshot_id": "service-rasman-security-dacl-bit",
+      "verdict": "security_change",
+      "raw_changed": true,
+      "display_only": false,
+      "security_change": true,
+      "permission_change": true,
+      "unknown_versions": [],
+      "changed_fields": [
+        "Security"
+      ]
+    }
+  ]
+}
