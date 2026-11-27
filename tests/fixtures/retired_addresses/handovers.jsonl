@@ -1,0 +1,2 @@
+{"record_id":"HO-001","at":"2026-11-03T00:00:00Z","site":"east","address":"10.20.0.10","from_device":"edge-old-a","to_device":"edge-new-a","from_mac":"00:1a:2b:3c:4d:01","to_mac":"00:1a:2b:3c:4d:11","ticket_id":"CHG-20261128-017"}
+{"record_id":"HO-002","at":"2026-11-04T00:00:00Z","site":"west","address":"10.30.0.20","from_device":"edge-old-b","to_device":"edge-new-b","from_mac":"00:1a:2b:3c:4d:02","to_mac":"00:1a:2b:3c:4d:12","ticket_id":"CHG-20261128-017"}

@@ -1,0 +1,34 @@
+{
+  "file_id": "PRESERVE-2026-11-25",
+  "recorded_at": "2026-11-25T00:00:00Z",
+  "addresses": [
+    {
+      "record_id": "PRES-001",
+      "address": "10.20.0.10",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "legacy_mac": "00:1a:2b:3c:4d:01"
+    },
+    {
+      "record_id": "PRES-002",
+      "address": "10.20.0.11",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "legacy_mac": "00:1a:2b:3c:4d:01"
+    },
+    {
+      "record_id": "PRES-003",
+      "address": "10.20.0.12",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "legacy_mac": "00:1a:2b:3c:4d:01"
+    },
+    {
+      "record_id": "PRES-004",
+      "address": "10.30.0.20",
+      "site": "west",
+      "legacy_device": "edge-old-b",
+      "legacy_mac": "00:1a:2b:3c:4d:02"
+    }
+  ]
+}

@@ -1,0 +1,161 @@
+{
+  "as_of": "2026-11-25T00:00:00Z",
+  "summary": {
+    "addresses": 4,
+    "old_device": 1,
+    "new_device": 2,
+    "in_use_only": 1,
+    "unverified": 0,
+    "by_site": {
+      "east": {
+        "old_device": 1,
+        "new_device": 1,
+        "in_use_only": 1,
+        "unverified": 0
+      },
+      "west": {
+        "old_device": 0,
+        "new_device": 1,
+        "in_use_only": 0,
+        "unverified": 0
+      }
+    },
+    "old_device_addresses": [
+      "10.20.0.11"
+    ]
+  },
+  "control_plane_gaps": [
+    {
+      "source": "dhcp",
+      "site": "west",
+      "start": "2026-11-03T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "lost",
+      "reason": "west collector outage; no DHCP observation after 2026-11-03"
+    },
+    {
+      "source": "arp",
+      "site": "west",
+      "start": "2026-11-02T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "lost",
+      "reason": "west collector outage; no ARP observation after 2026-11-02"
+    }
+  ],
+  "addresses": [
+    {
+      "address": "10.20.0.10",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "verdict": "new_device",
+      "confidence": "high",
+      "supporting_records": [
+        "HO-001",
+        "dhcp:dhcp-east.pcap:1",
+        "arp:arp-east.pcap:0:sender"
+      ],
+      "absent_records": [
+        {
+          "kind": "old_arp_binding",
+          "impact": "supports_new_device",
+          "capture": "covered"
+        }
+      ],
+      "conflicts": [
+        "lease_overlap"
+      ]
+    },
+    {
+      "address": "10.20.0.11",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "verdict": "old_device",
+      "confidence": "high",
+      "supporting_records": [
+        "dhcp:dhcp-east.pcap:2",
+        "arp:arp-east.pcap:1:sender"
+      ],
+      "absent_records": [
+        {
+          "kind": "handover",
+          "impact": "documentation_gap",
+          "capture": "not-applicable"
+        },
+        {
+          "kind": "new_dhcp_ack",
+          "impact": "supports_old_device",
+          "capture": "covered"
+        },
+        {
+          "kind": "new_arp_binding",
+          "impact": "supports_old_device",
+          "capture": "covered"
+        }
+      ],
+      "conflicts": [
+        "decommission_contradiction"
+      ]
+    },
+    {
+      "address": "10.20.0.12",
+      "site": "east",
+      "legacy_device": "edge-old-a",
+      "verdict": "in_use_only",
+      "confidence": "low",
+      "supporting_records": [
+        "arp:arp-east.pcap:2:sender"
+      ],
+      "absent_records": [
+        {
+          "kind": "handover",
+          "impact": "weakens_conclusion",
+          "capture": "not-applicable"
+        },
+        {
+          "kind": "dhcp_ack",
+          "impact": "weakens_conclusion",
+          "capture": "covered"
+        },
+        {
+          "kind": "known_device_binding",
+          "impact": "weakens_conclusion",
+          "capture": "covered"
+        }
+      ],
+      "conflicts": []
+    },
+    {
+      "address": "10.30.0.20",
+      "site": "west",
+      "legacy_device": "edge-old-b",
+      "verdict": "new_device",
+      "confidence": "low",
+      "supporting_records": [
+        "HO-002"
+      ],
+      "absent_records": [
+        {
+          "kind": "dhcp_ack",
+          "impact": "weakens_conclusion",
+          "capture": "lost"
+        },
+        {
+          "kind": "arp_binding",
+          "impact": "weakens_conclusion",
+          "capture": "lost"
+        },
+        {
+          "kind": "old_dhcp_ack",
+          "impact": "weakens_conclusion",
+          "capture": "lost"
+        },
+        {
+          "kind": "old_arp_binding",
+          "impact": "weakens_conclusion",
+          "capture": "lost"
+        }
+      ],
+      "conflicts": []
+    }
+  ]
+}

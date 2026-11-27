@@ -1,0 +1,52 @@
+{
+  "capture": [
+    {
+      "source": "dhcp",
+      "site": "east",
+      "start": "2026-10-25T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "covered",
+      "reason": "east DHCP collector healthy"
+    },
+    {
+      "source": "arp",
+      "site": "east",
+      "start": "2026-10-25T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "covered",
+      "reason": "east ARP collector healthy"
+    },
+    {
+      "source": "dhcp",
+      "site": "west",
+      "start": "2026-11-01T00:00:00Z",
+      "end": "2026-11-03T00:00:00Z",
+      "status": "covered",
+      "reason": "west DHCP collector healthy before outage"
+    },
+    {
+      "source": "dhcp",
+      "site": "west",
+      "start": "2026-11-03T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "lost",
+      "reason": "west collector outage; no DHCP observation after 2026-11-03"
+    },
+    {
+      "source": "arp",
+      "site": "west",
+      "start": "2026-11-01T00:00:00Z",
+      "end": "2026-11-02T00:00:00Z",
+      "status": "covered",
+      "reason": "west ARP collector healthy before outage"
+    },
+    {
+      "source": "arp",
+      "site": "west",
+      "start": "2026-11-02T00:00:00Z",
+      "end": "2026-11-28T00:00:00Z",
+      "status": "lost",
+      "reason": "west collector outage; no ARP observation after 2026-11-02"
+    }
+  ]
+}

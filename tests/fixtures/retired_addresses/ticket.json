@@ -1,0 +1,38 @@
+{
+  "ticket_id": "CHG-20261128-017",
+  "title": "Retire two edge appliances and preserve their original addresses",
+  "devices": [
+    {
+      "device_id": "edge-old-a",
+      "name": "OLD-A",
+      "site": "east",
+      "mac": "00:1a:2b:3c:4d:01",
+      "decommissioned_at": "2026-11-01T00:00:00Z",
+      "role": "old"
+    },
+    {
+      "device_id": "edge-old-b",
+      "name": "OLD-B",
+      "site": "west",
+      "mac": "00:1a:2b:3c:4d:02",
+      "decommissioned_at": "2026-11-02T00:00:00Z",
+      "role": "old"
+    }
+  ],
+  "new_devices": [
+    {
+      "device_id": "edge-new-a",
+      "name": "NEW-A",
+      "site": "east",
+      "mac": "00:1a:2b:3c:4d:11",
+      "role": "new"
+    },
+    {
+      "device_id": "edge-new-b",
+      "name": "NEW-B",
+      "site": "west",
+      "mac": "00:1a:2b:3c:4d:12",
+      "role": "new"
+    }
+  ]
+}
