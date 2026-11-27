@@ -17,6 +17,7 @@ from dissect.ntfs.c_ntfs import (
     IO_REPARSE_TAG,
     c_ntfs,
 )
+from dissect.ntfs.evidence import FileReferenceEvidence, file_reference_evidence
 from dissect.ntfs.exceptions import (
     BrokenMftError,
     Error,
@@ -178,6 +179,21 @@ class Mft:
                 continue
             except EOFError:
                 break
+
+    def file_reference_evidence(
+        self, ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE
+    ) -> FileReferenceEvidence:
+        """Return currently provable path evidence for an MFT reference."""
+        if isinstance(ref, str):
+            ref = self.get(ref).segment
+        return file_reference_evidence(self, ref)
+
+    def evidence(
+        self,
+        ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE,
+    ) -> FileReferenceEvidence:
+        """Return currently provable path evidence for an MFT reference."""
+        return self.file_reference_evidence(ref)
 
 
 class MftRecord:
@@ -542,3 +558,13 @@ class MftRecord:
                 result[filename] = entry
 
         return result
+
+    def file_reference_evidence(self) -> FileReferenceEvidence:
+        """Return currently provable path evidence for this record."""
+        if not self.ntfs or not self.ntfs.mft:
+            raise MftNotAvailableError
+        return self.ntfs.mft.file_reference_evidence(self.segment)
+
+    def evidence(self) -> FileReferenceEvidence:
+        """Return currently provable path evidence for this record."""
+        return self.file_reference_evidence()
