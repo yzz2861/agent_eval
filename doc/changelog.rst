@@ -1,6 +1,16 @@
 Release history
 ===============
 
+macholib 1.17 (unreleased)
+---------------------------
+
+* Add ``macholib.evidence``, an address-range evidence audit for
+  offline exhibits: for a selected architecture slice and mapping
+  slide it classifies each address of a query range as file-backed
+  (with the original file offset recorded by the slice), loader
+  zero-fill, or unmapped, splitting the result into per-category
+  chunks.
+
 macholib 1.16.4
 ---------------
 
