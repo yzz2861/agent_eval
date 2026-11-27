@@ -1,0 +1,40 @@
+{
+  "created": "2026-11-28T00:15:00Z",
+  "derivation": {
+    "path": "derivation.json",
+    "sha256": "4f5283cf040958ae953ab40c7d0a226c2a865957dff75d72d8d9874d5252bb5e",
+    "signature": "derivation.json.asc",
+    "signer_fingerprint": "F4294BC8094A7E0585C85E8637473B3758C44F36",
+    "signer_key": "keys/derivation-authority.pub.asc"
+  },
+  "derivative": {
+    "inherited_delivery_marker": "signature-valid",
+    "name": "notice-external.txt",
+    "own_signature": null,
+    "path": "notice-external.txt"
+  },
+  "handoff_id": "HO-2026-11-28-001",
+  "issued_by": {
+    "fingerprint": "7F0F97AD539D51F74B018BD1062E6AC5205D871E",
+    "key": "keys/receipt-issuer.pub.asc",
+    "name": "Dispatch Desk",
+    "role": "offline outbound receipt issuer"
+  },
+  "receipt_signature": "outbound-receipt.json.asc",
+  "release_approval": {
+    "path": "release-approval.json",
+    "sha256": "47c288446323123132e7a716ebd39c0878598178c74ddef8303147f0f83668ad",
+    "signature": "release-approval.json.asc",
+    "signer_fingerprint": "EBC88A94ACB110F1BE3FE3C12B474BB02084C712",
+    "signer_key": "keys/release-approver.pub.asc"
+  },
+  "schema": "pgpy.handoff.outbound-receipt/v1",
+  "signed_object": {
+    "name": "notice-original.txt",
+    "path": "notice-original.txt",
+    "sha256": "4d9f8eb298e3459fafed9cf30ab5dbf737714aa166441553b3583be9ae76b203",
+    "signature": "notice-original.txt.asc",
+    "signer_fingerprint": "D396FE3105C7676C74DE84760E79E47169AEC37A",
+    "signer_key": "keys/original-signer.pub.asc"
+  }
+}

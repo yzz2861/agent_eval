@@ -1,0 +1,29 @@
+{
+  "delivery_basis": [],
+  "delivery_marker": {
+    "inherited_from_original": true,
+    "used_as_signature_evidence": false,
+    "value": "signature-valid"
+  },
+  "derivation_evidence_valid": false,
+  "derivative_deliverable": false,
+  "failures": [
+    {
+      "actual_sha256": "87b82288f9d15067dcf37d4aa784072efe88a9d140b9ba1b0b11ed691baa8cb4",
+      "claim": "handoff.derivation.derivative.sha256",
+      "code": "DERIVATION_DERIVATIVE_DIGEST_MISMATCH",
+      "evidence": "derivation.json",
+      "expected_sha256": "efdb43da1168c8f73e5c820ba2dcee61f07182470d5ea8686b8c3c04fa4ddefb",
+      "message": "the independent derivation statement does not cover the supplied attachment"
+    }
+  ],
+  "handoff_id": "HO-2026-11-28-001",
+  "missing_evidence": [
+    "handoff.derivation.derivative.sha256"
+  ],
+  "original_signature_valid": true,
+  "receipt_signature_valid": true,
+  "release_approval_valid": true,
+  "simplified_has_own_signature": false,
+  "simplified_signature_evidence": "none"
+}

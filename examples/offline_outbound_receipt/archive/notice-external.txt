@@ -1,0 +1,8 @@
+Delivery-Marker: signature-valid
+Notice-ID: N-2026-11-28-001
+Audience: external
+Subject: Scheduled platform maintenance
+
+The platform maintenance window is 02:00-03:00 UTC on 2026-11-30.
+Public status page: https://status.example.invalid
+Internal contact, runbook, and rollback details have been removed.

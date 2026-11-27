@@ -1,0 +1,23 @@
+{
+  "delivery_basis": [
+    "original-detached-signature",
+    "independent-derivation",
+    "release-approval",
+    "signed-outbound-receipt"
+  ],
+  "delivery_marker": {
+    "inherited_from_original": true,
+    "used_as_signature_evidence": false,
+    "value": "signature-valid"
+  },
+  "derivation_evidence_valid": true,
+  "derivative_deliverable": true,
+  "failures": [],
+  "handoff_id": "HO-2026-11-28-001",
+  "missing_evidence": [],
+  "original_signature_valid": true,
+  "receipt_signature_valid": true,
+  "release_approval_valid": true,
+  "simplified_has_own_signature": false,
+  "simplified_signature_evidence": "none"
+}

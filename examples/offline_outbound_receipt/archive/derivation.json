@@ -1,0 +1,15 @@
+{
+  "created": "2026-11-28T00:05:00Z",
+  "derivative": {
+    "name": "notice-external.txt",
+    "sha256": "efdb43da1168c8f73e5c820ba2dcee61f07182470d5ea8686b8c3c04fa4ddefb",
+    "transformation": "remove-internal-fields"
+  },
+  "handoff_id": "HO-2026-11-28-001",
+  "issuer": "Independent Desensitization Desk",
+  "schema": "pgpy.handoff.derivation/v1",
+  "source": {
+    "name": "notice-original.txt",
+    "sha256": "4d9f8eb298e3459fafed9cf30ab5dbf737714aa166441553b3583be9ae76b203"
+  }
+}

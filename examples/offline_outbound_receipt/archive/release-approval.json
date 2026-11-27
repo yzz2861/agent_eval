@@ -1,0 +1,9 @@
+{
+  "approval_id": "RA-2026-11-28-001",
+  "approved_derivation_sha256": "4f5283cf040958ae953ab40c7d0a226c2a865957dff75d72d8d9874d5252bb5e",
+  "approver": "Release Approver",
+  "created": "2026-11-28T00:10:00Z",
+  "decision": "approved",
+  "handoff_id": "HO-2026-11-28-001",
+  "schema": "pgpy.handoff.release-approval/v1"
+}
