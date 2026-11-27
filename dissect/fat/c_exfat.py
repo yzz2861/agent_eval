@@ -88,7 +88,7 @@ typedef struct STREAM_DIRECTORY_ENTRY {
 typedef struct FILENAME_DIRECTORY_ENTRY {
     uint8 entry_type;                  // 0x00 type of directory entry should be 0xC1 or 0x41
     uint8 flags;                       // 0x01 always zero for filename directory entry
-    wchar filename[15];                // 0x02 filename of dir or file each char is represented as 16 bit unicode
+    uint16 filename[15];               // 0x02 raw UTF-16 code units; kept undecoded for exact name checks
 };
 
 typedef struct FILE_DIRECTORY_ENTRY {

@@ -12,20 +12,44 @@ from dissect.fat.exceptions import (
     LastEmptyDirectoryError,
     NotADirectoryError,
 )
-from dissect.fat.exfat import ExFAT
+from dissect.fat.exfat import (
+    EXACT_NAME_ORIGIN,
+    UPCASE_TABLE_ORIGIN,
+    ExFAT,
+    ExFATDirectory,
+    NameCandidate,
+    NameKey,
+    NameSlot,
+    NameVerification,
+    UpcaseTable,
+    name_hash,
+    utf16_text,
+    utf16_units,
+)
 from dissect.fat.fat import FATFS
 
 __all__ = [
+    "EXACT_NAME_ORIGIN",
     "FATFS",
+    "UPCASE_TABLE_ORIGIN",
     "BadClusterError",
     "EmptyDirectoryError",
     "Error",
     "ExFAT",
+    "ExFATDirectory",
     "FileNotFoundError",
     "FreeClusterError",
     "InvalidBPB",
     "InvalidDirectoryError",
     "InvalidHeaderMagic",
     "LastEmptyDirectoryError",
+    "NameCandidate",
+    "NameKey",
+    "NameSlot",
+    "NameVerification",
     "NotADirectoryError",
+    "UpcaseTable",
+    "name_hash",
+    "utf16_text",
+    "utf16_units",
 ]
