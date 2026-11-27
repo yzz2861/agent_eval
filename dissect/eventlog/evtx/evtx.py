@@ -7,7 +7,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.eventlog.bxml import Bxml, BxmlSub, EvtxNameReader, parse_bxml
+from dissect.eventlog.bxml import Bxml, BxmlSub, EvtxNameReader, parse_bxml, parse_bxml_with_sources
 from dissect.eventlog.evtx.c_evtx import c_evtx
 from dissect.eventlog.exceptions import MalformedElfChnkException
 
@@ -19,12 +19,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_EVTX", "CRITICAL"))
+CHUNK_SIZE = 0x10000
 
 
 class ElfChnk:
-    def __init__(self, d: bytes, path: Path | None = None):
+    def __init__(self, d: bytes | BinaryIO, path: Path | None = None, chunk_offset: int = 0):
         self.path = path
-        self.stream = io.BytesIO(d)
+        self.chunk_offset = chunk_offset
+        self.stream = d if hasattr(d, "read") else io.BytesIO(d)
         self.header = c_evtx.EVTX_CHUNK(self.stream)
 
         if self.header.magic != b"ElfChnk\x00":
@@ -40,6 +42,22 @@ class ElfChnk:
         self.data_offset = 0
 
     def read(self, records: bool = True) -> Iterator[KeyValueCollection]:
+        yield from self._iter(records=records, with_sources=False)
+
+    def read_with_sources(
+        self, records: bool = True
+    ) -> Iterator[tuple[KeyValueCollection, KeyValueCollection, c_evtx.EVTX_RECORD, int]]:
+        yield from self._iter(records=records, with_sources=True)
+
+    def read_with_sources_at(
+        self, record_offset: int
+    ) -> Iterator[tuple[KeyValueCollection, KeyValueCollection, c_evtx.EVTX_RECORD, int]]:
+        self.stream.seek(record_offset)
+        yield from self._iter(records=True, with_sources=True)
+
+    def _iter(
+        self, records: bool = True, with_sources: bool = False
+    ) -> Iterator[KeyValueCollection | tuple[KeyValueCollection, KeyValueCollection, c_evtx.EVTX_RECORD, int]]:
         try:
             while True:
                 offset = self.stream.tell()
@@ -63,7 +81,10 @@ class ElfChnk:
                 bxml.templates = self.templates
                 bxml.template = None
                 bxml.set_name_reader(EvtxNameReader(bxml))
-                rec = parse_bxml(bxml)
+                if with_sources:
+                    rec, sources = parse_bxml_with_sources(bxml)
+                else:
+                    rec = parse_bxml(bxml)
 
                 # Validate record
                 if (
@@ -77,7 +98,10 @@ class ElfChnk:
                     log.warning("Missing timestamp in record")
                     continue
 
-                yield rec
+                if with_sources:
+                    yield rec, sources, r, offset
+                else:
+                    yield rec
         except Exception:
             if not self.empty:
                 log.exception("Exception when processing chunk")
@@ -106,7 +130,7 @@ class Evtx:
                 break
 
             try:
-                c = ElfChnk(chunk, self.path)
+                c = ElfChnk(chunk, self.path, chunk_offset)
                 for r in c.read():
                     yield r
                     self.count += 1

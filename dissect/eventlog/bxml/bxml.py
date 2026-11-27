@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import binascii
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
 from io import BytesIO
@@ -19,6 +20,28 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
     from typing_extensions import Self
+
+
+@dataclass(frozen=True)
+class BxmlNameSource:
+    name: str
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True)
+class BxmlValueSource:
+    offset: int
+    length: int
+    type_id: int
+    is_array: bool
+
+
+@dataclass(frozen=True)
+class BxmlTemplateSource:
+    reference_offset: int
+    offset: int
+    length: int
 
 
 class BxmlToken(IntEnum):
@@ -146,6 +169,7 @@ class BxmlTag:
         self.name = name
         self.attributes = {}
         self.children = []
+        self.name_sources: list[BxmlNameSource] = []
 
     def __str__(self) -> str:
         if self.attributes:
@@ -172,6 +196,7 @@ class BxmlSub:
     def __init__(self, sub_id: int):
         self.sub_id = sub_id
         self.value = None
+        self.value_source: BxmlValueSource | None = None
 
     def __repr__(self):
         return self.__str__()
@@ -194,6 +219,7 @@ class Template:
         self.mapping = {}
         self.element = None
         self.child_templates: list[Template] = []
+        self.source: BxmlTemplateSource | None = None
 
     def __str__(self) -> str:
         return str(self.element)
@@ -238,9 +264,14 @@ class Template:
         return result_dict
 
     def as_full_map(self) -> KeyValueCollection:
+        result_map, _ = self.as_full_map_with_sources()
+        return result_map
+
+    def as_full_map_with_sources(self) -> tuple[KeyValueCollection, KeyValueCollection]:
         key_value_pair = KeyValueCollection()
-        self._get_map_recursive(self.element, [], key_value_pair)
-        return key_value_pair
+        source_pair = KeyValueCollection()
+        self._get_map_recursive_with_sources(self.element, [], key_value_pair, source_pair, self.source, ())
+        return key_value_pair, source_pair
 
     def _get_map_recursive(
         self, obj: Template | BxmlSub | BxmlTag | Any, path: list[BxmlTag | Any], collection: KeyValueCollection
@@ -272,6 +303,57 @@ class Template:
 
             collection[path_str] = obj
 
+    def _get_map_recursive_with_sources(
+        self,
+        obj: Template | BxmlSub | BxmlTag | Any,
+        path: list[BxmlTag | Any],
+        collection: KeyValueCollection,
+        source_collection: KeyValueCollection,
+        template_source: BxmlTemplateSource | None,
+        name_sources: tuple[BxmlNameSource, ...],
+    ) -> None:
+        if isinstance(obj, Template):
+            self._get_map_recursive_with_sources(
+                obj.element, path, collection, source_collection, obj.source, name_sources
+            )
+        elif isinstance(obj, BxmlSub):
+            self._get_map_recursive_with_sources(
+                obj.get(), path, collection, source_collection, template_source, name_sources
+            )
+        elif isinstance(obj, BxmlTag):
+            tag_name_sources = (*name_sources, *obj.name_sources)
+            for child in obj.children:
+                self._get_map_recursive_with_sources(
+                    child, [*path, obj], collection, source_collection, template_source, tag_name_sources
+                )
+
+            if obj.name == "Event":
+                return
+
+            for key, value in obj.attributes.items():
+                source_key = obj.name + "_" + key
+                collection[source_key] = value
+                source_collection[source_key] = {
+                    "template": template_source,
+                    "name_sources": tag_name_sources,
+                    "value_source": value.value_source if isinstance(value, BxmlSub) else None,
+                }
+        elif isinstance(path[-1], BxmlTag):
+            previous_tag: BxmlTag = path[-1]
+            path_str = "_".join([val.name for val in path[2:]])
+            if previous_tag.name == "Data" and "Name" in previous_tag.attributes:
+                source_key = previous_tag.attributes["Name"]
+                collection[source_key] = obj
+            else:
+                source_key = path_str
+                collection[path_str] = obj
+
+            source_collection[source_key] = {
+                "template": template_source,
+                "name_sources": name_sources,
+                "value_source": obj.value_source if isinstance(obj, BxmlSub) else None,
+            }
+
     def add_child_template(self, tpl: Template) -> None:
         self.child_templates.append(tpl)
 
@@ -282,9 +364,10 @@ class Bxml:
     def __init__(self, bxml_stream: BytesIO, elf_chunk_stream: BytesIO) -> None:
         self.bxml_stream = bxml_stream
         self.elf_chunk_stream = elf_chunk_stream
-        self.data_offset: int = None
+        self.data_offset: int = 0
         self.template: Template = None
         self.templates: dict[int, Template] = None
+        self.name_sources: list[BxmlNameSource] = []
 
     @property
     def current_offset(self) -> int:
@@ -348,10 +431,14 @@ class Bxml:
         return tag
 
     def _read_tag_and_attributes(self, flag_more: bool, template: Template) -> BxmlTag:
+        name_count = len(self.name_sources)
         tag = BxmlTag(self.read_name_from_stream())
+        if self.name_sources:
+            tag.name_sources.append(self.name_sources[-1])
         if flag_more:
             attributes = dict(self._read_attributes(template))
             tag.add_attributes(attributes)
+            tag.name_sources.extend(self.name_sources[name_count + 1 :])
         return tag
 
     def _read_attributes(self, template: Template) -> str | BxmlToken | Any:
@@ -362,15 +449,48 @@ class Bxml:
 
     def _read_template_reference_and_data(self) -> Template:
         """Read template reference and create a template."""
+        reference_offset = self.current_offset
         reference = c_bxml.BXML_TEMPLATE_REFERENCE(self.bxml_stream)
 
         if reference.offset == self.current_offset:
             template = self._create_and_fill_template()
+            template.source = BxmlTemplateSource(
+                reference_offset=reference_offset,
+                offset=reference.offset,
+                length=self.current_offset - reference.offset,
+            )
 
             self.templates[reference.offset] = template
         else:
-            template = self.templates[reference.offset]
+            if reference.offset in self.templates:
+                template = self.templates[reference.offset]
+            else:
+                template = self._load_template_from_chunk(reference.offset)
+                self.templates[reference.offset] = template
+            template.source = BxmlTemplateSource(
+                reference_offset=reference_offset,
+                offset=template.source.offset,
+                length=template.source.length,
+            )
 
+        return template
+
+    def _load_template_from_chunk(self, offset: int) -> Template:
+        record_stream = self.bxml_stream
+        bxml_position = record_stream.tell()
+        record_name_sources = self.name_sources
+        record_data_offset = self.data_offset
+        chunk_position = self.elf_chunk_stream.tell()
+        self.elf_chunk_stream.seek(offset)
+        self.bxml_stream = self.elf_chunk_stream
+        self.data_offset = 0
+        self.name_sources = []
+        template = self._create_and_fill_template()
+        self.bxml_stream = record_stream
+        self.bxml_stream.seek(bxml_position)
+        self.elf_chunk_stream.seek(chunk_position)
+        self.data_offset = record_data_offset
+        self.name_sources = record_name_sources
         return template
 
     def _create_and_fill_template(self) -> Template:
@@ -447,13 +567,23 @@ class Bxml:
         descriptors = list(BxmlTemplateDescriptor.read_descriptors_from_stream(self.bxml_stream))
 
         for index, descriptor in enumerate(descriptors):
+            value_offset = self.current_offset
             value = _read_descriptor_value(self, descriptor)
+            value_source = BxmlValueSource(
+                offset=value_offset,
+                length=self.current_offset - value_offset,
+                type_id=int(descriptor.type_id),
+                is_array=descriptor.is_array,
+            )
 
             if isinstance(value, Template):
                 _template.add_child_template(value)
 
             if index in _template.subs:
                 _template.subs[index].set(value)
+                _template.subs[index].value_source = value_source
+
+        self.name_sources.clear()
 
         return _template
 
@@ -487,10 +617,19 @@ class EvtxNameReader(BxmlNameReader):
         """
         offset = c_bxml.uint32(self.bxml_datastream)
         if offset == self.bxml.current_offset:
+            name_offset = self.bxml.current_offset
             element_name = self._read_name_from_bxml_stream()
+            name_length = self.bxml.bxml_stream.tell() - (name_offset - self.bxml.data_offset)
         else:
+            name_offset = offset
+            if self.elf_chunk_stream is None:
+                raise BxmlException("Missing ELF chunk stream for BXML name reference")
             element_name = self._read_name_from_elf_stream(offset)
+            name_length = 10 + element_name.size * 2
 
+        self.bxml.name_sources.append(
+            BxmlNameSource(name=element_name.value, offset=name_offset, length=name_length)
+        )
         return element_name.value
 
     def _read_name_from_elf_stream(self, offset: int) -> c_bxml.BXML_NAME:
@@ -516,7 +655,16 @@ class WevtNameReader(BxmlNameReader):
     """
 
     def read(self) -> str:
-        return self._read_bxml_data_name().value
+        name_offset = self.bxml.current_offset
+        element_name = self._read_bxml_data_name()
+        self.bxml.name_sources.append(
+            BxmlNameSource(
+                name=element_name.value,
+                offset=name_offset,
+                length=self.bxml.current_offset - name_offset,
+            )
+        )
+        return element_name.value
 
     def _read_bxml_data_name(self) -> c_bxml.BXML_VALUE_TEXT:
         self._read_hash_value()
@@ -545,6 +693,11 @@ class Token:
 
 
 def parse_bxml(bxml: Bxml) -> KeyValueCollection:
+    result, _ = parse_bxml_with_sources(bxml)
+    return result
+
+
+def parse_bxml_with_sources(bxml: Bxml) -> tuple[KeyValueCollection, KeyValueCollection]:
     while True:
         token = bxml.read_token(bxml.template)
         if token == BxmlToken.BXML_END:
@@ -556,11 +709,11 @@ def parse_bxml(bxml: Bxml) -> KeyValueCollection:
         if isinstance(token, BxmlTag):
             key_collection = KeyValueCollection()
             Template()._get_map_recursive(token, [], key_collection)
-            return key_collection
+            return key_collection, KeyValueCollection()
         if bxml.read_token() != BxmlToken.BXML_END:
             pass
 
-        return token.as_full_map()
+        return token.as_full_map_with_sources()
 
 
 class BxmlTemplateDescriptor:
