@@ -1,0 +1,61 @@
+{
+  "capture": {
+    "file": "tls_cert_receipt/pcaps/A_missed_cert.pcap",
+    "frame_count": 7,
+    "time_range": [
+      "2026-11-28T12:30:00.001000+08:00",
+      "2026-11-28T12:30:00.006999+08:00"
+    ]
+  },
+  "maintenance": {
+    "window": {
+      "start": "2026-11-28T10:00:00+08:00",
+      "end": "2026-11-28T12:00:00+08:00"
+    },
+    "certificates": {
+      "old": {
+        "sha256": "b74d390a634d7927e0b9d32e74cc2e057ee21cd0e7dd74c1b5e081e96c921f89",
+        "label": "old.example.internal"
+      },
+      "new": {
+        "sha256": "29ea7e974795cab9e069c0cb5e733cc9841fe965b22801bfc4e0cd579c7248b7",
+        "label": "new.example.internal"
+      }
+    }
+  },
+  "connections": [
+    {
+      "id": 1,
+      "endpoints": [
+        "10.0.0.1:51000",
+        "10.0.0.2:443"
+      ],
+      "boundary": {
+        "syn_frame": 1,
+        "fin_frames": [],
+        "rst_frame": null,
+        "first_ts": "2026-11-28T12:30:00.001000+08:00",
+        "last_ts": "2026-11-28T12:30:00.006999+08:00"
+      },
+      "handshake": [
+        {
+          "message": "ServerHello",
+          "frames": [
+            6
+          ],
+          "ts": "2026-11-28T12:30:00.006000+08:00"
+        }
+      ],
+      "certificate": null,
+      "incomplete_record": {
+        "declared_length": 780,
+        "captured_length": 115,
+        "frames": [
+          7
+        ]
+      },
+      "verdict": "INCONCLUSIVE_NO_CERT",
+      "reason": "no server certificate observed; capture ended mid-handshake: TLS record declares 780 bytes but only 115 were captured (frames [7]); the pcap can neither prove nor refute that the old certificate is still in use"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "window": {
+    "start": "2026-11-28T10:00:00+08:00",
+    "end": "2026-11-28T12:00:00+08:00"
+  },
+  "certificates": {
+    "old": {
+      "sha256": "b74d390a634d7927e0b9d32e74cc2e057ee21cd0e7dd74c1b5e081e96c921f89",
+      "label": "old.example.internal"
+    },
+    "new": {
+      "sha256": "29ea7e974795cab9e069c0cb5e733cc9841fe965b22801bfc4e0cd579c7248b7",
+      "label": "new.example.internal"
+    }
+  }
+}

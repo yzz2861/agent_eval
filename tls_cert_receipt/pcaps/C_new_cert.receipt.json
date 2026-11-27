@@ -1,0 +1,81 @@
+{
+  "capture": {
+    "file": "tls_cert_receipt/pcaps/C_new_cert.pcap",
+    "frame_count": 12,
+    "time_range": [
+      "2026-11-28T12:40:00.001000+08:00",
+      "2026-11-28T12:40:00.011999+08:00"
+    ]
+  },
+  "maintenance": {
+    "window": {
+      "start": "2026-11-28T10:00:00+08:00",
+      "end": "2026-11-28T12:00:00+08:00"
+    },
+    "certificates": {
+      "old": {
+        "sha256": "b74d390a634d7927e0b9d32e74cc2e057ee21cd0e7dd74c1b5e081e96c921f89",
+        "label": "old.example.internal"
+      },
+      "new": {
+        "sha256": "29ea7e974795cab9e069c0cb5e733cc9841fe965b22801bfc4e0cd579c7248b7",
+        "label": "new.example.internal"
+      }
+    }
+  },
+  "connections": [
+    {
+      "id": 1,
+      "endpoints": [
+        "10.0.0.1:53000",
+        "10.0.0.2:443"
+      ],
+      "boundary": {
+        "syn_frame": 1,
+        "fin_frames": [
+          9,
+          11
+        ],
+        "rst_frame": null,
+        "first_ts": "2026-11-28T12:40:00.001000+08:00",
+        "last_ts": "2026-11-28T12:40:00.011999+08:00"
+      },
+      "handshake": [
+        {
+          "message": "ServerHello",
+          "frames": [
+            6
+          ],
+          "ts": "2026-11-28T12:40:00.006000+08:00"
+        },
+        {
+          "message": "Certificate",
+          "frames": [
+            7
+          ],
+          "ts": "2026-11-28T12:40:00.006999+08:00"
+        },
+        {
+          "message": "ServerHelloDone",
+          "frames": [
+            8
+          ],
+          "ts": "2026-11-28T12:40:00.007999+08:00"
+        }
+      ],
+      "certificate": {
+        "observed": true,
+        "sha256": "29ea7e974795cab9e069c0cb5e733cc9841fe965b22801bfc4e0cd579c7248b7",
+        "der_length": 770,
+        "chain_length": 1,
+        "frames": [
+          7
+        ],
+        "observed_ts": "2026-11-28T12:40:00.006999+08:00"
+      },
+      "incomplete_record": null,
+      "verdict": "OK_NEW_CERT_AFTER_WINDOW",
+      "reason": "observed certificate matches the maintenance-provided NEW digest, presented after the maintenance window; rotation confirmed on this connection"
+    }
+  ]
+}

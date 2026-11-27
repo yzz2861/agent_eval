@@ -1,0 +1,22 @@
+{
+  "A_missed_cert.pcap": {
+    "expect_verdict": "INCONCLUSIVE_NO_CERT",
+    "cert_frames": [],
+    "partial_record_frames": [
+      7
+    ]
+  },
+  "B_old_cert.pcap": {
+    "expect_verdict": "ALERT_OLD_CERT_AFTER_WINDOW",
+    "cert_frames": [
+      7,
+      8
+    ]
+  },
+  "C_new_cert.pcap": {
+    "expect_verdict": "OK_NEW_CERT_AFTER_WINDOW",
+    "cert_frames": [
+      7
+    ]
+  }
+}
