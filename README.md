@@ -31,6 +31,11 @@ Some CLI tools related to specific databases exists. These tools allow you to du
 | `dissect-rpm`      | [Red Hat Package Manager](https://rpm.org/) database.                                                                                                             |
 | `dissect-impacket` | Impacket compatibility shim for `secretsdump.py`.                                                                                                                 |
 
+The RPM parser can reconcile the `Name` index with the main `Packages` records. Index entries are claims and can
+outlive the record they point to; the returned package status only treats a version as proven when a main record
+confirms it. Retained or duplicate index keys stay available as provenance, and a live claim to a missing record
+leaves the version unknown.
+
 ### Impacket compatibility shim for secretsdump.py
 
 Impacket does not ([yet](https://github.com/fortra/impacket/pull/1452)) have native support for `dissect.database`,

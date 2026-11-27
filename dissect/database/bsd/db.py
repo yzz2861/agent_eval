@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import cached_property, lru_cache
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 
 from dissect.database.bsd.c_db import c_db
 
@@ -14,6 +14,17 @@ DBT = tuple[
     bytes,
 ]
 """An internal page entry structure + data (loosely related to Data-Base Thang)."""
+
+
+class DBEntry(NamedTuple):
+    """A record in a Berkeley DB, including the page it was read from."""
+
+    key: bytes | int | None
+    data: bytes | None
+    page: int | None = None
+    index: int | None = None
+    flags: int = 0
+    deleted: bool = False
 
 
 class DB:
@@ -48,6 +59,11 @@ class DB:
 
         self.page = lru_cache(128)(self.page)
 
+        # Pages that could not be read, or that were referenced but absent. Keeping
+        # track of these allows callers to distinguish a missing record from a
+        # record that is genuinely not present in the database.
+        self.missing_pages: set[int] = set()
+
     @property
     def is_btree(self) -> bool:
         """Return whether the database of a ``DB_BTREE`` type."""
@@ -71,24 +87,122 @@ class DB:
         """
         return Page(self, pgno)
 
-    def records(self) -> Iterator[tuple[bytes | int, bytes]]:
-        """Iterate over all records in the database."""
-        it = self._iter_db()
+    def entries(self, include_deleted: bool = True) -> Iterator[DBEntry]:
+        """Iterate over all records, including their page and deletion state.
+
+        Args:
+            include_deleted: Include entries that have the Berkeley DB ``B_DELETE``
+                flag set. These keys are not part of the current logical index, but
+                they can still be useful for forensic purposes.
+        """
+        self.page.cache_clear()
+        self.missing_pages.clear()
+
+        it = self._iter_db_entries()
 
         if (self.is_btree and not self.is_recno) or self.is_hash:
-            # Hash and Btree are stored in pairs
-            while entry := next(it, None):
-                _, key = entry
-                _, data = next(it)
-                yield bytes(key), bytes(data)
-        elif self.is_recno:
-            i = 0
-            while entry := next(it, None):
-                i += 1
-                dbt, data = entry
-                if dbt.type & c_db.B_DELETE:
+            # Hash and Btree leaf entries are stored as key/data pairs.
+            while True:
+                try:
+                    page, index, key_dbt, key, _ = next(it)
+                    _, _, data_dbt, data, _ = next(it)
+                except StopIteration:
+                    break
+
+                key_flags = getattr(key_dbt, "type", 0)
+                data_flags = getattr(data_dbt, "type", 0)
+                flags = key_flags | data_flags
+                deleted = bool(flags & c_db.B_DELETE)
+
+                if self.is_btree and data_flags & ~c_db.B_DELETE == c_db.B_DUPLICATE:
+                    # Off-page duplicate values: the key is stored once and the data
+                    # item points to a chain of P_LDUP pages. Expand the values while
+                    # keeping the original key and page provenance.
+                    for value, value_deleted in duplicate_values(self, data_dbt.pgno, data_dbt.tlen):
+                        if (deleted or value_deleted) and not include_deleted:
+                            continue
+                        yield DBEntry(
+                            bytes(key),
+                            value,
+                            page,
+                            index,
+                            flags | (c_db.B_DELETE if value_deleted else 0),
+                            deleted or value_deleted,
+                        )
                     continue
-                yield i, bytes(data)
+
+                if deleted and not include_deleted:
+                    continue
+
+                yield DBEntry(bytes(key), bytes(data), page, index, flags, deleted)
+        elif self.is_recno:
+            for page, index, dbt, data, recno in it:
+                # The recno comes from the P_IRECNO subtree counts, so gaps left by
+                # missing pages or deleted entries do not renumber later records.
+                flags = getattr(dbt, "type", 0)
+                deleted = bool(flags & c_db.B_DELETE)
+                if deleted and not include_deleted:
+                    continue
+                yield DBEntry(recno, bytes(data), page, index, flags, deleted)
+
+    def records(self, include_deleted: bool = False) -> Iterator[tuple[bytes | int, bytes]]:
+        """Iterate over all logical records in the database.
+
+        Args:
+            include_deleted: Include entries that have the Berkeley DB ``B_DELETE``
+                flag set. Retained keys from a previous version are normally excluded.
+        """
+        for entry in self.entries(include_deleted=include_deleted):
+            yield entry.key, entry.data
+
+    def _iter_db_entries(self) -> Iterator[tuple[int, int, DBT[0], bytes, int | None]]:
+        seen: set[int] = set()
+        if self.is_btree:
+            yield from self._walk_btree_entries(self.meta.root, seen, 1 if self.is_recno else None)
+        elif self.is_hash:
+            for i in range(self.meta.max_bucket + 1):
+                yield from self._walk_hash_entries(BUCKET_TO_PAGE(self, i), seen)
+        else:
+            raise NotImplementedError("Unsupported DB type")
+
+    def _walk_btree_entries(
+        self, pgno: int, seen: set[int], recno: int | None = None
+    ) -> Iterator[tuple[int, int, DBT[0], bytes, int | None]]:
+        if pgno in seen or not self._page_is_valid(self.page(pgno)):
+            return
+
+        seen.add(pgno)
+        page = self.page(pgno)
+
+        if page.header.type in (c_db.P_IBTREE, c_db.P_IRECNO):
+            for entry, _ in page.entries():
+                yield from self._walk_btree_entries(entry.pgno, seen, recno)
+                if recno is not None:
+                    recno += entry.nrecs
+        elif page.header.type in (c_db.P_LBTREE, c_db.P_LRECNO):
+            for index, (entry, data) in enumerate(page.entries()):
+                yield page.pgno, index, entry, data, recno
+                if recno is not None:
+                    recno += 1
+
+    def _walk_hash_entries(self, pgno: int, seen: set[int]) -> Iterator[tuple[int, int, DBT[0], bytes, int | None]]:
+        if pgno in seen or not self._page_is_valid(self.page(pgno)):
+            return
+
+        seen.add(pgno)
+        page = self.page(pgno)
+
+        for index, (entry, data) in enumerate(page.entries()):
+            yield page.pgno, index, entry, data, None
+
+        if page.header.next_pgno:
+            yield from self._walk_hash_entries(page.header.next_pgno, seen)
+
+    def _page_is_valid(self, page: Page) -> bool:
+        if not page.is_valid:
+            self.missing_pages.add(page.pgno)
+            return False
+        return True
 
     def _iter_db(self) -> Iterator[DBT]:
         if self.is_btree:
@@ -154,6 +268,21 @@ class Page:
         return c_db.PAGE(self.raw)
 
     @property
+    def is_valid(self) -> bool:
+        """Whether this page exists and has a usable header."""
+        return len(self.raw) == self.db.page_size and self.header.type != c_db.P_INVALID
+
+    @property
+    def valid(self) -> bool:
+        """Whether this page exists and has a usable header."""
+        return self.is_valid
+
+    @property
+    def missing(self) -> bool:
+        """Whether this page is absent or unreadable."""
+        return not self.is_valid
+
+    @property
     def type(self) -> int:
         """Page type."""
         return self.header.type
@@ -161,7 +290,15 @@ class Page:
     @cached_property
     def lookup(self) -> list[int]:
         """List of offsets to entries in the page."""
-        if self.type in (c_db.P_LBTREE, c_db.P_IBTREE, c_db.P_LRECNO, c_db.P_IRECNO, c_db.P_HASH):
+        if self.type in (
+            c_db.P_LBTREE,
+            c_db.P_IBTREE,
+            c_db.P_LRECNO,
+            c_db.P_IRECNO,
+            c_db.P_LDUP,
+            c_db.P_HASH,
+            c_db.P_HASH_UNSORTED,
+        ):
             return c_db.uint16[self.header.entries](self.data)
         return []
 
@@ -182,7 +319,7 @@ class Page:
         buf = memoryview(self.raw)[self.lookup[index] :]
         # These are the types that can be DBTs
         if self.header.type in (c_db.P_HASH_UNSORTED, c_db.P_HASH):
-            if buf[0] == c_db.H_OFFPAGE:
+            if buf[0] & ~c_db.B_DELETE == c_db.H_OFFPAGE:
                 entry = c_db.HOFFPAGE(buf)
                 return entry, overflow_data(self.db, entry.pgno, entry.tlen)
 
@@ -199,9 +336,13 @@ class Page:
 
         if self.header.type in (c_db.P_LBTREE, c_db.P_LDUP, c_db.P_LRECNO):
             entry = c_db.BKEYDATA(buf)
-            if entry.type == c_db.B_OVERFLOW:
+            entry_type = entry.type & ~c_db.B_DELETE
+            if entry_type == c_db.B_OVERFLOW:
                 entry = c_db.BOVERFLOW(buf)
                 return entry, overflow_data(self.db, entry.pgno, entry.tlen)
+            if entry_type == c_db.B_DUPLICATE:
+                entry = c_db.BOVERFLOW(buf)
+                return entry, b""
 
             return entry, buf[len(c_db.BKEYDATA) : len(c_db.BKEYDATA) + entry.len]
 
@@ -238,8 +379,12 @@ def overflow_data(db: DB, pgno: int, size: int) -> bytes:
     result = []
     while size > 0 and pgno != c_db.PGNO_INVALID:
         page = db.page(pgno)
+        if not page.is_valid:
+            db.missing_pages.add(pgno)
+            break
         if page.type != c_db.P_OVERFLOW:
-            raise ValueError(f"Expected overflow page, got {page.type} (pgno={pgno})")
+            db.missing_pages.add(pgno)
+            break
 
         read_size = min(size, page.header.hf_offset)
         result.append(page.data[:read_size])
@@ -248,6 +393,30 @@ def overflow_data(db: DB, pgno: int, size: int) -> bytes:
         pgno = page.header.next_pgno
 
     return b"".join(result)
+
+
+def duplicate_values(db: DB, pgno: int, size: int) -> Iterator[tuple[bytes, bool]]:
+    """Get the values from an off-page duplicate chain.
+
+    Args:
+        db: The parent ``DB`` instance.
+        pgno: The first duplicate leaf page.
+        size: The total size of the duplicate values.
+    """
+    seen: set[int] = set()
+    while pgno != c_db.PGNO_INVALID and pgno not in seen:
+        seen.add(pgno)
+        page = db.page(pgno)
+        if not page.is_valid or page.type != c_db.P_LDUP:
+            db.missing_pages.add(pgno)
+            break
+
+        for entry, data in page.entries():
+            value_deleted = bool(getattr(entry, "type", 0) & c_db.B_DELETE)
+            yield data, value_deleted
+            size -= len(data)
+
+        pgno = page.header.next_pgno
 
 
 def _db_log2(num: int) -> int:
