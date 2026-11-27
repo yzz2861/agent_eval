@@ -38,6 +38,7 @@ from pyasn1.type import univ, namedtype
 from . import rfc2898
 from . import sun_crypto
 from .util import *
+from .x509 import X509Certificate
 
 try:
     from StringIO import StringIO as BytesIO  # python 2
@@ -62,6 +63,16 @@ class TrustedCertEntry(AbstractKeystoreEntry):
         self.cert = kwargs.get("cert")
         """A byte string containing the actual certificate data. In the case of X.509 certificates, this is the DER-encoded
         X.509 representation of the certificate."""
+
+    @property
+    def public_certificate(self):
+        """An :class:`jks.x509.X509Certificate` view of the DER-encoded public certificate."""
+        return X509Certificate(self.cert)
+
+    @property
+    def public_certificates(self):
+        """X.509 views for the entry's public certificates."""
+        return [self.public_certificate]
 
     @classmethod
     def new(cls, alias, cert):
@@ -112,6 +123,11 @@ class PrivateKeyEntry(AbstractKeystoreEntry):
         self._pkey = kwargs.get("pkey")
         self._pkey_pkcs8 = kwargs.get("pkey_pkcs8")
         self._algorithm_oid = kwargs.get("algorithm_oid")
+
+    @property
+    def public_certificates(self):
+        """X.509 views for the certificates in the entry's certificate chain."""
+        return [X509Certificate(cert[1]) for cert in self.cert_chain]
 
     @classmethod
     def new(cls, alias, certs, key, key_format='pkcs8'):

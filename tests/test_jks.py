@@ -10,6 +10,7 @@ import os
 import sys
 import unittest
 import hashlib
+from datetime import datetime, timedelta
 
 import jks
 from jks.util import py23basestring
@@ -300,6 +301,109 @@ class JksTests(AbstractTest):
         keystore = jks.KeyStore.new('jks', [pkey])
         alias = list(keystore.private_keys.keys())[0]
         self.assertTrue(alias.islower())
+
+class DeploymentTimingTests(AbstractTest):
+    def setUp(self):
+        self.current_store = jks.KeyStore.load(KS_PATH + "/jks/3certs.jks", "12345678")
+        self.next_store = jks.KeyStore.load(KS_PATH + "/jks/truststore.jks", None)
+        self.fixed_now = datetime(2018, 5, 15, 18, 50, 0)
+        self.window = (self.fixed_now, self.fixed_now + timedelta(minutes=30))
+        self.cert_expiry = datetime(2018, 5, 15, 18, 58, 4)
+
+    def test_public_certificate_view_exposes_validity(self):
+        certificate = self.current_store.entries['cert1'].public_certificate
+        self.assertEqual(certificate.not_before, datetime(2016, 5, 15, 18, 58, 4))
+        self.assertEqual(certificate.not_after, self.cert_expiry)
+
+        private_key_store = jks.KeyStore.load(KS_PATH + "/jks/RSA2048_3certs.jks", "12345678")
+        private_key_entry = private_key_store.entries['mykey']
+        self.assertEqual(private_key_entry.public_certificates[0].not_after, self.cert_expiry)
+
+        bks_store = jks.bks.BksKeyStore.load(KS_PATH + "/bks/christmas.bksv1", "12345678")
+        self.assertEqual(bks_store.entries['cert'].public_certificates[0].not_after,
+                         datetime(2018, 5, 15, 23, 40, 8))
+        self.assertEqual(bks_store.entries['sealed_private_key'].public_certificates[0].not_after,
+                         datetime(2018, 5, 15, 23, 40, 8))
+
+    def test_each_service_has_individual_start_interval(self):
+        for alias in ['cert1', 'cert2']:
+            plan = jks.plan_service_cutover(
+                [{'name': alias, 'keystore': 'current', 'certificate': alias, 'duration': 240}],
+                [{'name': 'current', 'keystore': self.current_store, 'available_at': self.window[0]}],
+                self.window,
+                now=self.fixed_now
+            )
+            self.assertEqual(plan.start_interval, (
+                self.fixed_now,
+                self.cert_expiry - timedelta(minutes=4)
+            ))
+            self.assertEqual(plan.limiting_certificate_alias, alias)
+
+    def test_combined_services_are_limited_by_shorter_remaining_certificate_window(self):
+        services = [
+            {'name': 'service-a', 'keystore': 'current', 'certificate': 'cert1', 'duration': 240},
+            {'name': 'service-b', 'keystore': 'current', 'certificate': 'cert2', 'duration': 240},
+        ]
+        keystores = [
+            {'name': 'current', 'keystore': self.current_store, 'available_at': self.window[0]},
+        ]
+        plan = jks.plan_service_cutover(services, keystores, self.window, now=self.fixed_now)
+
+        self.assertEqual(plan.services[0].start_interval, (
+            self.fixed_now,
+            self.cert_expiry - timedelta(minutes=4)
+        ))
+        self.assertEqual(plan.services[1].start_interval, (
+            self.fixed_now + timedelta(minutes=4),
+            self.cert_expiry - timedelta(minutes=4)
+        ))
+        self.assertEqual(plan.start_interval, (
+            self.fixed_now,
+            self.cert_expiry - timedelta(minutes=8)
+        ))
+        self.assertEqual(plan.limiting_certificate_alias, 'cert2')
+        self.assertEqual(plan.waiting_for_keystore, ())
+
+    def test_explicit_start_offset_is_used_for_scheduled_services(self):
+        services = [
+            {'name': 'service-a', 'keystore': 'current', 'certificate': 'cert1',
+             'duration': 240, 'start_offset': 180},
+        ]
+        keystores = [
+            {'name': 'current', 'keystore': self.current_store,
+             'available_at': self.fixed_now},
+        ]
+        plan = jks.plan_service_cutover(services, keystores, self.window, now=self.fixed_now)
+
+        self.assertEqual(plan.services[0].start_interval, (
+            self.fixed_now + timedelta(minutes=3),
+            self.cert_expiry - timedelta(minutes=4)
+        ))
+        self.assertEqual(plan.start_interval, (
+            self.fixed_now,
+            self.cert_expiry - timedelta(minutes=7)
+        ))
+
+    def test_service_waits_for_next_keystore_in_shared_window(self):
+        services = [
+            {'name': 'service-a', 'keystore': 'current', 'certificate': 'cert1', 'duration': 240},
+            {'name': 'service-b', 'keystore': 'current', 'certificate': 'cert2', 'duration': 240},
+            {'name': 'service-c', 'keystore': 'next', 'certificate': 'cordarootca', 'duration': 240},
+        ]
+        keystores = [
+            {'name': 'current', 'keystore': self.current_store, 'available_at': self.window[0]},
+            {'name': 'next', 'keystore': self.next_store,
+             'available_at': self.fixed_now + timedelta(minutes=10)},
+        ]
+        plan = jks.plan_service_cutover(services, keystores, self.window, now=self.fixed_now)
+
+        self.assertEqual(plan.services[2].start_interval, (
+            self.fixed_now + timedelta(minutes=10),
+            self.fixed_now + timedelta(minutes=26)
+        ))
+        self.assertTrue(plan.services[2].waiting_for_keystore)
+        self.assertEqual(plan.start_interval, tuple())
+        self.assertEqual(plan.waiting_for_keystore, ('service-c',))
 
 class JceTests(AbstractTest):
     def test_empty_store(self):

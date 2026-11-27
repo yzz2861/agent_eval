@@ -8,6 +8,7 @@ from Cryptodome.Hash import HMAC, SHA
 from .util import *
 from .jks import KeyStore, TrustedCertEntry
 from . import rfc7292
+from .x509 import X509Certificate
 
 
 ENTRY_TYPE_CERTIFICATE = 1
@@ -26,9 +27,10 @@ class AbstractBksEntry(AbstractKeystoreEntry):
         self.cert_chain = kwargs.get("cert_chain", [])
         self._encrypted = kwargs.get("encrypted")
 
-class BksTrustedCertEntry(TrustedCertEntry):
+class BksTrustedCertEntry(AbstractBksEntry, TrustedCertEntry):
     """Represents a trusted certificate entry in a BKS or UBER keystore."""
-    pass # identical
+    def __init__(self, **kwargs):
+        super(BksTrustedCertEntry, self).__init__(**kwargs)
 
 class BksKeyEntry(AbstractBksEntry):
     """
@@ -82,6 +84,11 @@ class BksKeyEntry(AbstractBksEntry):
     def decrypt(self, key_password):
         """Does nothing for this entry type; these entries are stored in non-encrypted form."""
         pass
+
+    @property
+    def public_certificates(self):
+        """X.509 views for the certificates in the entry's certificate chain."""
+        return [X509Certificate(certificate.cert) for certificate in self.cert_chain]
 
     @classmethod
     def type2str(cls, t):
@@ -153,6 +160,11 @@ class BksSealedKeyEntry(AbstractBksEntry):
             return self.__dict__["_"+name]
         else:
             return getattr(self._nested, name)
+
+    @property
+    def public_certificates(self):
+        """X.509 views for the certificates in the entry's certificate chain."""
+        return [X509Certificate(certificate.cert) for certificate in self.cert_chain]
 
     def is_decrypted(self):
         return (not self._encrypted)
