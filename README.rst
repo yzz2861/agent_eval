@@ -52,6 +52,48 @@ Library
     print(c.scores())
     print(c.severities())
 
+    from cvss import joint_check
+
+    result = joint_check(
+        {
+            "first-advisory": {
+                "candidates": [
+                    {
+                        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H"
+                        "/SC:N/SI:N/SA:N",
+                        "observations": {"deployment": "current"},
+                    }
+                ]
+            },
+            "second-advisory": {
+                "candidates": [
+                    {
+                        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:L"
+                        "/SC:L/SI:L/SA:L",
+                        "observations": {"deployment": "current"},
+                    }
+                ]
+            },
+        },
+        [
+            {
+                "relation": "equal",
+                "left": {
+                    "announcement": "first-advisory",
+                    "observation": "deployment",
+                },
+                "right": {
+                    "announcement": "second-advisory",
+                    "observation": "deployment",
+                },
+            }
+        ],
+        threshold="High",
+    )
+    print(result.combinations)
+    print(result.undetermined_announcements)
+    print(result.conflicts)
+
 Sample output:
 
 ::

@@ -136,3 +136,11 @@ class CVSS4RHMalformedError(CVSS4Error):
     """
 
     pass
+
+
+class CVSSJointCheckError(CVSSError):
+    """
+    Exception for invalid joint check input.
+    """
+
+    pass

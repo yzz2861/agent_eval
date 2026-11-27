@@ -5,7 +5,8 @@
 from .cvss2 import CVSS2
 from .cvss3 import CVSS3
 from .cvss4 import CVSS4
-from .exceptions import CVSS2Error, CVSS3Error, CVSS4Error, CVSSError
+from .exceptions import CVSS2Error, CVSS3Error, CVSS4Error, CVSSJointCheckError, CVSSError
 from .interactive import ask_interactively
+from .joint_check import JointCheckResult, joint_check
 
 __version__ = "3.6"
