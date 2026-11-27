@@ -1,0 +1,63 @@
+{
+  "approved": [
+    "cpe:2.3:a:acme:edge_agent:2.0:*:*:*:*:*:*:*"
+  ],
+  "devices": [
+    {
+      "id": "edge-nyc-01",
+      "label": "representation-only change: URI to formatted string",
+      "before": [
+        "cpe:/a:acme:edge_agent:2.0"
+      ],
+      "after": [
+        "cpe:2.3:a:acme:edge_agent:2.0:*:*:*:*:*:*:*"
+      ]
+    },
+    {
+      "id": "edge-sfo-02",
+      "label": "real rollback: edge_agent 2.0 to 1.5; bridge version is wildcarded",
+      "before": [
+        "cpe:2.3:a:acme:edge_agent:2.0:*:*:*:*:*:*:*"
+      ],
+      "after": [
+        "cpe:/a:acme:edge_agent:1.5",
+        "cpe:2.3:a:acme:legacy_bridge:1.*:*:*:*:*:*:*:*"
+      ]
+    }
+  ],
+  "advisories": [
+    {
+      "id": "ADV-EDGE-1.5",
+      "title": "edge_agent 1.5 rollback advisory",
+      "type": "name",
+      "cpe": "cpe:2.3:a:acme:edge_agent:1.5:*:*:*:*:*:*:*"
+    },
+    {
+      "id": "ADV-BRIDGE-AND",
+      "title": "edge_agent 1.4/1.5 with legacy bridge 1.5",
+      "type": "language",
+      "expression": "<cpe:platform-specification xmlns:cpe='http://cpe.mitre.org/language/2.0'><cpe:platform id='rollback'><cpe:title>edge_agent 1.4 or 1.5 with legacy bridge 1.5</cpe:title><cpe:logical-test operator='AND' negate='FALSE'><cpe:logical-test operator='OR' negate='FALSE'><cpe:fact-ref name='cpe:2.3:a:acme:edge_agent:1.5:*:*:*:*:*:*:*'/><cpe:fact-ref name='cpe:2.3:a:acme:edge_agent:1.4:*:*:*:*:*:*:*'/></cpe:logical-test><cpe:fact-ref name='cpe:2.3:a:acme:legacy_bridge:1.5:*:*:*:*:*:*:*'/></cpe:logical-test></cpe:platform></cpe:platform-specification>"
+    },
+    {
+      "id": "ADV-EDGE-JSON",
+      "title": "NVD-style OR branch with an explicit vulnerable flag",
+      "type": "json",
+      "expression": [
+        {
+          "operator": "OR",
+          "children": [],
+          "cpe_match": [
+            {
+              "vulnerable": true,
+              "cpe23Uri": "cpe:2.3:a:acme:edge_agent:1.5:*:*:*:*:*:*:*"
+            },
+            {
+              "vulnerable": false,
+              "cpe23Uri": "cpe:2.3:a:acme:edge_agent:1.4:*:*:*:*:*:*:*"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

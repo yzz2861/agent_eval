@@ -71,6 +71,30 @@ class CPESet2_3(CPESet):
     ###################
 
     @classmethod
+    def _as_wfn(cls, name):
+        """
+        Returns name as a CPE2_3_WFN object.
+
+        Name matching is defined over WFNs.  Bound forms (URI and formatted
+        string) describe the same name, so they must be unbound before any
+        comparison.  Keeping this conversion in one place also makes the
+        public comparison helpers safe to call with either a WFN or a bound
+        CPE Name.
+
+        :param name: CPE Name as WFN object or bound CPE object/string
+        :returns: WFN representation of name
+        :rtype: CPE2_3_WFN
+        """
+
+        if isinstance(name, CPE2_3_WFN):
+            return name
+
+        if hasattr(name, "as_wfn"):
+            return CPE2_3_WFN(name.as_wfn())
+
+        return CPE2_3_WFN(name)
+
+    @classmethod
     def _compare(cls, source, target):
         """
         Compares two values associated with a attribute of two WFNs,
@@ -289,6 +313,12 @@ class CPESet2_3(CPESet):
         :rtype: generator
         """
 
+        # Accept bound forms too.  A URI, formatted string and WFN can all
+        # denote the same name; failing to normalize here caused a name whose
+        # only change was its representation to look like a different name.
+        source = CPESet2_3._as_wfn(source)
+        target = CPESet2_3._as_wfn(target)
+
         # Compare results using the get() function in WFN
         for att in CPEComponent.CPE_COMP_KEYS_EXTENDED:
             value_src = source.get_attribute_values(att)[0]
@@ -410,16 +440,17 @@ class CPESet2_3(CPESet):
                 cpe.VERSION)
             raise ValueError(errmsg)
 
+        wfn = CPESet2_3._as_wfn(cpe)
+
         for k in self.K:
-            if cpe._str == k._str:
+            k = CPESet2_3._as_wfn(k)
+            # URI, formatted-string and WFN bindings of the same name are the
+            # same set member.  ``cpe_equal`` compares the unbound attributes,
+            # so a representation-only change does not create a duplicate.
+            if wfn._str == k._str or CPESet2_3.cpe_equal(wfn, k):
                 return None
 
-        if isinstance(cpe, CPE2_3_WFN):
-            self.K.append(cpe)
-        else:
-            # Convert the CPE Name to WFN
-            wfn = CPE2_3_WFN(cpe.as_wfn())
-            self.K.append(wfn)
+        self.K.append(wfn)
 
     def name_match(self, wfn):
         """
@@ -432,7 +463,13 @@ class CPESet2_3(CPESet):
         :rtype: boolean
         """
 
+        # The candidate may be supplied in any CPE 2.3 representation.  The
+        # set itself stores WFNs, so normalize before applying the matching
+        # algorithm instead of silently reporting a subset as a mismatch.
+        wfn = CPESet2_3._as_wfn(wfn)
+
         for N in self.K:
+            N = CPESet2_3._as_wfn(N)
             if CPESet2_3.cpe_superset(wfn, N):
                 return True
         return False

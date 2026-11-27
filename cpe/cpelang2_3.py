@@ -175,6 +175,17 @@ class CPELanguage2_3(CPELanguage):
         else:
             raw_json = json.loads(expression)
 
+        if isinstance(raw_json, dict):
+            if "configurations" in raw_json:
+                raw_json = [node
+                            for configuration in raw_json.get("configurations") or []
+                            for node in configuration.get("nodes") or []]
+            elif "nodes" in raw_json:
+                raw_json = raw_json.get("nodes") or []
+            elif any(key in raw_json for key in
+                     ("operator", "children", "cpe_match", "cpeMatch")):
+                raw_json = [raw_json]
+
         dom_impl = getDOMImplementation()
         xml_doc = dom_impl.createDocument('http://cpe.mitre.org/language/2.0', 'cpe:platform-specification', None)
         # The XML prefix is not exported by minidom, therefore we add it as attribute so that it gets exported
@@ -196,15 +207,33 @@ class CPELanguage2_3(CPELanguage):
     @classmethod
     def _translate_json_child(cls, doc, child):
         element = doc.createElement('cpe:logical-test')
-        element.setAttribute('operator', child['operator'])
-        element.setAttribute('negate', 'FALSE')  # TODO ?
+        element.setAttribute('operator', child.get('operator') or 'OR')
+        element.setAttribute('negate', 'TRUE' if child.get('negate') else 'FALSE')
 
-        for children in child['children']:
+        for children in child.get('children') or []:
             element.appendChild(cls._translate_json_child(doc, children))
 
-        for cpe_match in child['cpe_match']:
+        for cpe_match in child.get('cpe_match') or child.get('cpeMatch') or []:
             cpe_element = doc.createElement('cpe:fact-ref')
-            cpe_element.setAttribute('name', cpe_match['cpe23Uri'])
+            cpe_name = (cpe_match.get('cpe23Uri') or cpe_match.get('criteria') or
+                        cpe_match.get('cpe'))
+            if not cpe_name and cpe_match.get('cpe_name'):
+                names = cpe_match['cpe_name']
+                if isinstance(names, list) and names:
+                    cpe_name = names[0]
+            if not cpe_name:
+                continue
+            cpe_element.setAttribute('name', cpe_name)
+            if 'vulnerable' in cpe_match:
+                vulnerable = cpe_match['vulnerable']
+                if isinstance(vulnerable, str):
+                    vulnerable = vulnerable.lower() in ('true', '1', 'yes')
+                cpe_element.setAttribute(
+                    'vulnerable', 'true' if vulnerable else 'false')
+            for attribute in ('versionStartIncluding', 'versionStartExcluding',
+                              'versionEndIncluding', 'versionEndExcluding'):
+                if cpe_match.get(attribute) is not None:
+                    cpe_element.setAttribute(attribute, str(cpe_match[attribute]))
             element.appendChild(cpe_element)
 
         return element
@@ -290,7 +319,7 @@ class CPELanguage2_3(CPELanguage):
 
         # Identify a check of CPE names (OVAL, OCIL...)
         elif cpel_dom.nodeName == TAG_CHECK_CPE:
-            return CPELanguage2_3._check_fact_ref_Eval(cpel_dom)
+            return CPELanguage2_3._check_fact_ref_eval(cpel_dom)
 
         # Identify a logical operator element
         elif cpel_dom.nodeName == TAG_LOGITEST:

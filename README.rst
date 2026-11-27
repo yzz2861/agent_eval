@@ -25,6 +25,7 @@ Features
 - CPE rich comparison.
 - CPE cross-version conversion.
 - CPE Language parsing and evaluation.
+- Rollback review across approved and before/after inventories.
 - LGPL Licensed.
 - Semantic versioning.
 - Tests.
