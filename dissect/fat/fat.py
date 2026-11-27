@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import datetime
 import struct
+from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache, reduce
 from operator import itemgetter
 from typing import TYPE_CHECKING, BinaryIO
@@ -76,14 +78,34 @@ class FATFS:
         self.sector_size = self.bpb.BPB_BytsPerSec
         self.cluster_size = self.bpb.BPB_BytsPerSec * self.bpb.BPB_SecPerClus
 
-        # FAT starts after reserved sectors
-        # Only parse the first FAT for now
-        fat_stream = RangeStream(
-            fh,
-            self.bpb.BPB_RsvdSecCnt * self.sector_size,
-            self.fat_size * self.sector_size,
-        )
-        self.fat = FAT(fat_stream, self.type)
+        # FAT table layout and mirroring declarations from the BPB.
+        # FAT12/16 volumes always keep all tables mirrored; FAT32 can disable
+        # mirroring through BPB_ExtFlags and nominate a single active table.
+        self.fat_count = self.bpb.BPB_NumFATs
+        if self.type == Fattype.FAT32:
+            ext_flags = self.bpb_ext.BPB_ExtFlags
+            self.fat_mirroring_enabled = not bool(ext_flags & 0x0080)
+            self.active_fat = ext_flags & 0x000F if not self.fat_mirroring_enabled else 0
+        else:
+            self.fat_mirroring_enabled = True
+            self.active_fat = 0
+        self.active_fat = min(self.active_fat, self.fat_count - 1)
+
+        # FATs start after the reserved sectors, each table is fat_size sectors
+        fat_offset = self.bpb.BPB_RsvdSecCnt * self.sector_size
+        self.fats = [
+            FAT(
+                RangeStream(
+                    fh,
+                    fat_offset + index * self.fat_size * self.sector_size,
+                    self.fat_size * self.sector_size,
+                ),
+                self.type,
+                index=index,
+            )
+            for index in range(self.fat_count)
+        ]
+        self.fat = self.fats[self.active_fat]
         self.data_stream = RangeStream(fh, self.first_data_sector * self.sector_size, data_sec * self.sector_size)
 
         # volume label with stripped padding
@@ -116,6 +138,29 @@ class FATFS:
                 raise FileNotFoundError(f"File not found: {path}")
 
         return dirent
+
+    def compare_chains(self, cluster: int, size: int | None = None) -> ChainComparison:
+        """Walk a cluster chain in every FAT table and compare the results.
+
+        Each table declared in the BPB is walked independently with
+        :meth:`FAT.walk_chain`. ``size`` is the declared file size in bytes and
+        is used to derive how many clusters the chain must provide; combined
+        with read failures and termination markers this yields a confirmable
+        common prefix and the per-table branches where the tables diverge.
+        """
+        expected_clusters = None
+        if size is not None:
+            expected_clusters = (size + self.cluster_size - 1) // self.cluster_size
+
+        walks = [fat.walk_chain(cluster, expected_clusters) for fat in self.fats]
+        return ChainComparison(
+            start_cluster=cluster,
+            walks=walks,
+            mirroring_enabled=self.fat_mirroring_enabled,
+            active_table=self.active_fat,
+            size=size,
+            expected_clusters=expected_clusters,
+        )
 
 
 def validate_bpb(bpb: c_fat.Bpb | bytes) -> None:
@@ -151,8 +196,9 @@ def validate_bpb(bpb: c_fat.Bpb | bytes) -> None:
 
 
 class FAT:
-    def __init__(self, fh: BinaryIO, fattype: Fattype):
+    def __init__(self, fh: BinaryIO, fattype: Fattype, index: int = 0):
         self.fh = fh
+        self.index = index
 
         if fattype == Fattype.FAT12:
             self.bits_per_entry = 12
@@ -235,6 +281,188 @@ class FAT:
                 run_size = 1
         else:
             yield (run_start, run_size)
+
+    def walk_chain(self, cluster: int, expected_clusters: int | None = None) -> ChainWalk:
+        """Walk a cluster chain without raising, for forensic inspection.
+
+        Unlike :meth:`chain`, unreadable or invalid entries and loops are
+        reported through the returned :class:`ChainWalk` instead of raising.
+        ``expected_clusters`` can be derived from a file size to check whether
+        the chain is long enough for the file it should describe.
+        """
+        bits = self.bits_per_entry
+        clusters = []
+        seen = set()
+        termination = ChainTermination.END_OF_CHAIN
+
+        while True:
+            if cluster in seen:
+                termination = ChainTermination.CYCLE
+                break
+            seen.add(cluster)
+
+            try:
+                value = self.get(cluster)
+            except ValueError:
+                termination = ChainTermination.OUT_OF_RANGE
+                break
+            except (EOFError, OSError, struct.error):
+                termination = ChainTermination.READ_ERROR
+                break
+
+            if value == FREE_CLUSTER:
+                termination = ChainTermination.FREE_CLUSTER
+                break
+
+            if value == mask(BAD_CLUSTER, bits):
+                termination = ChainTermination.BAD_CLUSTER
+                break
+
+            clusters.append(cluster)
+
+            # FAT12 special EOC
+            if self.bits_per_entry == 12 and value == FAT12_EOC:
+                break
+
+            if mask(END_OF_CLUSTER_MIN, bits) <= value <= mask(END_OF_CLUSTER_MAX, bits):
+                break
+
+            if expected_clusters is not None and len(clusters) >= expected_clusters:
+                termination = ChainTermination.LENGTH_REACHED
+                break
+
+            cluster = value
+
+        return ChainWalk(
+            table=self.index,
+            clusters=clusters,
+            termination=termination,
+            expected_clusters=expected_clusters,
+        )
+
+
+class ChainTermination(Enum):
+    """Reason a cluster chain walk stopped."""
+
+    END_OF_CHAIN = "end-of-chain"
+    LENGTH_REACHED = "length-reached"
+    FREE_CLUSTER = "free-cluster"
+    BAD_CLUSTER = "bad-cluster"
+    OUT_OF_RANGE = "out-of-range"
+    CYCLE = "cycle"
+    READ_ERROR = "read-error"
+
+
+@dataclass
+class ChainWalk:
+    """Result of walking a cluster chain in a single FAT table."""
+
+    table: int
+    clusters: list[int]
+    termination: ChainTermination
+    expected_clusters: int | None = None
+
+    @property
+    def clean(self) -> bool:
+        """Whether the walk ended on a valid terminator instead of an error."""
+        return self.termination in (ChainTermination.END_OF_CHAIN, ChainTermination.LENGTH_REACHED)
+
+    @property
+    def length_satisfied(self) -> bool:
+        """Whether the walk covers at least the clusters needed for the file size."""
+        return self.expected_clusters is None or len(self.clusters) >= self.expected_clusters
+
+    @property
+    def confirmed(self) -> bool:
+        """Whether the walk both terminates cleanly and satisfies the file length."""
+        return self.clean and self.length_satisfied
+
+
+class ChainVerdict(Enum):
+    """Forensic verdict for a cross-table chain comparison."""
+
+    CONSISTENT = "consistent"
+    STALE_MIRROR = "stale-mirror"
+    MIRRORED_DIVERGENCE = "mirrored-divergence"
+    UNCONFIRMED = "unconfirmed"
+
+
+@dataclass
+class ChainComparison:
+    """Forensic side-by-side view of one cluster chain across all FAT tables."""
+
+    start_cluster: int
+    walks: list[ChainWalk]
+    mirroring_enabled: bool
+    active_table: int
+    size: int | None = None
+    expected_clusters: int | None = None
+
+    @property
+    def common_prefix(self) -> list[int]:
+        """Clusters all tables agree on, from the start of the chain."""
+        prefix = []
+        for entries in zip(*(walk.clusters for walk in self.walks), strict=False):
+            first = entries[0]
+            if all(entry == first for entry in entries):
+                prefix.append(first)
+            else:
+                break
+        return prefix
+
+    @property
+    def diverged(self) -> bool:
+        """Whether any table walks a different chain than the others."""
+        sequences = [walk.clusters for walk in self.walks]
+        return any(sequence != sequences[0] for sequence in sequences[1:])
+
+    @property
+    def divergence_offset(self) -> int | None:
+        """Chain position where the tables start to disagree, if they do."""
+        if not self.diverged:
+            return None
+        return len(self.common_prefix)
+
+    @property
+    def branches(self) -> dict[int, list[int]]:
+        """Remaining clusters per table after the common prefix."""
+        offset = len(self.common_prefix)
+        return {walk.table: walk.clusters[offset:] for walk in self.walks}
+
+    @property
+    def verdict(self) -> ChainVerdict:
+        """Verdict based on the BPB mirroring declaration and the walked chains."""
+        if not self.diverged:
+            if all(walk.confirmed for walk in self.walks):
+                return ChainVerdict.CONSISTENT
+            return ChainVerdict.UNCONFIRMED
+        if self.mirroring_enabled:
+            return ChainVerdict.MIRRORED_DIVERGENCE
+        if self.walks[self.active_table].confirmed:
+            return ChainVerdict.STALE_MIRROR
+        return ChainVerdict.UNCONFIRMED
+
+    def report(self) -> str:
+        """Render a human-readable summary for forensic review."""
+        if self.mirroring_enabled:
+            declaration = "mirroring enabled"
+        else:
+            declaration = f"mirroring disabled, active table {self.active_table}"
+        lines = [
+            f"chain start: cluster {self.start_cluster}",
+            f"declaration: {len(self.walks)} tables, {declaration}",
+        ]
+        if self.size is not None:
+            lines.append(f"file size: {self.size} bytes ({self.expected_clusters} clusters expected)")
+        for walk in self.walks:
+            chain = " -> ".join(map(str, walk.clusters)) or "<empty>"
+            lines.append(f"table {walk.table}: {chain} [{walk.termination.value}]")
+        prefix = " -> ".join(map(str, self.common_prefix)) or "<none>"
+        lines.append(f"common prefix: {prefix}")
+        if self.diverged:
+            lines.append(f"diverges at chain position {self.divergence_offset}")
+        lines.append(f"verdict: {self.verdict.value}")
+        return "\n".join(lines)
 
 
 class DirectoryEntry:
