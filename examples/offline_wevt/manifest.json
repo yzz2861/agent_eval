@@ -1,0 +1,22 @@
+{
+  "resources": [
+    {
+      "path": "zh-CN-0.9.0.json",
+      "kind": "messages",
+      "provider_id": "7b9a43c1-0f6a-4a5d-9e8b-1c2d3e4f5a6b",
+      "version": "0.9.0",
+      "locale": "zh-CN",
+      "sha256": "9cabae72f1ae700dfe09d3a2231c92fc9d20bf513016536dc283c7c6948ecc60",
+      "signed": true
+    },
+    {
+      "path": "zh-CN-1.0.0-untrusted.json",
+      "kind": "messages",
+      "provider_id": "7b9a43c1-0f6a-4a5d-9e8b-1c2d3e4f5a6b",
+      "version": "1.0.0",
+      "locale": "zh-CN",
+      "sha256": "e6b6080555209c1cd1ba717c2f784c6c47759a474193ad28b0baf4fd0eea1561",
+      "signed": false
+    }
+  ]
+}

@@ -8,14 +8,26 @@ from dissect.eventlog.exceptions import (
     MalformedElfChnkException,
     UnknownSignatureException,
 )
-from dissect.eventlog.wevt.wevt import CRIM
+from dissect.eventlog.wevt import (
+    CRIM,
+    EventDefinitionCatalog,
+    EventLocalizer,
+    LookupPolicy,
+    OfflineResourceCatalog,
+    ResourceManifest,
+)
 
 __all__ = [
     "CRIM",
     "BxmlException",
     "Error",
+    "EventDefinitionCatalog",
+    "EventLocalizer",
     "Evt",
     "Evtx",
+    "LookupPolicy",
     "MalformedElfChnkException",
+    "OfflineResourceCatalog",
+    "ResourceManifest",
     "UnknownSignatureException",
 ]

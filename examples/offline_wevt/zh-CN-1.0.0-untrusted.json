@@ -1,0 +1,21 @@
+{
+  "provider_id": "7b9a43c1-0f6a-4a5d-9e8b-1c2d3e4f5a6b",
+  "version": "1.0.0",
+  "locale": "zh-CN",
+  "fields": [
+    {
+      "event_id": 100,
+      "event_version": 1,
+      "definition_id": "aaaaaaaa-1111-5111-8111-aaaaaaaaaaaa",
+      "path": "EventData.ServiceName",
+      "label": "服务名称（未签收副本）"
+    },
+    {
+      "event_id": 100,
+      "event_version": 2,
+      "definition_id": "bbbbbbbb-2222-5222-8222-bbbbbbbbbbbb",
+      "path": "EventData.ServiceName",
+      "label": "服务名称（未签收 v2 副本）"
+    }
+  ]
+}

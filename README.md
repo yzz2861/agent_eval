@@ -19,6 +19,37 @@ pip install dissect.eventlog
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Offline WEVT and language resources
+
+Windows event definitions and message resources can be resolved without consulting the host
+registry or any network location. An acquisition manifest records the local files that were
+signed with the image, together with their provider, version, locale and SHA-256 digest:
+
+```json
+{
+  "resources": [
+    {
+      "path": "zh-CN-0.9.0.json",
+      "kind": "messages",
+      "provider_id": "7b9a43c1-0f6a-4a5d-9e8b-1c2d3e4f5a6b",
+      "version": "0.9.0",
+      "locale": "zh-CN",
+      "sha256": "...",
+      "signed": true
+    }
+  ]
+}
+```
+
+`OfflineResourceCatalog` only considers entries in this manifest. Unsigned files, digest mismatches,
+missing files and missing version/locale combinations remain visible in the returned attempt trail.
+`EventDefinitionCatalog` binds every field to the provider, event id, event version and TEMP UUID;
+`EventLocalizer` stores translated labels separately from the actual field paths. A lookup can
+therefore return both the concrete source path/digest and every intermediate fallback reason.
+
+See `examples/offline_localization.py` for a missing-language-pack example that falls back to a
+neighbouring signed version, while preserving untranslated field names.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
