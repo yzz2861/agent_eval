@@ -8,3 +8,14 @@ Module contents
    :members:
    :undoc-members:
    :show-inheritance:
+
+Submodules
+----------
+
+taxii2client.v21.archive module
+********************************
+
+.. automodule:: taxii2client.v21.archive
+   :members:
+   :undoc-members:
+   :show-inheritance:

@@ -141,6 +141,46 @@ In addition to the object-specific properties and methods, all classes have a
 ``refresh()`` method that reloads the URL corresponding to that resource, to
 ensure properties have the most up-to-date values.
 
+Resumable archiving (TAXII 2.1)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``added_after`` filter is strictly exclusive, so remembering only the
+newest ``date_added`` timestamp is unsafe when several objects share that
+timestamp and a sync is interrupted in the middle of the group.  The
+``taxii2client.v21.archive`` module provides a resumable archiver which pages
+through a collection's manifest, confirms every entry with ``get_objects``,
+and persists a cursor holding the collection identity, the ``date_added``
+watermark and each object's STIX ``version``:
+
+.. code-block:: python
+
+    from taxii2client.v21 import Collection
+    from taxii2client.v21.archive import ArchiveCursor, ManifestArchive
+
+    collection = Collection('https://example.com/api1/collections/91a7b528-80eb-42ed-a74d-c6fbd5a26116')
+
+    # Reuse the saved cursor on subsequent runs; start without one on first run.
+    try:
+        cursor = ArchiveCursor.load('cursor.json', collection.id, collection.url)
+    except FileNotFoundError:
+        cursor = ArchiveCursor(collection.id, collection.url)
+
+    archive = ManifestArchive(collection, cursor)
+    try:
+        archive.run()
+    finally:
+        cursor.save('cursor.json')
+
+    print(len(archive.objects))
+
+The watermark only moves once every entry of a fetched manifest page is
+either backed by a confirmed object or an explicit missing ticket.  A
+transport failure leaves the offending entry pending, keeps the watermark in
+place, and the next ``run()`` re-fetches the boundary timestamp so the
+interrupted same-timestamp object is filled in rather than skipped.  When a
+missing ticket is later resolved, the cursor refuses the update if a newer
+version of the same object is already archived.
+
 Governance
 ----------
 
