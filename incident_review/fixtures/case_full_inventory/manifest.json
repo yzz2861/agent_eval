@@ -1,0 +1,132 @@
+{
+  "case": "case_full_inventory",
+  "summary": "每次采集均为覆盖全部规定别名的完整盘点单",
+  "store_password": "changeit",
+  "mandated_aliases": [
+    "edge-gateway",
+    "code-signing",
+    "legacy-root",
+    "spare"
+  ],
+  "target_certificate": {
+    "label": "旧证书 legacy.internal",
+    "cert": "legacy",
+    "sha256": "2956b608acfc36f1c759caa615e44fe12222f186f367562a0f03931b6d04cf00"
+  },
+  "certificates": {
+    "edge": {
+      "sha256": "6c3e945fe142847980afadc360886856279421237f2d3262984aaee5a5c51002",
+      "file": "certs/edge.der"
+    },
+    "legacy": {
+      "sha256": "2956b608acfc36f1c759caa615e44fe12222f186f367562a0f03931b6d04cf00",
+      "file": "certs/legacy.der"
+    },
+    "signing": {
+      "sha256": "923529a058648b600073248ac1a578045595e40aa3e77bb2c3993edf4ce0764e",
+      "file": "certs/signing.der"
+    },
+    "spare": {
+      "sha256": "8052f540359e4a43483fc037f879d17fd9705acd7e154793f3a42728aa9fa6b2",
+      "file": "certs/spare.der"
+    }
+  },
+  "backups": [
+    {
+      "id": "b0",
+      "file": "backup_t0.jks",
+      "taken_at": "2023-06-01T02:00:00Z"
+    },
+    {
+      "id": "b1",
+      "file": "backup_t1.jks",
+      "taken_at": "2024-03-01T02:00:00Z"
+    },
+    {
+      "id": "b2",
+      "file": "backup_t2.jks",
+      "taken_at": "2024-09-01T02:00:00Z"
+    }
+  ],
+  "collections": [
+    {
+      "id": "c0",
+      "at": "2023-06-01T03:00:00Z",
+      "backup": "b0",
+      "declared_scope": [
+        "edge-gateway",
+        "code-signing",
+        "legacy-root",
+        "spare"
+      ],
+      "recorded_observations": [
+        {
+          "alias": "code-signing",
+          "sha256": "923529a058648b600073248ac1a578045595e40aa3e77bb2c3993edf4ce0764e"
+        },
+        {
+          "alias": "edge-gateway",
+          "sha256": "6c3e945fe142847980afadc360886856279421237f2d3262984aaee5a5c51002"
+        },
+        {
+          "alias": "legacy-root",
+          "sha256": "2956b608acfc36f1c759caa615e44fe12222f186f367562a0f03931b6d04cf00"
+        },
+        {
+          "alias": "spare",
+          "sha256": "8052f540359e4a43483fc037f879d17fd9705acd7e154793f3a42728aa9fa6b2"
+        }
+      ]
+    },
+    {
+      "id": "c1",
+      "at": "2024-03-01T03:00:00Z",
+      "backup": "b1",
+      "declared_scope": [
+        "edge-gateway",
+        "code-signing",
+        "legacy-root",
+        "spare"
+      ],
+      "recorded_observations": [
+        {
+          "alias": "code-signing",
+          "sha256": "923529a058648b600073248ac1a578045595e40aa3e77bb2c3993edf4ce0764e"
+        },
+        {
+          "alias": "edge-gateway",
+          "sha256": "6c3e945fe142847980afadc360886856279421237f2d3262984aaee5a5c51002"
+        },
+        {
+          "alias": "spare",
+          "sha256": "8052f540359e4a43483fc037f879d17fd9705acd7e154793f3a42728aa9fa6b2"
+        }
+      ]
+    },
+    {
+      "id": "c2",
+      "at": "2024-09-01T03:00:00Z",
+      "backup": "b2",
+      "declared_scope": [
+        "edge-gateway",
+        "code-signing",
+        "legacy-root",
+        "spare"
+      ],
+      "recorded_observations": [
+        {
+          "alias": "code-signing",
+          "sha256": "923529a058648b600073248ac1a578045595e40aa3e77bb2c3993edf4ce0764e"
+        },
+        {
+          "alias": "edge-gateway",
+          "sha256": "6c3e945fe142847980afadc360886856279421237f2d3262984aaee5a5c51002"
+        },
+        {
+          "alias": "spare",
+          "sha256": "8052f540359e4a43483fc037f879d17fd9705acd7e154793f3a42728aa9fa6b2"
+        }
+      ]
+    }
+  ]
+}

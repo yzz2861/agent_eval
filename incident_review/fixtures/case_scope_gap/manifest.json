@@ -1,0 +1,91 @@
+{
+  "case": "case_scope_gap",
+  "summary": "两次采集均只覆盖规定别名的一部分，留有范围缺口",
+  "store_password": "changeit",
+  "mandated_aliases": [
+    "edge-gateway",
+    "code-signing",
+    "legacy-root",
+    "spare"
+  ],
+  "target_certificate": {
+    "label": "旧证书 legacy.internal",
+    "cert": "legacy",
+    "sha256": "96c21c1addc6edbc5c705ab8c74f70bbd3521c5b11facd000426ccd761efae89"
+  },
+  "certificates": {
+    "edge": {
+      "sha256": "77c5ebe4df967394097b5e7b916ba08b8c59dd9c5d9449e13bba608f45fb911e",
+      "file": "certs/edge.der"
+    },
+    "legacy": {
+      "sha256": "96c21c1addc6edbc5c705ab8c74f70bbd3521c5b11facd000426ccd761efae89",
+      "file": "certs/legacy.der"
+    },
+    "signing": {
+      "sha256": "08e48ca42ee5f0fe0301bbc329920a930ff7094529b770e4f5294675690871c3",
+      "file": "certs/signing.der"
+    },
+    "spare": {
+      "sha256": "daeaae1f575d2215396054bc1e40cb119aa3fe9cb5486fa4bb0a89dd4ab9215c",
+      "file": "certs/spare.der"
+    }
+  },
+  "backups": [
+    {
+      "id": "b1",
+      "file": "backup_t1.jks",
+      "taken_at": "2024-03-01T02:00:00Z"
+    },
+    {
+      "id": "b2",
+      "file": "backup_t2.jks",
+      "taken_at": "2024-09-01T02:00:00Z"
+    }
+  ],
+  "collections": [
+    {
+      "id": "c1",
+      "at": "2024-03-01T03:00:00Z",
+      "backup": "b1",
+      "declared_scope": [
+        "edge-gateway",
+        "code-signing"
+      ],
+      "recorded_observations": [
+        {
+          "alias": "code-signing",
+          "sha256": "08e48ca42ee5f0fe0301bbc329920a930ff7094529b770e4f5294675690871c3"
+        },
+        {
+          "alias": "edge-gateway",
+          "sha256": "77c5ebe4df967394097b5e7b916ba08b8c59dd9c5d9449e13bba608f45fb911e"
+        }
+      ]
+    },
+    {
+      "id": "c2",
+      "at": "2024-09-01T03:00:00Z",
+      "backup": "b2",
+      "declared_scope": [
+        "edge-gateway",
+        "code-signing",
+        "spare"
+      ],
+      "recorded_observations": [
+        {
+          "alias": "code-signing",
+          "sha256": "08e48ca42ee5f0fe0301bbc329920a930ff7094529b770e4f5294675690871c3"
+        },
+        {
+          "alias": "edge-gateway",
+          "sha256": "77c5ebe4df967394097b5e7b916ba08b8c59dd9c5d9449e13bba608f45fb911e"
+        },
+        {
+          "alias": "spare",
+          "sha256": "daeaae1f575d2215396054bc1e40cb119aa3fe9cb5486fa4bb0a89dd4ab9215c"
+        }
+      ]
+    }
+  ]
+}
