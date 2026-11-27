@@ -71,6 +71,33 @@ Sample output:
    (9.9,)
    ('Critical',)
 
+Collaborative advisory scoring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When several responders edit the same advisory's CVSS vector, their submissions can be fed to
+``AdvisoryScoring`` as external ``RevisionReceipt`` objects. Each receipt records the vector
+version it was based on. Revisions of different metrics are merged and recalculated, repeated
+delivery of the same receipt id is idempotent, and conflicting or stale revisions are rejected
+and signed back. Every outcome is kept in an append-only journal, named release points can be
+published, and a historical release point can be recomputed to verify the score and severity
+displayed in the report at that time.
+
+.. code-block:: python
+
+    from cvss import AdvisoryScoring, ReceiptConflictError, RevisionReceipt
+
+    ledger = AdvisoryScoring('RHSA-DEMO', 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N')
+    ledger.submit(RevisionReceipt('R1', 'responder-a', {'I': 'L'}, ledger.vector_version, seq=1))
+    ledger.submit(RevisionReceipt('R2', 'responder-b', {'AV': 'A'}, 0, seq=2))
+    ledger.publish('report-2026-11-28')
+
+    try:
+        ledger.submit(RevisionReceipt('R3', 'responder-c', {'I': 'H'}, ledger.vector_version, seq=3))
+    except ReceiptConflictError as error:
+        print(error)  # conflicting field revision, also recorded in ledger.journal()
+
+    print(ledger.recompute_at('report-2026-11-28'))  # score 7.1, severity High, matches_display True
+
 Interactive calculator
 ~~~~~~~~~~~~~~~~~~~~~~
 

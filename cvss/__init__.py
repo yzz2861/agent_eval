@@ -2,6 +2,14 @@
 # Author: Stanislav Kontar, Red Hat Product Security
 # License: LGPLv3+
 
+from .advisory import (
+    AdvisoryScoring,
+    AdvisoryScoringError,
+    ReceiptConflictError,
+    ReceiptValidationError,
+    RevisionReceipt,
+    StaleReceiptError,
+)
 from .cvss2 import CVSS2
 from .cvss3 import CVSS3
 from .cvss4 import CVSS4
