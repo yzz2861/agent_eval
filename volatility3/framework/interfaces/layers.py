@@ -8,6 +8,7 @@ or map a procedure (such as decryption) across another layer of data.
 """
 
 import collections.abc
+import dataclasses
 import functools
 import logging
 import math
@@ -25,6 +26,236 @@ vollog = logging.getLogger(__name__)
 
 ProgressValue = Union["DummyProgress", multiprocessing.managers.ValueProxy]
 IteratorValue = Tuple[List[Tuple[str, int, int]], int]
+
+
+@dataclasses.dataclass(frozen=True)
+class MappingInterval:
+    """A logical range and the layer range to which it is translated."""
+
+    offset: int
+    length: int
+    mapped_offset: int
+    mapped_length: int
+    layer: str
+
+    @property
+    def source_layer(self) -> str:
+        return self.layer
+
+    @property
+    def source_offset(self) -> int:
+        return self.mapped_offset
+
+    @property
+    def source_length(self) -> int:
+        return self.mapped_length
+
+
+@dataclasses.dataclass(frozen=True)
+class ReadEvidence:
+    """A logical subrange backed by bytes actually returned by a lower layer.
+
+    ``data`` is the evidence itself, rather than bytes synthesized to fill a
+    hole.  ``layer``, ``mapped_offset`` and ``mapped_length`` identify the
+    lower-layer range from which those bytes came.
+    """
+
+    offset: int
+    length: int
+    mapped_offset: int
+    mapped_length: int
+    layer: str
+    data: bytes = b""
+
+    @property
+    def source_layer(self) -> str:
+        return self.layer
+
+    @property
+    def source_offset(self) -> int:
+        return self.mapped_offset
+
+    @property
+    def source_length(self) -> int:
+        return self.mapped_length
+
+    @property
+    def logical_offset(self) -> int:
+        return self.offset
+
+    @property
+    def logical_length(self) -> int:
+        return self.length
+
+    @property
+    def mapping(self) -> MappingInterval:
+        return MappingInterval(
+            self.offset,
+            self.length,
+            self.mapped_offset,
+            self.mapped_length,
+            self.layer,
+        )
+
+    @property
+    def provenance(self) -> MappingInterval:
+        return self.mapping
+
+
+@dataclasses.dataclass(frozen=True)
+class ReadGap:
+    """A logical range for which no lower-layer data was available."""
+
+    offset: int
+    length: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ReadReport:
+    """The result of a read together with its provenance.
+
+    ``data`` and ``gaps`` retain the historical ``pad=True`` output: gaps are
+    represented by zero bytes in ``data``.  Consumers that need to distinguish
+    synthesized zeroes from zeroes that were genuinely read should inspect
+    :attr:`evidence` instead.
+    """
+
+    layer: str
+    offset: int
+    length: int
+    data: bytes
+    mappings: Tuple[MappingInterval, ...] = ()
+    evidence: Tuple[ReadEvidence, ...] = ()
+    gaps: Tuple[ReadGap, ...] = ()
+
+    @property
+    def read_data(self) -> bytes:
+        return self.data
+
+    @property
+    def result(self) -> bytes:
+        return self.data
+
+    @property
+    def mapped_intervals(self) -> Tuple[MappingInterval, ...]:
+        return self.mappings
+
+    @property
+    def sources(self) -> Tuple[MappingInterval, ...]:
+        return self.mappings
+
+    @property
+    def provenance(self) -> Tuple[MappingInterval, ...]:
+        return self.mappings
+
+    @property
+    def read_intervals(self) -> Tuple[ReadEvidence, ...]:
+        return self.evidence
+
+    @property
+    def intervals(self) -> Tuple[ReadEvidence, ...]:
+        return self.evidence
+
+    @property
+    def actual_intervals(self) -> Tuple[ReadEvidence, ...]:
+        return self.evidence
+
+    @property
+    def padding(self) -> Tuple[ReadGap, ...]:
+        return self.gaps
+
+    @property
+    def filled(self) -> Tuple[ReadGap, ...]:
+        return self.gaps
+
+    @property
+    def filled_ranges(self) -> Tuple[ReadGap, ...]:
+        return self.gaps
+
+    @property
+    def complete(self) -> bool:
+        return not self.gaps
+
+    @property
+    def evidence_set(self) -> Tuple[ReadEvidence, ...]:
+        return coalesce_evidence(self.evidence)
+
+
+def coalesce_evidence(
+    evidence: Iterable[ReadEvidence],
+) -> Tuple[ReadEvidence, ...]:
+    """Merge adjacent evidence intervals from the same backing range.
+
+    Reads split at arbitrary boundaries can therefore be compared by first
+    coalescing the evidence from each individual read.
+    """
+    ordered = sorted(
+        evidence,
+        key=lambda item: (
+            item.offset,
+            item.mapped_offset,
+            item.layer,
+            item.length,
+        ),
+    )
+    merged: List[ReadEvidence] = []
+    for item in ordered:
+        if (
+            merged
+            and merged[-1].offset + merged[-1].length == item.offset
+            and merged[-1].mapped_offset + merged[-1].mapped_length
+            == item.mapped_offset
+            and merged[-1].layer == item.layer
+            and len(merged[-1].data) == merged[-1].length
+            and len(item.data) == item.length
+        ):
+            previous = merged[-1]
+            merged[-1] = ReadEvidence(
+                offset=previous.offset,
+                length=previous.length + item.length,
+                mapped_offset=previous.mapped_offset,
+                mapped_length=previous.mapped_length + item.mapped_length,
+                layer=previous.layer,
+                data=previous.data + item.data,
+            )
+        else:
+            merged.append(item)
+    return tuple(merged)
+
+
+def coalesce_mappings(
+    mappings: Iterable[MappingInterval],
+) -> Tuple[MappingInterval, ...]:
+    """Merge adjacent mappings that remain contiguous on both sides."""
+    merged: List[MappingInterval] = []
+    for item in sorted(mappings, key=lambda entry: entry.offset):
+        if (
+            merged
+            and merged[-1].offset + merged[-1].length == item.offset
+            and merged[-1].mapped_offset + merged[-1].mapped_length
+            == item.mapped_offset
+            and merged[-1].layer == item.layer
+        ):
+            previous = merged[-1]
+            merged[-1] = MappingInterval(
+                offset=previous.offset,
+                length=previous.length + item.length,
+                mapped_offset=previous.mapped_offset,
+                mapped_length=previous.mapped_length + item.mapped_length,
+                layer=previous.layer,
+            )
+        else:
+            merged.append(item)
+    return tuple(merged)
+
+
+# Descriptive aliases for callers that model these records as sources and
+# intervals rather than as mapping and evidence records.
+MappingSource = MappingInterval
+EvidenceInterval = ReadEvidence
+MappingProvenance = MappingInterval
+LayerReadReport = ReadReport
+ReadResult = ReadReport
 
 
 class ScannerInterface(
@@ -171,7 +402,130 @@ class DataLayerInterface(
 
         Returns:
             The bytes read from the layer, starting at offset for length bytes
+
+        Note:
+            ``pad=True`` is retained as a compatibility mode and cannot identify
+            which zero bytes were actually read.  Use :meth:`read_with_evidence`
+            when callers need to distinguish data from synthesized padding.
         """
+
+    def _valid_ranges(self, offset: int, length: int) -> List[Tuple[int, int]]:
+        """Find contiguous readable ranges using the layer's validity check."""
+        ranges: List[Tuple[int, int]] = []
+        end = offset + length
+        position = offset
+        while position < end:
+            if not self.is_valid(position, 1):
+                position += 1
+                continue
+
+            available = end - position
+            good = 1
+            probe = 1
+            while probe < available and self.is_valid(position, probe):
+                good = probe
+                probe = min(probe * 2, available)
+            if probe == available and self.is_valid(position, available):
+                good = available
+
+            low, high = good, min(probe, available)
+            while low < high:
+                candidate = (low + high + 1) // 2
+                if self.is_valid(position, candidate):
+                    low = candidate
+                else:
+                    high = candidate - 1
+            ranges.append((position, low))
+            position += low
+        return ranges
+
+    def read_with_evidence(
+        self, offset: int, length: int, pad: bool = False
+    ) -> ReadReport:
+        """Read a range and report which subranges were actually read.
+
+        This is the compatibility-preserving reporting read for a data layer.
+        The data layer interface cannot distinguish zeros returned by a custom
+        implementation from synthesized zeros, so data layers with sparse
+        storage should override this method (as ``BufferDataLayer`` does).
+        """
+        if length < 0:
+            raise ValueError("Length must be positive or zero")
+        if length == 0:
+            return ReadReport(self.name, offset, length, b"")
+
+        if self.is_valid(offset, length):
+            data = self.read(offset, length, False)
+            return ReadReport(
+                layer=self.name,
+                offset=offset,
+                length=length,
+                data=data,
+                mappings=(MappingInterval(offset, length, offset, length, self.name),),
+                evidence=(
+                    ReadEvidence(offset, length, offset, length, self.name, data),
+                ),
+            )
+
+        if not pad:
+            # Preserve the normal read behaviour and exception diagnostics.
+            self.read(offset, length, False)
+            raise exceptions.InvalidAddressException(
+                self.name, offset, f"Layer {self.name} cannot read the requested range"
+            )
+
+        output: List[bytes] = []
+        evidence: List[ReadEvidence] = []
+        gaps: List[ReadGap] = []
+        position = offset
+        for start, size in self._valid_ranges(offset, length):
+            if start > position:
+                output.append(b"\x00" * (start - position))
+                gaps.append(ReadGap(position, start - position))
+            data = self.read(start, size, False)
+            output.append(data)
+            evidence.append(ReadEvidence(start, size, start, size, self.name, data))
+            position = start + size
+        if position < offset + length:
+            output.append(b"\x00" * (offset + length - position))
+            gaps.append(ReadGap(position, offset + length - position))
+
+        return ReadReport(
+            layer=self.name,
+            offset=offset,
+            length=length,
+            data=b"".join(output),
+            mappings=coalesce_mappings(
+                MappingInterval(
+                    item.offset, item.length, item.offset, item.length, self.name
+                )
+                for item in evidence
+            ),
+            evidence=coalesce_evidence(evidence),
+            gaps=tuple(gaps),
+        )
+
+    def read_with_report(
+        self, offset: int, length: int, pad: bool = False
+    ) -> ReadReport:
+        """Alias for :meth:`read_with_evidence`."""
+        return self.read_with_evidence(offset, length, pad)
+
+    def read_with_provenance(
+        self, offset: int, length: int, pad: bool = False
+    ) -> ReadReport:
+        """Alias for :meth:`read_with_evidence`."""
+        return self.read_with_evidence(offset, length, pad)
+
+    def read_with_metadata(
+        self, offset: int, length: int, pad: bool = False
+    ) -> ReadReport:
+        """Alias for :meth:`read_with_evidence`."""
+        return self.read_with_evidence(offset, length, pad)
+
+    def read_evidence(self, offset: int, length: int, pad: bool = False) -> ReadReport:
+        """Alias for :meth:`read_with_evidence`."""
+        return self.read_with_evidence(offset, length, pad)
 
     @abstractmethod
     def write(self, offset: int, data: bytes) -> None:
@@ -504,6 +858,120 @@ class TranslationLayerInterface(DataLayerInterface, metaclass=ABCMeta):
                 output += processed_data
                 current_offset += sublength
         return output + (b"\x00" * (length - len(output)))
+
+    def read_with_evidence(
+        self, offset: int, length: int, pad: bool = False
+    ) -> ReadReport:
+        """Read a translated range while retaining source provenance."""
+        if length < 0:
+            raise ValueError("Length must be positive or zero")
+        if length == 0:
+            return ReadReport(self.name, offset, length, b"")
+
+        current_offset = offset
+        output: List[bytes] = []
+        mappings: List[MappingInterval] = []
+        evidence: List[ReadEvidence] = []
+        gaps: List[ReadGap] = []
+
+        for mapping in self.mapping(offset, length, ignore_errors=True):
+            if mapping is None:
+                continue
+            layer_offset, sublength, mapped_offset, mapped_length, layer = mapping
+            if sublength <= 0:
+                continue
+
+            if layer_offset > current_offset:
+                gap_length = layer_offset - current_offset
+                if not pad:
+                    raise exceptions.InvalidAddressException(
+                        self.name,
+                        current_offset,
+                        f"Layer {self.name} cannot map offset: {current_offset}",
+                    )
+                output.append(b"\x00" * gap_length)
+                gaps.append(ReadGap(current_offset, gap_length))
+                current_offset = layer_offset
+
+            mappings.append(
+                MappingInterval(
+                    layer_offset,
+                    sublength,
+                    mapped_offset,
+                    mapped_length,
+                    layer,
+                )
+            )
+
+            if mapped_length > 0:
+                lower = self._context.layers[layer]
+                lower_report = lower.read_with_evidence(
+                    mapped_offset, mapped_length, pad
+                )
+                unprocessed_data = lower_report.data
+                processed_data = self._decode_data(
+                    unprocessed_data, mapped_offset, layer_offset, sublength
+                )
+                if len(processed_data) != sublength:
+                    raise ValueError(
+                        "ProcessedData length does not match expected length of chunk"
+                    )
+                output.append(processed_data)
+
+                for item in lower_report.evidence:
+                    relative_offset = item.offset - mapped_offset
+                    if relative_offset < 0 or relative_offset >= mapped_length:
+                        continue
+                    item_length = min(item.length, mapped_length - relative_offset)
+                    if item_length <= 0:
+                        continue
+                    evidence.append(
+                        ReadEvidence(
+                            offset=layer_offset + relative_offset,
+                            length=item_length,
+                            mapped_offset=item.mapped_offset,
+                            mapped_length=item_length,
+                            layer=item.layer,
+                            data=item.data[:item_length],
+                        )
+                    )
+
+                for gap in lower_report.gaps:
+                    relative_offset = gap.offset - mapped_offset
+                    if relative_offset < 0 or relative_offset >= mapped_length:
+                        continue
+                    gap_length = min(gap.length, mapped_length - relative_offset)
+                    if gap_length > 0:
+                        gaps.append(ReadGap(layer_offset + relative_offset, gap_length))
+
+            current_offset = max(current_offset, layer_offset + sublength)
+
+        if current_offset < offset + length:
+            tail_length = offset + length - current_offset
+            if not pad:
+                raise exceptions.InvalidAddressException(
+                    self.name,
+                    current_offset,
+                    f"Layer {self.name} cannot map offset: {current_offset}",
+                )
+            output.append(b"\x00" * tail_length)
+            gaps.append(ReadGap(current_offset, tail_length))
+
+        report_data = b"".join(output)
+        if len(report_data) < length:
+            report_data += b"\x00" * (length - len(report_data))
+        elif len(report_data) > length:
+            report_data = report_data[:length]
+
+        return ReadReport(
+            layer=self.name,
+            offset=offset,
+            length=length,
+            data=report_data,
+            mappings=coalesce_mappings(mappings),
+            evidence=coalesce_evidence(evidence),
+            gaps=tuple(gaps),
+        )
 
     def write(self, offset: int, value: bytes) -> None:
         """Writes a value at offset, distributing the writing across any

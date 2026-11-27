@@ -4,6 +4,11 @@ API Changes
 When an addition to the existing API is made, the minor version is bumped.
 When an API feature or function is removed or changed, the major version is bumped.
 
+2.29.0
+======
+Add `read_with_evidence` layer reads with `ReadReport`, mapping provenance and
+actual read intervals.  Buffer data layers can declare physical holes.
+
 2.25.0
 ======
 Pointer class now supports `get_raw_value()`.
