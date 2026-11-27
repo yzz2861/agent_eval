@@ -1,0 +1,18 @@
+from __future__ import annotations
+
+from dissect.database.ese.ntds.objects.top import Top
+
+
+class PKIEnrollmentService(Top):
+    """Represents the pKIEnrollmentService object in Active Directory.
+
+    References:
+        - https://learn.microsoft.com/en-us/windows/win32/adschema/c-pkienrollmentservice
+    """
+
+    __object_class__ = "pKIEnrollmentService"
+
+    @property
+    def dns_host_name(self) -> str | None:
+        """Return the dNSHostName of this PKI Enrollment Service."""
+        return self.get("dNSHostName")

@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from dissect.database.ese.ntds.objects.msfve_recoveryinformation import MSFVERecoveryInformation
+from dissect.database.ese.ntds.objects.user import User
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from dissect.database.ese.ntds.objects import Object
+
+
+class Computer(User):
+    """Represents a computer object in the Active Directory.
+
+    References:
+        - https://learn.microsoft.com/en-us/windows/win32/adschema/c-computer
+    """
+
+    __object_class__ = "computer"
+
+    def __repr_body__(self) -> str:
+        return f"name={self.name!r}"
+
+    @property
+    def dns_host_name(self) -> str | None:
+        """Return the dNSHostName of this computer."""
+        return self.get("dNSHostName")
+
+    @property
+    def operating_system(self) -> str | None:
+        """Return the operatingSystem of this computer."""
+        return self.get("operatingSystem")
+
+    @property
+    def operating_system_version(self) -> str | None:
+        """Return the operatingSystemVersion of this computer."""
+        return self.get("operatingSystemVersion")
+
+    def fve_recovery_information(self) -> Iterator[MSFVERecoveryInformation]:
+        """Return the BitLocker recovery information objects associated with this computer."""
+        for child in self.children():
+            if isinstance(child, MSFVERecoveryInformation):
+                yield child
+
+    def managed_by(self) -> Iterator[Object]:
+        """Return the objects that manage this computer."""
+        self._assert_local()
+
+        yield from self.db.link.links(self.dnt, "managedBy")
