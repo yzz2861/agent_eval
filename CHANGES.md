@@ -128,6 +128,12 @@ the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY`
 `"'self'"`) to minimize quoting mistakes and typos.
 ([#222](https://github.com/mozilla/django-csp/pull/222))
 
+- **Per-Site CSP Checks**: Added the `CSP_SITE_CHECKS` setting and the
+`csp.checks.check_site_csp_headers` system check. Sites register fixed synthetic requests for
+normal, error and redirect responses along with the CSP directives they are responsible for, and
+the check verifies the `Content-Security-Policy` response headers locally as part of
+`manage.py check`.
+
   **Example:**
 
   Change from:
