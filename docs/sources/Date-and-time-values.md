@@ -227,6 +227,74 @@ meaning can differ depending on the context in which the timestamp is used.
 Certain values of FILETIME such as { 0xffffffff, 0xffffffff } for the
 SetFileTime Windows API function are overloaded with a special meaning.
 
+### Provenance conventions
+
+A raw FILETIME value alone does not always identify its meaning. For example,
+an all-zero FILETIME can represent January 1, 1601 or a value that is not set,
+depending on the producer. Some products also reserve an extreme value, such as
+0xffffffffffffffff, to mean "never".
+
+Callers can provide a
+[FiletimeProvenanceConvention](api/dfdatetime.rst) that identifies the producer
+and the version of the producer's rules. The convention lists the raw sentinel
+values that it resolves:
+
+```python
+from dfdatetime import filetime
+from dfdatetime import filetime_interpretation
+
+convention = filetime_interpretation.FiletimeProvenanceConvention(
+    producer="ntfs",
+    version="1",
+    sentinel_interpretations={
+        0: filetime_interpretation.FiletimeInterpretation.REAL_TIME,
+        filetime_interpretation.UINT64_MAX: (
+            filetime_interpretation.FiletimeInterpretation.NEVER
+        ),
+    },
+)
+
+date_time_value = filetime.Filetime(timestamp=0, convention=convention)
+record = date_time_value.GetInterpretation()
+print(record.timestamp, record.convention_version, record.interpretation)
+```
+
+An interpretation record contains the original raw value, the producer and
+version of the convention, and the resolved interpretation identity. When no
+convention is provided, the record leaves all feasible interpretations in
+`feasible_interpretations` instead of selecting one.
+
+The serializer carries the convention when it is supplied at the serialization
+boundary:
+
+```python
+from dfdatetime import serializer
+
+serialized = serializer.Serializer.ConvertDateTimeValuesToJSON(
+    date_time_value, convention=convention
+)
+```
+
+The serialized dictionary contains the raw `timestamp`, a `provenance`
+dictionary with the producer and convention version, and the
+`interpretation` identity. Deserialization restores the convention. Legacy
+dictionaries without these fields continue to deserialize as before.
+
+Time range queries only include a value that is interpreted as a real date and
+time value:
+
+```python
+range_start = filetime.Filetime(timestamp=0)
+range_end = filetime.Filetime(
+    timestamp=filetime_interpretation.UINT64_MAX
+)
+
+participates = date_time_value.IsInTimeRange(range_start, range_end)
+```
+
+A value with an unresolved ambiguity is excluded unless
+`allow_ambiguous=True` is passed to `IsInTimeRange`.
+
 ### Also see
 
 * [MSDN: FILETIME](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)

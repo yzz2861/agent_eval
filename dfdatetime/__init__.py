@@ -11,6 +11,7 @@ from dfdatetime import delphi_date_time
 from dfdatetime import dotnet_datetime
 from dfdatetime import fat_date_time
 from dfdatetime import filetime
+from dfdatetime import filetime_interpretation
 from dfdatetime import hfs_time
 from dfdatetime import golang_time
 from dfdatetime import java_time

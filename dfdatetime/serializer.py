@@ -1,6 +1,7 @@
 """The date and time values serializer."""
 
 from dfdatetime import factory
+from dfdatetime import filetime_interpretation
 from dfdatetime import interface
 
 
@@ -33,7 +34,7 @@ class Serializer:
         return cls.ConvertJSONToDateTimeValues(json_dict)
 
     @classmethod
-    def ConvertDateTimeValuesToDict(cls, date_time_values):
+    def ConvertDateTimeValuesToDict(cls, date_time_values, convention=None):
         """Converts a date and time values object into a JSON dictionary.
 
         This method is deprecated use ConvertDateTimeValuesToJSON instead.
@@ -51,6 +52,8 @@ class Serializer:
 
         Args:
           date_time_values (dfdatetime.DateTimeValues): date and time values.
+          convention (Optional[FiletimeProvenanceConvention]): provenance
+              convention to apply to a FILETIME date and time value.
 
         Returns:
           dict[str, object]: JSON serialized objects.
@@ -61,10 +64,10 @@ class Serializer:
         if not isinstance(date_time_values, interface.DateTimeValues):
             raise TypeError
 
-        return cls.ConvertDateTimeValuesToJSON(date_time_values)
+        return cls.ConvertDateTimeValuesToJSON(date_time_values, convention=convention)
 
     @classmethod
-    def ConvertDateTimeValuesToJSON(cls, date_time_values):
+    def ConvertDateTimeValuesToJSON(cls, date_time_values, convention=None):
         """Converts a date and time values object into a JSON dictionary.
 
         The resulting dictionary of the JSON serialized objects consists of:
@@ -80,11 +83,22 @@ class Serializer:
 
         Args:
           date_time_values (dfdatetime.DateTimeValues): date and time values.
+          convention (Optional[FiletimeProvenanceConvention]): provenance
+              convention to apply to a FILETIME date and time value.
 
         Returns:
           dict[str, object]: JSON serialized objects.
         """
-        return date_time_values.CopyToSerializableDict()
+        if convention is None:
+            return date_time_values.CopyToSerializableDict()
+
+        try:
+            return date_time_values.CopyToSerializableDict(convention=convention)
+        except TypeError as exception:
+            raise TypeError(
+                "Date time values do not support a provenance convention: "
+                f"{exception!s}"
+            )
 
     @classmethod
     def ConvertJSONToDateTimeValues(cls, json_dict):
@@ -135,6 +149,17 @@ class Serializer:
         if time_zone_hint is not None:
             del json_dict["time_zone_hint"]
 
+        provenance = json_dict.get("provenance")
+        if "provenance" in json_dict:
+            del json_dict["provenance"]
+
+        interpretation = json_dict.get("interpretation")
+        if "interpretation" in json_dict:
+            del json_dict["interpretation"]
+
+        if "feasible_interpretations" in json_dict:
+            del json_dict["feasible_interpretations"]
+
         if class_name in ("InvalidTime", "Never", "NotSet"):
             string = json_dict.get("string")
             if string is not None:
@@ -145,10 +170,19 @@ class Serializer:
             if time_zone_offset is not None:
                 del json_dict["time_zone_offset"]
 
+        convention = None
+        if provenance is not None:
+            convention_type = filetime_interpretation.FiletimeProvenanceConvention
+            convention = convention_type.FromSerializableDict(provenance)
+
         date_time = factory.Factory.NewDateTimeValues(class_name, **json_dict)
         if is_local_time:
             date_time.is_local_time = is_local_time
         if time_zone_hint:
             date_time.time_zone_hint = time_zone_hint
+        if convention is not None and hasattr(date_time, "convention"):
+            date_time.convention = convention
+        if interpretation is not None and hasattr(date_time, "interpretation"):
+            date_time.interpretation = interpretation
 
         return date_time
