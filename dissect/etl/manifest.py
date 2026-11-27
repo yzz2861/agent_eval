@@ -12,6 +12,7 @@ from defusedxml import ElementTree
 from dissect import cstruct
 
 from dissect.etl.exceptions import ManifestNotFoundError
+from dissect.etl.registry import ManifestRegistry, manifest_digest
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -70,6 +71,7 @@ class EtwPointer(VariableType):
         cls.size = 8
         cls.type = cls.cs.uint64
 
+    @classmethod
     def as_32bit(cls):
         if cls.size == 4:
             return
@@ -161,6 +163,11 @@ FIELD_MAP = {
 
 CACHE: dict[UUID, types.ModuleType] = {}
 
+# Registry of offline provider lists. Additional lists (for example a second ETL provider
+# delivery with changed field widths or names) can be registered here alongside the bundled
+# manifests without overwriting each other.
+REGISTRY = ManifestRegistry()
+
 c_parser = cstruct.cstruct()
 
 
@@ -178,6 +185,7 @@ def lookup(guid: UUID) -> types.ModuleType:
         pass
     else:
         CACHE[guid] = mod
+        REGISTRY.register(mod)
         return mod
 
     try:
@@ -192,16 +200,31 @@ def lookup(guid: UUID) -> types.ModuleType:
 
 
 def compile_file(guid: UUID, path: str) -> types.ModuleType:
-    return compile_xml(guid, Path(path).read_text())
+    content = Path(path).read_text()
+    return compile_xml(guid, content, digest=manifest_digest(content), source=path)
 
 
-def compile_xml(guid: UUID, s: str) -> types.ModuleType:
+def compile_xml(guid: UUID, s: str, digest: str | None = None, source: str | None = None) -> types.ModuleType:
     generated = generate_from_xml(s)
     # print generated
     code = compile(generated, f"<manifest {guid}>", "exec")
     module = types.ModuleType(str(guid))
     exec(code, module.__dict__)
+    module.MANIFEST_DIGEST = digest or manifest_digest(s)
+    module.MANIFEST_SOURCE = source
+    REGISTRY.register(module, source=source)
     return module
+
+
+def register_xml(guid: UUID, content: str, source: str | None = None) -> list:
+    """Compile and register an additional offline provider list."""
+    compile_xml(guid, content, digest=manifest_digest(content), source=source)
+    return REGISTRY.definitions(guid)
+
+
+def register_file(guid: UUID, path: str) -> list:
+    """Compile and register an offline provider list from a file path."""
+    return register_xml(guid, Path(path).read_text(), source=path)
 
 
 def generate_from_file(path: str) -> str:

@@ -25,6 +25,14 @@ class ManifestNotFoundError(Error):
     pass
 
 
+class ManifestVersionNotFoundError(ManifestNotFoundError):
+    pass
+
+
+class ManifestDigestNotAllowedError(Error):
+    pass
+
+
 class ExtendedDataItemException(Error):
     pass
 
