@@ -1,0 +1,83 @@
+Version 2.3.0
+2021-03-12
+- #95 Remove extra whitespace in Content-Type header (@2xyo)
+- #94 Pagination changes to support more of the header combinations used in TAXII 2.0 (RFC7233). Provide similar as_pages method for v21 paginated call.
+- #93 Fixes to ReadTheDocs not rendering Reference API documentation
+- #91 Transitioned test suite from TravisCI to GitHub Workflows
+- #89 Expose the `cert` parameter to all API classes in v20 and v21
+
+Version 2.2.2
+2020-09-10
+- #85 Provide more details when a Server Response status code is 406. (v20, v21)
+- #84 Fallback "Range" HTTP Header for pagination requests. (@teizenman) (v20)
+- #81 More flexibility for the Status Endpoint validation. It no longer fails for optional successes, pendings, failures lists (@maybe-sybr) (v20, v21)
+
+Version 2.2.1
+2020-07-17
+- #78 Prevent KeyError when TAXII Server Response does not include 'Content-Range' Header (v20)
+
+Version 2.2.0
+2020-07-02
+- #76 drop python versions older than 3.5
+- #75 fixes construction of Range Header for paginated requests RFC 7233. (@dougle)
+
+Version 2.1.0
+2020-06-09
+- #68 Support for user-specified authentication including token-based authentication.
+- #71 Don't log a warning when the total number of available objects is less than the per request size limit.
+
+Version 2.0.0
+2020-04-01
+Base release of the TAXII Client for 2.1. Unsupported features:
+- TLS support in requests
+- Force connection initiation using HTTPS
+Note
+`import taxii2client` by default will load TAXII 2.1 classes. If this is not desired use `from taxii2client import v20`
+or `from taxii2client.v20 import <class>`
+
+Version 1.0.1
+2020-04-01
+- Fix packaging problem
+- #60, #23 Pagination generator function available ``as_pages`` for get_objects and get_manifest requests
+
+Version 1.0.0
+2020-04-01
+Base release of the TAXII Client for 2.0. Unsupported features:
+- TLS support in requests
+- Force connection initiation using HTTPS
+
+Version 0.5.0
+2018-11-09
+- #50 Fix an issue regarding trailing slash being missing in the Endpoint url
+- #51 Expose `proxies` to all Endpoint for better flexibility
+- #53 Better handling of custom content. It is now stored in the `custom_properties` dictionary
+
+Version 0.4.0
+2018-10-31
+- #36 Added "proxies" argument to _HTTPConnection.
+- Created documentation and host on ReadTheDocs.
+- #35 Handle invalid content better.
+- #39 Added "_raw" to provide access to raw TAXII Responses.
+- #40 Allow users to specify the user agent.
+
+Version 0.3.1
+2018-04-12
+- Fix packaging problem
+
+Version 0.3.0
+2018-04-12
+- #21 Re-work the accept parameters validation
+- #24 Expose verify positional parameter on endpoints
+- #27 Expose the accept positional parameter to allow configurable requests
+- #30 Do not fail hard for optional fields of a response
+
+Version 0.2.0
+2017-11-07
+- Filter keyword arguments to query params
+- Add datetime formatting
+- Improve README documentation
+- Improve code coverage/testing
+
+Version 0.1.0
+2017-11-07
+- Initial release
