@@ -10,6 +10,7 @@ Subpackages
    msoffcrypto.exceptions
    msoffcrypto.format
    msoffcrypto.method
+   msoffcrypto.custody
 
 Module contents
 ---------------

@@ -76,3 +76,20 @@ def OfficeFile(file):
         return Ppt97File(file)
     else:
         raise exceptions.FileFormatError("Unrecognized file format")
+
+
+from msoffcrypto.custody import (  # noqa: E402 - public convenience exports
+    CustodyChainReview,
+    CustodyReview,
+    EvidenceObservation,
+    HandoffEvent,
+    ReceiptRecord,
+    observe_evidence,
+    observe_file,
+    observe_protection,
+    review_chain,
+    review_custody,
+    review_custody_chain,
+    review_events,
+    review_handoffs,
+)

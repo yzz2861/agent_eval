@@ -131,6 +131,74 @@ Supported key types are
 
 See also ["Backdooring MS Office documents with secret master keys"](https://web.archive.org/web/20171008075059/http://secuinside.com/archive/2015/2015-1-9.pdf) for more information on the key types.
 
+#### Offline custody review
+
+`review_custody_chain()` combines the public `OfficeFile(...).is_encrypted()` observation with caller-supplied handover events. It checks each consecutive before/after link against the observed protection state, the SHA-256 digest of the delivered bytes, and the declared time window. Repeated delivery tokens are reported separately and do not create another protection state. If the evidence still supports more than one reading, the report keeps every possible interpretation and lists the receipt records that would settle the link.
+
+```python
+import msoffcrypto
+
+payload = {
+    "events": [
+        {
+            "event_id": "h1",
+            "document_id": "case-01",
+            "filename": "case.docx",
+            "artifact": "protected.docx",
+            "timestamp": "2026-11-01T00:00:00Z",
+            "window_start": "2026-11-01T00:00:00Z",
+            "window_end": "2026-11-01T23:59:59Z",
+            "claimed_protection": True,
+            "evidence_digest": "<sha256-of-protected.docx>",
+            "delivery_id": "delivery-1",
+        },
+        # Same delivery token and same bytes: duplicate delivery, not a new state.
+        {
+            "event_id": "h2",
+            "document_id": "case-01",
+            "filename": "review.docx",
+            "artifact": "protected.docx",
+            "timestamp": "2026-11-01T00:01:00Z",
+            "window_start": "2026-11-01T00:00:00Z",
+            "window_end": "2026-11-01T23:59:59Z",
+            "claimed_protection": True,
+            "evidence_digest": "<sha256-of-protected.docx>",
+            "delivery_id": "delivery-1",
+        },
+        {
+            "event_id": "h3",
+            "document_id": "case-01",
+            "filename": "sealed.docx",
+            "artifact": "resealed.docx",
+            "timestamp": "2026-11-01T01:00:00Z",
+            "window_start": "2026-11-01T00:00:00Z",
+            "window_end": "2026-11-01T23:59:59Z",
+            "claimed_protection": True,
+            "evidence_digest": "<sha256-of-resealed.docx>",
+            "delivery_id": "delivery-2",
+        },
+    ],
+    "receipts": [
+        {
+            "receipt_id": "ack-reseal",
+            "event_ids": ["h1", "h3"],
+            "decision": "approve_reseal",
+            "signer": "records-reviewer",
+            "signed_at": "2026-11-01T00:30:00Z",
+            "evidence_digest": "<sha256-of-resealed.docx>",
+        }
+    ],
+}
+
+report = msoffcrypto.review_custody_chain(payload, max_gap_seconds=7200)
+print(report.status)  # confirmed when every link has a decisive receipt
+print(report["links"][0]["checks"])
+print(report["duplicates"])
+print(report["required_receipts"])
+```
+
+When a receipt is absent, `report["solutions"]` keeps every defensible chain reading (for example, an approved re-seal versus a replacement document) and `report["required_receipts"]` describes the signature records that would settle each reading.
+
 #### Encryption (OOXML only, experimental)
 
 > [!IMPORTANT]
