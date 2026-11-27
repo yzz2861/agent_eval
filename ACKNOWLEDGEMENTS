@@ -1,0 +1,16 @@
+Acknowledgements: dfdatetime
+
+Copyright 2016 The dfDateTime Project Authors.
+Please see the AUTHORS file for details on individual authors.
+
+dfDateTime, or Digital Forensics date and time, provides date and time objects
+to preserve accuracy and precision.
+
+dfDateTime, originates from the dfVFS project [https://github.com/log2timeline/dfvfs]
+and the dfWinReg project [//github.com/log2timeline/dfvfs]. It was largely
+rewritten and made into a stand-alone project to provide more flexibility and
+allow other projects to make use of the Digital Forensics date and time objects.
+
+dfDateTime is currently developed and maintained by:
+* Daniel White
+* Joachim Metz
