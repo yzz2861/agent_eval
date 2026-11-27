@@ -222,6 +222,31 @@ For detached signatures, the code above will use the ``Id`` or ``ID`` attribute 
 See the `API documentation <https://xml-security.github.io/signxml/#id5>`_ for more details.
 
 
+Staged intake of detached signatures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An archive can receive a detached signature before the external attachments it references have arrived.
+:class:`signxml.ExternalReferenceIntake` resolves those references only from a configured local directory, records a
+receipt for each one, and pauses while inputs are missing. Final approval is given only after every reference is present
+and the complete signature verifies:
+
+.. code-block:: python
+
+    from signxml import ExternalReferenceIntake, SignatureConfiguration
+
+    intake = ExternalReferenceIntake(
+        "attachments",
+        hmac_key=secret,
+        expect_config=SignatureConfiguration(require_x509=False),
+    )
+    receipt = intake.receive(envelope)
+    receipt.audit()  # Lists received, pending, and rejected references.
+    receipt.public_receipt()  # Contains only confirmed references; pending ones are omitted.
+
+    # Later, after the attachments directory has been populated:
+    receipt = intake.resume()
+    assert receipt.approved
+
+
 XML representation details: Configuring namespace prefixes and whitespace
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Some applications require a particular namespace prefix configuration - for example, a number of applications assume

@@ -28,11 +28,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from signxml import (
     CanonicalizationMethod,
     DigestAlgorithm,
+    ExternalReferenceIntake,
     ExternalSigningKey,
     InvalidCertificate,
     InvalidDigest,
     InvalidInput,
     InvalidSignature,
+    IntakeReceipt,
+    IntakeState,
+    ReferenceState,
     SignatureConfiguration,
     SignatureConstructionMethod,
     SignatureMethod,
@@ -1937,6 +1941,132 @@ class TestXAdES(unittest.TestCase, LoadExampleKeys):
                     break
             else:
                 XAdESVerifier().verify(doc, **kwargs)
+
+
+class TestExternalReferenceIntake(unittest.TestCase):
+    attachments = {
+        "attachment-a.xml": b"<note><to>Archive</to><body>Alpha</body></note>",
+        "attachment-b.xml": b"<note><to>Archive</to><body>Beta</body></note>",
+    }
+    hmac_key = b"intake-secret"
+
+    def _envelope(self, uris, payloads=None):
+        payloads = self.attachments if payloads is None else payloads
+        signer = XMLSigner(method=methods.detached, signature_algorithm=SignatureMethod.HMAC_SHA256)
+        sig_root = etree.Element(ds_tag("Signature"), nsmap=signer.namespaces)
+        references = [SignatureReference(URI=uri, c14n_method=signer.c14n_alg) for uri in uris]
+        c14n_inputs = [etree.fromstring(payloads[uri]) for uri in uris]
+        signed_info, signature_value = signer._build_sig(
+            sig_root,
+            references=references,
+            c14n_inputs=c14n_inputs,
+            inclusive_ns_prefixes=None,
+            exclude_c14n_transform_element=False,
+        )
+        mac = cryptography.hazmat.primitives.hmac.HMAC(self.hmac_key, hashes.SHA256())
+        mac.update(signer._c14n(signed_info, algorithm=signer.c14n_alg))
+        signature_value.text = b64encode(mac.finalize()).decode()
+        sig_root.append(signature_value)
+        return etree.tostring(sig_root)
+
+    def _intake(self, folder):
+        return ExternalReferenceIntake(
+            folder,
+            hmac_key=self.hmac_key,
+            expect_config=SignatureConfiguration(require_x509=False),
+        )
+
+    def test_two_attachments_pause_and_resume(self):
+        uris = ["attachment-a.xml", "attachment-b.xml"]
+        envelope = self._envelope(uris)
+        with tempfile.TemporaryDirectory() as folder:
+            a_path = os.path.join(folder, uris[0])
+            b_path = os.path.join(folder, uris[1])
+            with open(a_path, "wb") as fh:
+                fh.write(self.attachments[uris[0]])
+
+            intake = self._intake(folder)
+            first = intake.receive(envelope)
+
+            self.assertIsInstance(first, IntakeReceipt)
+            self.assertEqual(first.state, IntakeState.PAUSED)
+            self.assertFalse(first.approved)
+            self.assertIsNone(first.verification_result)
+            self.assertEqual(
+                [reference.state for reference in first.references],
+                [ReferenceState.RECEIVED, ReferenceState.PENDING],
+            )
+            self.assertTrue(first.references[0].received)
+            self.assertFalse(first.references[0].confirmed)
+            self.assertFalse(first.references[1].received)
+            self.assertFalse(first.references[1].confirmed)
+
+            # The pending attachment must not appear in the public receipt before it is received and confirmed.
+            public = first.public_receipt()
+            self.assertFalse(public["approved"])
+            self.assertEqual(public["references"], [])
+            self.assertNotIn(uris[1], str(public))
+
+            still_waiting = intake.resume()
+            self.assertEqual(still_waiting.state, IntakeState.PAUSED)
+            self.assertFalse(still_waiting.approved)
+
+            with open(b_path, "wb") as fh:
+                fh.write(self.attachments[uris[1]])
+            second = intake.resume()
+
+            self.assertEqual(second.state, IntakeState.APPROVED)
+            self.assertTrue(second.approved)
+            self.assertEqual(
+                [reference.state for reference in second.references],
+                [ReferenceState.CONFIRMED, ReferenceState.CONFIRMED],
+            )
+            self.assertTrue(all(reference.received for reference in second.references))
+            self.assertTrue(all(reference.confirmed for reference in second.references))
+            self.assertIsInstance(second.verification_result, list)
+            self.assertEqual(len(second.verification_result), 2)
+            self.assertEqual(
+                [result.signed_xml.tag for result in second.verification_result],
+                ["note", "note"],
+            )
+
+            public = second.public_receipt()
+            self.assertTrue(public["approved"])
+            self.assertCountEqual([entry["uri"] for entry in public["references"]], uris)
+
+    def test_tampered_attachment_stays_out_of_public_receipt(self):
+        uris = ["attachment-a.xml", "attachment-b.xml"]
+        envelope = self._envelope(uris)
+        with tempfile.TemporaryDirectory() as folder:
+            with open(os.path.join(folder, uris[0]), "wb") as fh:
+                fh.write(self.attachments[uris[0]])
+            intake = self._intake(folder)
+            self.assertEqual(intake.receive(envelope).state, IntakeState.PAUSED)
+
+            with open(os.path.join(folder, uris[1]), "wb") as fh:
+                fh.write(b"<note><body>tampered</body></note>")
+            receipt = intake.resume()
+
+            self.assertEqual(receipt.state, IntakeState.REJECTED)
+            self.assertFalse(receipt.approved)
+            self.assertEqual(receipt.references[1].state, ReferenceState.REJECTED)
+            self.assertTrue(receipt.references[1].received)
+            self.assertFalse(receipt.references[1].confirmed)
+            self.assertEqual(receipt.public_receipt(), {"state": "rejected", "approved": False, "references": []})
+
+    def test_reference_outside_attachment_directory_is_rejected(self):
+        outside = b"<note><body>outside</body></note>"
+        envelope = self._envelope(["../outside.xml"], payloads={"../outside.xml": outside})
+        with tempfile.TemporaryDirectory() as folder:
+            with open(os.path.join(folder, "outside.xml"), "wb") as fh:
+                fh.write(b"<note><body>outside</body></note>")
+            receipt = self._intake(folder).receive(envelope)
+
+            self.assertEqual(receipt.state, IntakeState.REJECTED)
+            self.assertFalse(receipt.approved)
+            self.assertEqual(receipt.references[0].state, ReferenceState.REJECTED)
+            self.assertFalse(receipt.references[0].received)
+            self.assertEqual(receipt.public_receipt(), {"state": "rejected", "approved": False, "references": []})
 
 
 if __name__ == "__main__":

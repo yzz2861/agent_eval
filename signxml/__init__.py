@@ -7,6 +7,7 @@ from .algorithms import CanonicalizationMethod, DigestAlgorithm, SignatureConstr
 from .exceptions import InvalidCertificate, InvalidDigest, InvalidInput, InvalidSignature
 from .external import ExternalSigningKey, SigningRequest
 from .processor import XMLSignatureProcessor
+from .receipt import ExternalReferenceIntake, IntakeReceipt, IntakeState, ReferenceReceipt, ReferenceState
 from .signer import SignatureReference, XMLSigner
 from .util import namespaces
 from .verifier import SignatureConfiguration, VerifyResult, XMLVerifier
