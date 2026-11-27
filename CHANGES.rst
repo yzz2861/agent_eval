@@ -4,7 +4,11 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add an offline migration review test suite
+  (``tests/test_migration_review.py``) which uses fixed synthetic samples
+  and counting fake guards to verify compile warnings, guard selection,
+  guard source locations and the allowed ordinary output, and records the
+  diagnostics for syntax that remains unsupported.
 
 
 9.0 (2026-11-04)
