@@ -1,0 +1,33 @@
+{
+  "approved_window": {
+    "not_before": "2026-03-01T00:00:00+00:00",
+    "not_after": "2026-03-31T23:59:59+00:00",
+    "issued_by": "compliance-office"
+  },
+  "notices": [
+    {
+      "id": "notice-a",
+      "notice": "/Users/bill/领域专项项目/state/agent-eval-20261128.OmguyP/workspaces/ds20261128-agent-eval-py100-038/forensics/examples/notice-a.txt",
+      "signature": "/Users/bill/领域专项项目/state/agent-eval-20261128.OmguyP/workspaces/ds20261128-agent-eval-py100-038/forensics/examples/notice-a.txt.sig.asc",
+      "external_receipt": {
+        "window": {
+          "start": "2026-02-20T08:15:00+00:00",
+          "end": "2026-02-20T08:15:00+00:00"
+        },
+        "source": "mail-gateway received-headers log"
+      },
+      "independent_preservation": {
+        "window": {
+          "start": "2026-04-02T11:00:00+00:00",
+          "end": "2026-04-02T11:30:00+00:00"
+        },
+        "source": "third-party timestamping service"
+      }
+    },
+    {
+      "id": "notice-b",
+      "notice": "/Users/bill/领域专项项目/state/agent-eval-20261128.OmguyP/workspaces/ds20261128-agent-eval-py100-038/forensics/examples/notice-b.txt",
+      "signature": "/Users/bill/领域专项项目/state/agent-eval-20261128.OmguyP/workspaces/ds20261128-agent-eval-py100-038/forensics/examples/notice-b.txt.sig.asc"
+    }
+  ]
+}
