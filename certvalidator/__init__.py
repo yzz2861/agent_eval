@@ -5,6 +5,7 @@ from asn1crypto import pem
 from asn1crypto.x509 import Certificate
 
 from .context import ValidationContext
+from .delegation import DelegationEvidence, DelegationReview, PolicyDelegation, review_path_delegation
 from .errors import ValidationError, PathBuildingError, InvalidCertificateError
 from .validate import validate_path, validate_tls_hostname, validate_usage
 from .version import __version__, __version_info__
@@ -16,6 +17,9 @@ __all__ = [
     '__version__',
     '__version_info__',
     'CertificateValidator',
+    'DelegationEvidence',
+    'DelegationReview',
+    'PolicyDelegation',
     'ValidationContext',
 ]
 
@@ -222,3 +226,45 @@ class CertificateValidator():
         self._validate_path()
         validate_tls_hostname(self._context, self._certificate, hostname)
         return self._path
+
+    def validate_delegation(self, delegation_chain, usage=None, moment=None):
+        """
+        Validates the certificate path using the existing signature
+        validation logic, then performs an offline review cross-checking the
+        policy identifiers used by the path against an externally-supplied
+        delegation chain.
+
+        A path without an approved delegation source still validates; only
+        the delivery conclusion of the review is marked as pending manual
+        review.
+
+        :param delegation_chain:
+            A list of certvalidator.delegation.PolicyDelegation objects
+            supplied by the policy officer
+
+        :param usage:
+            None or a unicode string of the usage the delivery is being
+            approved for
+
+        :param moment:
+            A datetime.datetime object to review the approval validity
+            windows against. Defaults to the moment of the validation
+            context
+
+        :raises:
+            certvalidator.errors.PathValidationError - when an error occurs validating the path
+            certvalidator.errors.RevokedError - when the certificate or another certificate in its path has been revoked
+
+        :return:
+            A certvalidator.delegation.DelegationReview object
+        """
+
+        self._validate_path()
+        if moment is None:
+            moment = self._context.moment
+        return review_path_delegation(
+            self._path,
+            delegation_chain,
+            usage=usage,
+            moment=moment
+        )
