@@ -34,6 +34,54 @@ from .bad_ssl_module_attribute_use import BadSSLModuleAttributeUseLinter
 from .bad_sys_use import BadSysUseLinter
 from .bad_tarfile_use import BadTarfileUseLinter
 from .bad_tempfile_use import BadTempfileUseLinter
+from .bad_temporary_resource_use import (
+    BadResourceBranchUseLinter,
+    BadResourceCleanupUseLinter,
+    BadResourceLifecycleUseLinter,
+    BadSecurityCheckUseLinter,
+    BadTempResourceUseLinter,
+    BadTempResourceCheckLinter,
+    BadTempResourceBranchUseLinter,
+    BadTempResourceCleanupLinter,
+    BadTempfileBranchUseLinter,
+    BadTempfileCleanupUseLinter,
+    BadTempfileResourceUseLinter,
+    BadTemporaryFileCleanupLinter,
+    BadTemporaryFileUseLinter,
+    BadTemporaryResourceCheckLinter,
+    BadTemporaryResourceBranchUseLinter,
+    BadTemporaryResourceCleanupLinter,
+    BadTemporaryResourceSafetyLinter,
+    BadTemporaryResourceUseLinter,
+    BranchCleanupLinter,
+    BranchEvidenceLinter,
+    ResourceBranchLinter,
+    ResourceCheckLinter,
+    ResourceCleanupLinter,
+    ResourceLifecycleLinter,
+    ResourceSafetyCheckLinter,
+    SecurityCheckBranchLinter,
+    SecurityCheckLinter,
+    TempResourceBranchLinter,
+    TempResourceCheckLinter,
+    TempResourceCleanupLinter,
+    TempResourceLifecycleLinter,
+    TempResourceSafetyLinter,
+    TempfileBranchLinter,
+    TempfileCheckLinter,
+    TempfileCleanupLinter,
+    TemporaryResourceCheckLinter,
+    TemporaryResourceBranchLinter,
+    TemporaryResourceCleanupLinter,
+    TemporaryResourceSafetyLinter,
+    TemporaryFileBranchLinter,
+    TemporaryFileCleanupLinter,
+    TemporaryFileUseLinter,
+    analyze_resource_branches,
+    analyze_temporary_resources,
+    collect_temporary_resource_evidence,
+    set_resource_config,
+)
 from .bad_urllib3_module_attribute_use import BadUrllib3ModuleAttributeUseLinter
 from .bad_urllib3_kwarg_use import BadUrllib3KwargUseLinter
 from .bad_pickle_use import BadPickleUseLinter
@@ -47,6 +95,61 @@ from .bad_zipfile_use import BadZipfileUseLinter
 from .twisted.inlinecallbacks_yield_statement import InlineCallbacksYieldStatementLinter
 from .twisted.returnvalue_in_inlinecallbacks import ReturnValueInInlineCallbacksLinter
 from .twisted.yield_return_statement import YieldReturnStatementLinter
+
+
+__all__ = [
+    'BadTemporaryResourceUseLinter',
+    'BadTempResourceUseLinter',
+    'BadResourceCleanupUseLinter',
+    'BadTempfileCleanupUseLinter',
+    'BadTempfileBranchUseLinter',
+    'BadTempfileResourceUseLinter',
+    'BadTemporaryFileUseLinter',
+    'BadTemporaryFileCleanupLinter',
+    'BadTemporaryResourceCheckLinter',
+    'BadTemporaryResourceCleanupLinter',
+    'BadTemporaryResourceSafetyLinter',
+    'BadTemporaryResourceBranchUseLinter',
+    'BadTempResourceCheckLinter',
+    'BadTempResourceCleanupLinter',
+    'BadTempResourceBranchUseLinter',
+    'BadResourceLifecycleUseLinter',
+    'BadResourceBranchUseLinter',
+    'BadSecurityCheckUseLinter',
+    'TemporaryResourceCheckLinter',
+    'TemporaryResourceCleanupLinter',
+    'TemporaryResourceSafetyLinter',
+    'TemporaryResourceBranchLinter',
+    'TemporaryFileUseLinter',
+    'TemporaryFileCleanupLinter',
+    'TemporaryFileBranchLinter',
+    'TempResourceCheckLinter',
+    'TempResourceCleanupLinter',
+    'TempResourceLifecycleLinter',
+    'TempResourceSafetyLinter',
+    'TempResourceBranchLinter',
+    'TempfileCheckLinter',
+    'TempfileCleanupLinter',
+    'TempfileBranchLinter',
+    'ResourceCleanupLinter',
+    'ResourceLifecycleLinter',
+    'ResourceSafetyCheckLinter',
+    'ResourceCheckLinter',
+    'ResourceBranchLinter',
+    'SecurityCheckBranchLinter',
+    'SecurityCheckLinter',
+    'BranchCleanupLinter',
+    'BranchEvidenceLinter',
+    'analyze_resource_branches',
+    'analyze_temporary_resources',
+    'collect_temporary_resource_evidence',
+    'set_resource_config',
+]
+
+__all__ += sorted(
+    name for name in globals()
+    if name.endswith('Linter') and name not in __all__
+)
 
 ALL = (
     BadCommandsUseLinter,
@@ -74,6 +177,7 @@ ALL = (
     BadSysUseLinter,
     BadSubprocessUseLinter,
     BadTempfileUseLinter,
+    BadTemporaryResourceUseLinter,
     BadTarfileUseLinter,
     BadUrllib3ModuleAttributeUseLinter,
     BadUrllib3KwargUseLinter,

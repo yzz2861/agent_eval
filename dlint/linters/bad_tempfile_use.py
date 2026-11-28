@@ -33,3 +33,13 @@ class BadTempfileUseLinter(bad_module_attribute_use.BadModuleAttributeUseLinter)
                 'mktemp',
             ],
         }
+
+
+# Branch-aware temporary-file review.  The original DUO121 linter above is
+# intentionally unchanged; these are additive compatibility names for callers
+# that group the new evidence rule beside the legacy tempfile rule.
+from .bad_temporary_resource_use import (  # noqa E402 F401
+    BadTempfileBranchUseLinter,
+    BadTempfileCleanupUseLinter,
+    BadTemporaryResourceUseLinter,
+)
