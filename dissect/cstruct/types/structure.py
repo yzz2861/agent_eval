@@ -538,6 +538,23 @@ class Structure(BaseType, metaclass=StructureMetaType):
         # Structures created from values instead of parsed have no dynamic sizes
         return ChainMap(self.__class__.__static_sizes__, getattr(self, "__dynamic_sizes__", {}))
 
+    def controlled_copy(self, *args: Any, **kwargs: Any) -> Any:
+        """Create a controlled copy of this read result for external review.
+
+        See :func:`dissect.cstruct.redaction.controlled_copy` for the available policy arguments.
+        """
+        from dissect.cstruct.redaction import controlled_copy
+
+        return controlled_copy(self, *args, **kwargs)
+
+    def redacted_copy(self, *args: Any, **kwargs: Any) -> Any:
+        """Alias for :meth:`controlled_copy`."""
+        return self.controlled_copy(*args, **kwargs)
+
+    def redact(self, *args: Any, **kwargs: Any) -> Any:
+        """Alias for :meth:`controlled_copy`."""
+        return self.controlled_copy(*args, **kwargs)
+
 
 class StructureValuesProxy(MutableMapping):
     """A proxy for the values of fields of a Structure."""

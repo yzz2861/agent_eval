@@ -31,3 +31,11 @@ class ExpressionParserError(Error):
 
 class UnknownIdentifierError(ExpressionParserError):
     pass
+
+
+class RedactionError(Error, ValueError):
+    """Raised when a controlled copy cannot be produced without leaking or corrupting data."""
+
+
+class NonInferableError(RedactionError):
+    """Raised when a summary field cannot be safely derived for an external copy."""

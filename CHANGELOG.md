@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Declarative syntax for structures and unions in `dissect.cstruct.declarative`, using classes with type annotations.
+- Controlled copies for external review, with field allowlists, explicit masking, dependent summary handling and
+  preserved byte positions.
 
 ### Changed
 

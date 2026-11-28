@@ -105,6 +105,48 @@ By default, all structures are compiled into classes that provide optimised perf
 
 More examples can be found in the `examples` directory.
 
+### Controlled copies for external review
+
+Parsed structures can be turned into a controlled copy for external review. An allowlist keeps only approved fields
+visible, while explicitly masked fields are replaced in both the value view and the serialized excerpt. Summary fields
+that depend on masked fields are never carried over unchanged: they are recomputed from safe values or redacted
+according to the policy.
+
+```python
+record_def = """
+struct record {
+    uint32 case_id;
+    uint32 subject_id;
+    char   note[8];
+    uint32 total;
+};
+"""
+parser = cstruct().load(record_def)
+record = parser.record(b"\x07\x00\x00\x00\xe9\x03\x00\x00note\x00\x00\x00\x00\xf0\x03\x00\x00")
+
+copy = record.controlled_copy(
+    approved=["case_id", "note", "total"],
+    masked=["subject_id"],
+    summaries={"total": ("case_id", "subject_id")},
+)
+
+assert copy["subject_id"] is None
+assert copy["total"] is None  # Affected summary, so it is redacted too
+assert copy.positions["case_id"] == (0, 4)  # Visible fields keep their original offsets
+
+# A masked field can be replaced, and a summary can be recomputed from the safe replacement value
+safe = record.controlled_copy(
+    masked=["subject_id"],
+    replacements={"subject_id": 42},
+    summaries={"total": lambda values: values["case_id"] + values["subject_id"]},
+)
+assert safe["subject_id"] == 42
+assert safe["total"] == 49
+```
+
+The original parsed result and any supplied source bytes are never modified. Use `on_non_inferable="omit"` or
+`on_non_inferable="error"` to omit or reject summaries that cannot be safely derived instead of masking them.
+
 ## Features
 ### Structure parsing
 Write simple C-like structures and use them to parse binary data, as can be seen in the examples.
