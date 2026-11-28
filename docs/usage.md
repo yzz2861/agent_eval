@@ -8,6 +8,7 @@
    - [Revocation Checking](#revocation-checking)
    - [Custom Trust Roots/CA Certs](#custom-trust-rootsca-certs)
    - [Moment-In-Time Validation](#moment-in-time-validation)
+   - [Freeze-Impact Review](#freeze-impact-review)
 
 ## Basic Path Validation
 
@@ -131,6 +132,7 @@ keyword parameter to the `CertificateValidator()`.
  - [Revocation Checking](#revocation-checking)
  - [Custom Trust Roots/CA Certs](#custom-trust-roots-ca-certs)
  - [Moment-In-Time Validation](#moment-in-time-validation)
+ - [Freeze-Impact Review](#freeze-impact-review)
 
 ### Whitelisting Certificates
 
@@ -406,3 +408,85 @@ validator = CertificateValidator(end_entity_cert, validation_context=context)
 If moment-in-time validation is being performed, the `allow_fetching` option
 can not be used. Instead, any revocation CRLs or OCSP responses should be
 provided via the `crls` or `ocsps` parameters.
+
+## Freeze-Impact Review
+
+Path validation answers whether a certificate chain is currently valid. It
+does not answer whether the release side should process a project before or
+after an external issuance batch is temporarily frozen. Those are separate
+questions: a frozen batch may leave signatures and paths locally valid while
+still requiring the projects that depend on the same issuer evidence to be
+handled in a particular order.
+
+`review_freeze_impact()` adds that second result beside local validation. It
+orders affected projects by certificate validity end, shared frozen evidence
+and the supplied service order. A project with a complete alternative path
+that avoids the frozen evidence is deferred instead of queued, and the plan
+records the alternative's validity window and the reason the split is allowed.
+A project missing required review materials is reported separately.
+
+```python
+from datetime import date
+from certvalidator.freeze import (
+    AlternativeEvidence,
+    ReviewProject,
+    review_freeze_impact,
+)
+
+projects = [
+    ReviewProject(
+        'checkout',
+        valid_until=date(2026, 12, 31),
+        evidence=['issuer-fingerprint-a'],
+    ),
+    ReviewProject(
+        'search',
+        valid_until=date(2026, 12, 15),
+        evidence=['issuer-fingerprint-a'],
+        alternatives=[
+            AlternativeEvidence(
+                'cross-signed-search',
+                evidence=['issuer-fingerprint-b'],
+                valid_from=date(2026, 12, 1),
+                valid_until=date(2027, 6, 1),
+                reason='the cross-signed path does not use the frozen issuer',
+            )
+        ],
+    ),
+]
+
+# The input order does not matter: the plan is deterministic.
+plan = review_freeze_impact(
+    projects,
+    ['issuer-fingerprint-a'],
+    service_order=['checkout', 'search'],
+    moment=date(2026, 12, 10),
+)
+
+print(plan.report())
+```
+
+The report has separate sections for the review queue (`First review`), the
+projects that may be deferred to alternative evidence, and the projects that
+are missing materials. `plan.to_dict()` exposes the same distinction for
+automation. The quantities are also available as `plan.review_queue`,
+`plan.deferred` and `plan.missing_materials`.
+
+When `CertificateValidator` objects are already available, their validated
+paths can be used directly. Issuer certificates in each path become the
+evidence keys, so two leaves below the same intermediate or root are
+automatically recognized as sharing evidence.
+
+```python
+from certvalidator.freeze import review_validators
+
+plan = review_validators(
+    [checkout_validator, search_validator],
+    frozen_evidence=['issuer-fingerprint-a'],
+    names=['checkout', 'search'],
+    service_order=['checkout', 'search'],
+)
+```
+
+Alternatively, a single validator can be reviewed directly via
+`validator.freeze_impact_review(...)`.

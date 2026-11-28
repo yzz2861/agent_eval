@@ -1,5 +1,14 @@
 # changelog
 
+## 0.12.0
+
+ - Added `certvalidator.freeze` for building a deterministic freeze-impact
+   review plan beside local path validation. Plans order affected projects by
+   validity end, shared issuance evidence and service order, defer projects
+   with usable alternative evidence, and separately report missing materials.
+ - Added `CertificateValidator.freeze_impact_review()` and
+   `review_validators()` helpers for deriving evidence from validated paths.
+
 ## 0.11.1
 
  - Updated [asn1crypto](https://github.com/wbond/asn1crypto) dependency to

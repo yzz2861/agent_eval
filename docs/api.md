@@ -200,3 +200,149 @@
 >
 > > A list of newly-fetched asn1crypto.x509.Certificate objects that were
 > > obtained from OCSP responses and CRLs
+
+> ##### `.freeze_impact_review()` method
+>
+> > Validates the path locally and returns a `FreezeReviewPlan` for projects
+> > affected by the same frozen issuance evidence. The local validation result
+> > is not changed. `.validate_and_review()` is the same operation but returns
+> > a `(ValidationPath, FreezeReviewPlan)` tuple.
+
+### `certvalidator.freeze` module
+
+The freeze module adds a review plan beside local path validation. It does not
+change signature, path or revocation results; it orders the release-side manual
+checks that are still required when an external issuance batch is frozen.
+
+#### `review_freeze_impact()` function
+
+> ```python
+> def review_freeze_impact(projects, frozen_evidence, service_order=None, moment=None):
+>     """
+>     :param projects:
+>         An iterable of ReviewProject objects, dicts or CertificateValidator
+>         objects
+>
+>     :param frozen_evidence:
+>         An iterable of evidence keys or Evidence objects that are frozen
+>
+>     :param service_order:
+>         None, a list of project names in service order, or a dict of project
+>         name to integer rank
+>
+>     :param moment:
+>         None or a date/datetime/ISO-8601 string used to judge alternative
+>         evidence windows
+>
+>     :return:
+>         A FreezeReviewPlan object
+>     """
+> ```
+>
+> Affected projects are ordered by certificate validity end (soonest first),
+> then by shared frozen evidence, then by the supplied service order. The
+> result is independent of input order. Projects with a complete alternative
+> path that avoids frozen evidence are deferred; projects missing required
+> materials are reported separately.
+
+#### `ReviewProject()` class
+
+> ```python
+> def __init__(self, name, service_order=None, valid_from=None, valid_until=None,
+>              evidence=None, materials=None, required_materials=None,
+>              alternatives=None):
+>     """
+>     :param name:
+>         A unicode string uniquely identifying the project
+>
+>     :param service_order:
+>         None or an integer used as the final tie-breaker
+>
+>     :param valid_from:
+>         None, a date, datetime or ISO-8601 string for the start of validity
+>
+>     :param valid_until:
+>         None, a date, datetime or ISO-8601 string for the end of validity
+>
+>     :param evidence:
+>         An iterable of issuance evidence keys used by the current path
+>
+>     :param materials:
+>         An iterable of material names already available for review
+>
+>     :param required_materials:
+>         An iterable of material names required before review can start
+>
+>     :param alternatives:
+>         An iterable of AlternativeEvidence objects or dicts
+>     """
+> ```
+
+#### `Freeze()` class
+
+> ```python
+> def __init__(self, evidence, batch=None, frozen_until=None, reason=None):
+>     """
+>     :param evidence:
+>         An evidence identifier or iterable of identifiers in the frozen batch
+>
+>     :param batch:
+>         None or a unicode string identifying the external batch
+>
+>     :param frozen_until:
+>         None, a date, datetime or ISO-8601 string for when the temporary
+>         freeze is expected to end
+>
+>     :param reason:
+>         None or a unicode string recording why the batch is frozen
+>     """
+> ```
+>
+> May be passed directly as the `frozen_evidence` argument to
+> `review_freeze_impact()`.
+
+#### `AlternativeEvidence()` class
+
+> ```python
+> def __init__(self, key, covers=None, evidence=None, complete=True,
+>              valid_from=None, valid_until=None, reason=None):
+>     """
+>     :param key:
+>         A unicode string uniquely identifying the alternative
+>
+>     :param covers:
+>         None, or frozen evidence keys explicitly replaced when complete is
+>         False
+>
+>     :param evidence:
+>         None, or evidence keys used by the alternative path; none may be
+>         frozen
+>
+>     :param complete:
+>         A bool - if the alternative is a complete path replacement
+>
+>     :param valid_from:
+>         None or the start of the alternative's validity window
+>
+>     :param valid_until:
+>         None or the end of the alternative's validity window
+>
+>     :param reason:
+>         None or a unicode string recording why the split is permitted
+>     """
+> ```
+
+#### `FreezeReviewPlan` class
+
+> `.review_queue`, `.deferred` and `.missing_materials` expose the three
+> dispositions. `.first_reviewer` is the name of the first actionable project.
+> `.to_dict()` returns a machine-readable report and `.report()` returns a
+> human-readable report with separate sections for each disposition. Deferred
+> items record `.alternative`, `.alternative_valid_from`,
+> `.alternative_valid_until`, `.defer_until` and `.split_reason`.
+
+#### `review_validators()` function
+
+> Validates a list of `CertificateValidator` objects locally, converts each
+> validated path into a `ReviewProject` using issuer certificate fingerprints
+> as evidence, and returns a `FreezeReviewPlan`.

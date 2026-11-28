@@ -149,6 +149,7 @@ def test_classes():
 
     from .test_certificate_validator import CertificateValidatorTests
     from .test_crl_client import CRLClientTests
+    from .test_freeze import FreezeReviewTests
     from .test_ocsp_client import OCSPClientTests
     from .test_registry import RegistryTests
     from .test_validate import ValidateTests
@@ -156,6 +157,7 @@ def test_classes():
     return [
         CertificateValidatorTests,
         CRLClientTests,
+        FreezeReviewTests,
         OCSPClientTests,
         RegistryTests,
         ValidateTests

@@ -7,6 +7,23 @@ from asn1crypto.x509 import Certificate
 from .context import ValidationContext
 from .errors import ValidationError, PathBuildingError, InvalidCertificateError
 from .validate import validate_path, validate_tls_hostname, validate_usage
+from .freeze import (
+    AlternativeEvidence,
+    DEFERRED,
+    Evidence,
+    Freeze,
+    FreezeReviewError,
+    FreezeReviewPlan,
+    MISSING_MATERIALS,
+    REVIEW,
+    ReviewProject,
+    build_freeze_review_plan,
+    freeze_impact_review,
+    project_from_validation_path,
+    project_from_validator,
+    review_freeze_impact,
+    review_validators,
+)
 from .version import __version__, __version_info__
 from ._errors import pretty_message
 from ._types import type_name, str_cls, byte_cls
@@ -17,6 +34,19 @@ __all__ = [
     '__version_info__',
     'CertificateValidator',
     'ValidationContext',
+    'AlternativeEvidence',
+    'DEFERRED',
+    'Evidence',
+    'Freeze',
+    'FreezeReviewError',
+    'FreezeReviewPlan',
+    'MISSING_MATERIALS',
+    'REVIEW',
+    'ReviewProject',
+    'build_freeze_review_plan',
+    'freeze_impact_review',
+    'review_freeze_impact',
+    'review_validators',
 ]
 
 
@@ -222,3 +252,80 @@ class CertificateValidator():
         self._validate_path()
         validate_tls_hostname(self._context, self._certificate, hostname)
         return self._path
+
+    def freeze_impact_review(self, frozen_evidence, name=None, service_order=None,
+                             materials=None, required_materials=None,
+                             alternatives=None, moment=None, evidence=None):
+        """
+        Validates the certificate path locally and then produces a freeze-impact
+        review plan for it. The local validation result is not weakened or
+        changed: a frozen external batch only affects the order in which the
+        release side performs manual checks.
+
+        :param frozen_evidence:
+            An iterable of evidence keys or Evidence objects that are frozen
+
+        :param name:
+            None to derive a project name from the end-entity certificate
+
+        :param service_order:
+            None, a list of project names in service order, or a dict of
+            project name to integer rank
+
+        :param materials:
+            An iterable of review material names already available
+
+        :param required_materials:
+            An iterable of material names required before review can start
+
+        :param alternatives:
+            An iterable of AlternativeEvidence objects or dicts
+
+        :param moment:
+            None or a date/datetime/ISO-8601 string used to judge alternative
+            evidence windows
+
+        :param evidence:
+            None to use the issuer certificates in the validated path, or an
+            iterable of evidence keys to override them
+
+        :return:
+            A certvalidator.freeze.FreezeReviewPlan object
+        """
+
+        self._validate_path()
+        project = project_from_validator(
+            self,
+            name=name,
+            service_order=None,
+            materials=materials,
+            required_materials=required_materials,
+            alternatives=alternatives,
+            evidence=evidence
+        )
+        return review_freeze_impact(
+            [project],
+            frozen_evidence,
+            service_order=service_order,
+            moment=moment
+        )
+
+    def validate_and_review(self, frozen_evidence, **kwargs):
+        """
+        Returns the local validation path next to its freeze-impact review.
+        The path result is unchanged; the plan only orders release-side manual
+        checks for projects affected by the same frozen issuance evidence.
+
+        :param frozen_evidence:
+            An iterable of evidence keys, Evidence objects or a Freeze object
+
+        :param kwargs:
+            Additional keyword arguments passed to freeze_impact_review()
+
+        :return:
+            A 2-element tuple: the ValidationPath and FreezeReviewPlan objects
+        """
+
+        self._validate_path()
+        plan = self.freeze_impact_review(frozen_evidence, **kwargs)
+        return self._path, plan

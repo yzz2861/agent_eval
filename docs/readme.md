@@ -48,6 +48,7 @@ Supported features include:
    - Caching of CRLs/OCSP responses
  - CRL and OCSP HTTP clients
  - Point-in-time validation
+ - Freeze-impact review planning beside local validation
 
 Currently unsupported features:
  
