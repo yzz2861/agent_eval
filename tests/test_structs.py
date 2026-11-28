@@ -24,6 +24,7 @@ from pcapng.structs import (
     read_options,
     read_section_header,
     struct_decode,
+    write_options,
 )
 
 
@@ -363,6 +364,25 @@ def test_options_object():
     assert 2989 in options
     assert 5 not in options
     assert 12345 not in options
+
+
+def test_write_options_unknown_code():
+    # Options with codes outside the schema are kept as raw bytes and
+    # must survive a write/read round-trip unchanged.
+    options = Options(
+        schema=[Option(2, "spam", "string")],
+        data=[(2, b"known"), (65000, b"\xde\xad\xbe\xef")],
+        endianness=">",
+    )
+
+    stream = io.BytesIO()
+    write_options(stream, options)
+
+    stream.seek(0)
+    assert sorted(read_options(stream, ">")) == [
+        (2, b"known"),
+        (65000, b"\xde\xad\xbe\xef"),
+    ]
 
 
 def test_unpack_dummy_packet():
