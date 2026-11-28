@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from dissect.database.ese.audit import RecordAudit
     from dissect.database.ese.ese import ESE
     from dissect.database.ese.index import Index
     from dissect.database.ese.page import Node, Page
@@ -59,6 +60,10 @@ class Cursor:
         """
         return Record(self.table, self._node())
 
+    def record_audit(self) -> RecordAudit:
+        """Return a column-level audit for the record the cursor is currently on."""
+        return self.record().audit()
+
     def reset(self) -> Self:
         """Reset the internal state."""
         self._primary.reset()
@@ -75,6 +80,11 @@ class Cursor:
         if self._primary.next():
             return self.record()
         return None
+
+    def audit_records(self) -> Iterator[RecordAudit]:
+        """Yield column-level audits for every record returned by this cursor."""
+        for record in self:
+            yield record.audit()
 
     def prev(self) -> Record | None:
         """Move the cursor to the previous node and return it.

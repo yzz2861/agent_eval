@@ -19,6 +19,7 @@ from dissect.database.ese.util import COLUMN_TYPE_MAP
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.database.ese.audit import RecordAudit
     from dissect.database.ese.cursor import Cursor
     from dissect.database.ese.ese import ESE
     from dissect.database.ese.page import Page
@@ -78,6 +79,13 @@ class Table:
 
     def __repr__(self) -> str:
         return f"<Table name={self.name!r}>"
+
+    @property
+    def catalog_version(self) -> bytes | None:
+        """Return the catalog Version value attached to this table definition."""
+        if self.record is None:
+            return None
+        return self.record.get("Version", raw=True)
 
     @cached_property
     def root(self) -> Page:
@@ -181,6 +189,11 @@ class Table:
         """Return an iterator of all the records of the table."""
         for node in self.root.iter_leaf_nodes():
             yield Record(self, node)
+
+    def audit_records(self) -> Iterator[RecordAudit]:
+        """Yield column-level audits for every visible record in this table."""
+        for record in self.records():
+            yield record.audit()
 
     def get_long_value(self, key: bytes) -> bytes:
         """Retrieve a value from the long value page of the table.

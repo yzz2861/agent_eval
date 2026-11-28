@@ -14,6 +14,7 @@ from dissect.database.ese.c_ese import PAGE_FLAG, TAGFLD_HEADER, c_ese
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.database.ese.audit import RecordAudit
     from dissect.database.ese.page import Node
     from dissect.database.ese.table import Column, Table
     from dissect.database.ese.util import RecordValue
@@ -114,6 +115,12 @@ class Record:
 
     def as_dict(self, raw: bool = False) -> dict[str, RecordValue]:
         return self._data.as_dict(raw)
+
+    def audit(self) -> RecordAudit:
+        """Return column-level storage status and catalog evidence for this record."""
+        from dissect.database.ese.audit import RecordAudit
+
+        return RecordAudit(self)
 
 
 class RecordData:
@@ -387,6 +394,7 @@ class RecordData:
     def _get_tagged(self, column: Column) -> bytes | None:
         """Parse a specific tagged column."""
         tag_field = None
+        value = None
 
         idx = self._find_tag_field_idx(column.identifier)
         if idx is not None:
