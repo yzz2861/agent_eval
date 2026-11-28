@@ -17,8 +17,9 @@ from sigma.correlations import (
     SigmaRuleReference,
 )
 from sigma.matching.event import Event
+from sigma.matching.handover import HandoverTracker
 from sigma.matching.match import SigmaMatch
-from sigma.matching.state import SlidingWindowState
+from sigma.matching.state import SlidingWindowState, event_identity
 
 
 class SigmaCorrelationRuleMatcher:
@@ -29,9 +30,11 @@ class SigmaCorrelationRuleMatcher:
         rule: SigmaCorrelationRule,
         max_state: int | None = None,
         max_events_per_match: int | None = 100,
+        handover_tracker: HandoverTracker | None = None,
     ) -> None:
         self.rule = rule
         self.max_events_per_match = max_events_per_match
+        self._handover_tracker = handover_tracker or HandoverTracker()
         self._state = SlidingWindowState(
             window_seconds=rule.timespan.seconds,
             max_entries=max_state,
@@ -48,11 +51,25 @@ class SigmaCorrelationRuleMatcher:
     def receive_match(self, match: SigmaMatch, source_rule_name: str) -> list[SigmaMatch]:
         """Process an incoming match from a base rule and return correlation matches if any."""
         group_key = self._extract_group_key(match)
-        self._state.add(group_key, match)
+        event = match.events[0] if match.events else None
+        identity = event_identity(
+            event,
+            self._handover_tracker.allows_content_dedup(match.timestamp),
+        )
+        if identity is None:
+            identity = f"unique:{id(match)}"
+        if not self._state.add(group_key, match, identity):
+            return []
 
         window_matches = self._state.get_window(group_key, match.timestamp)
         result = self._evaluate(window_matches, group_key, match.timestamp)
         return result
+
+    def snapshot(self) -> dict[str, object]:
+        return self._state.snapshot()
+
+    def restore(self, state: dict[str, object], rules_by_name: dict[str, object]) -> None:
+        self._state.restore(state, rules_by_name)
 
     def _extract_group_key(self, match: SigmaMatch) -> tuple[Any, ...]:
         """Extract group-by field values from match events."""

@@ -5,7 +5,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from sigma.collection import SigmaCollection
-from sigma.matching import Event, EventLogSource, SigmaMatch, SigmaMatcher
+from sigma.matching import (
+    Event,
+    EventLogSource,
+    HandoverInterval,
+    SigmaMatch,
+    SigmaMatcher,
+)
 
 
 @pytest.fixture
@@ -321,6 +327,46 @@ detection:
 
 
 class TestCorrelation:
+    _EVENT_COUNT_RULES = """
+title: Base Rule
+name: base_rule
+status: test
+logsource:
+    category: test
+    product: test
+detection:
+    selection:
+        field: "trigger"
+    condition: selection
+---
+title: Correlation
+name: correlation_rule
+status: test
+correlation:
+    type: event_count
+    rules:
+        - base_rule
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition:
+        gte: 3
+"""
+
+    def _event(
+        self,
+        timestamp: datetime,
+        synthetic_event_id: str | None = None,
+        receiver_id: str | None = None,
+    ) -> Event:
+        return Event(
+            timestamp=timestamp,
+            logsource=EventLogSource(category="test", product="test"),
+            data={"field": "trigger", "src_ip": "1.2.3.4"},
+            synthetic_event_id=synthetic_event_id,
+            receiver_id=receiver_id,
+        )
+
     def test_event_count(self):
         yaml_str = """
 title: Base Rule
@@ -760,6 +806,252 @@ correlation:
                 )
             )
             assert any(m.rule.name == "pct_corr" for m in matches)
+
+    def test_synthetic_event_id_resists_acknowledged_handover_duplicate(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        with SigmaMatcher(collection, handover_intervals=handover) as matcher:
+            first = matcher.process_event(self._event(now, "event-1", "old"))
+            duplicate = matcher.process_event(self._event(now, "event-1", "new"))
+
+        assert not any(m.rule.name == "correlation_rule" for m in first.matches)
+        assert not any(m.rule.name == "correlation_rule" for m in duplicate.matches)
+
+    def test_legacy_match_entry_accepts_acknowledged_handover_interval(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        with SigmaMatcher(collection) as matcher:
+            first = matcher.match(self._event(now, "event-1", "old"), handover_interval=handover)
+            duplicate = matcher.match(self._event(now, "event-1", "new"))
+
+        assert not any(m.rule.name == "correlation_rule" for m in first)
+        assert not any(m.rule.name == "correlation_rule" for m in duplicate)
+
+    def test_synthetic_id_constructor_alias_is_used_for_deduplication(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        event = Event(
+            timestamp=now,
+            logsource=EventLogSource(category="test", product="test"),
+            data={"field": "trigger", "src_ip": "1.2.3.4"},
+            synthetic_id="event-1",
+            receiver_id="old",
+        )
+        assert event.synthetic_event_id == "event-1"
+
+        with SigmaMatcher(collection, handover_intervals=handover) as matcher:
+            matcher.process_event(event)
+            event.receiver_id = "new"
+            duplicate = matcher.process_event(event)
+
+        assert not any(m.rule.name == "correlation_rule" for m in duplicate.matches)
+
+    def test_content_duplicate_resists_only_inside_acknowledged_handover(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        with SigmaMatcher(collection, handover_intervals=handover) as matcher:
+            matcher.process_event(self._event(now, receiver_id="old"))
+            duplicate = matcher.process_event(self._event(now, receiver_id="new"))
+            assert not any(m.rule.name == "correlation_rule" for m in duplicate.matches)
+
+            different_event = self._event(now + timedelta(seconds=2), receiver_id="new")
+            different_event.data["sequence"] = 2
+            second_unique = matcher.process_event(different_event)
+            assert len(second_unique.matches) == 1
+            assert second_unique.matches[0].rule.name == "base_rule"
+
+    def test_distinct_events_with_equal_timestamp_are_not_deduplicated(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        with SigmaMatcher(collection) as matcher:
+            first = matcher.process_event(self._event(now, "event-1"))
+            second = matcher.process_event(self._event(now, "event-2"))
+
+        assert [match.rule.name for match in first.matches] == ["base_rule"]
+        assert [match.rule.name for match in second.matches] == ["base_rule"]
+
+    def test_missing_handover_receiver_reports_undeterminable_range(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        with SigmaMatcher(collection) as matcher:
+            outcome = matcher.process_event(self._event(now, "event-1", "old"), handover)
+            ranges = matcher.finalize(now + timedelta(minutes=1))
+
+        assert outcome.undeterminable_ranges == []
+        assert len(ranges) == 1
+        assert ranges[0].interval_id == "shift-1"
+        assert ranges[0].missing_receivers == frozenset({"new"})
+
+    def test_snapshot_preserves_undeterminable_range_state_across_runs(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        with SigmaMatcher(collection, handover_intervals=handover) as first_run:
+            first_run.process_event(self._event(now, "event-1", "old"))
+            first_ranges = first_run.finalize(now + timedelta(minutes=1))
+            state = first_run.snapshot_state()
+
+        with SigmaMatcher(collection, handover_intervals=handover) as second_run:
+            second_run.restore_state(state)
+            second_ranges = second_run.finalize(now + timedelta(minutes=1))
+
+        assert [item.interval_id for item in first_ranges] == ["shift-1"]
+        assert second_ranges == []
+
+    def test_split_run_with_snapshot_matches_continuous_run(self):
+        collection = SigmaCollection.from_yaml(self._EVENT_COUNT_RULES)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+        events = [
+            self._event(now, "event-1", "old"),
+            self._event(now + timedelta(seconds=1), "event-2", "old"),
+            self._event(now + timedelta(seconds=2), "event-2", "new"),
+            self._event(now + timedelta(seconds=3), "event-3", "new"),
+        ]
+
+        with SigmaMatcher(collection, handover_intervals=handover) as continuous:
+            continuous_results = [outcome.matches for outcome in continuous.process_events(events)]
+
+        with SigmaMatcher(collection, handover_intervals=handover) as first_run:
+            first_results = [first_run.process_event(events[0]).matches]
+            first_results.append(first_run.process_event(events[1]).matches)
+            state = first_run.snapshot_state()
+
+        with SigmaMatcher(collection, handover_intervals=handover) as second_run:
+            second_run.restore_state(state)
+            second_results = [second_run.process_event(events[2]).matches]
+            second_results.append(second_run.process_event(events[3]).matches)
+
+        assert first_results + second_results == continuous_results
+        assert any(
+            match.rule.name == "correlation_rule" for matches in second_results for match in matches
+        )
+
+    def test_split_run_keeps_aggregate_result_with_handover_duplicate(self):
+        yaml_str = """
+title: Base Rule
+name: base_rule
+status: test
+logsource:
+    category: test
+    product: test
+detection:
+    selection:
+        event: "transfer"
+    condition: selection
+---
+title: Value Sum Correlation
+name: sum_rule
+status: test
+correlation:
+    type: value_sum
+    rules:
+        - base_rule
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition:
+        gte: 100
+        field: bytes
+"""
+        collection = SigmaCollection.from_yaml(yaml_str)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        handover = HandoverInterval(
+            interval_id="shift-1",
+            start=now,
+            end=now + timedelta(minutes=1),
+            source_receiver="old",
+            target_receiver="new",
+        )
+
+        def transfer_event(
+            event_id: str,
+            timestamp: datetime,
+            receiver: str,
+            byte_count: int,
+        ) -> Event:
+            return Event(
+                timestamp=timestamp,
+                logsource=EventLogSource(category="test", product="test"),
+                data={
+                    "event": "transfer",
+                    "src_ip": "1.2.3.4",
+                    "bytes": byte_count,
+                },
+                synthetic_event_id=event_id,
+                receiver_id=receiver,
+            )
+
+        first_event = transfer_event("event-1", now, "old", 60)
+        duplicate_event = transfer_event("event-1", now, "new", 60)
+        last_event = transfer_event("event-2", now + timedelta(seconds=1), "new", 50)
+
+        with SigmaMatcher(collection, handover_intervals=handover) as first_run:
+            first_outcome = first_run.process_event(first_event)
+            state = first_run.snapshot_state()
+
+        with SigmaMatcher(collection, handover_intervals=handover) as second_run:
+            second_run.restore_state(state)
+            duplicate_outcome = second_run.process_event(duplicate_event)
+            final_outcome = second_run.process_event(last_event)
+
+        assert not any(m.rule.name == "sum_rule" for m in first_outcome.matches)
+        assert not any(m.rule.name == "sum_rule" for m in duplicate_outcome.matches)
+        assert any(m.rule.name == "sum_rule" for m in final_outcome.matches)
 
 
 class TestExtendedCorrelation:

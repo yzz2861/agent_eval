@@ -243,3 +243,60 @@ Two constructor parameters control memory use for correlation state:
   correlation match to avoid unbounded memory growth on high-cardinality rules.
 * ``max_correlation_state`` (default ``None``, unlimited) — limits the total number of
   entries retained in the sliding window per group key.
+
+Receiver Handovers
+------------------
+
+Receiver groups can change on an hourly boundary. During an acknowledged handover, the same event
+may be delivered once by each group. Attach a stable ``synthetic_event_id`` to each event and pass
+one or more :class:`~sigma.matching.HandoverInterval` objects to describe the signed overlap:
+
+.. code-block:: python
+
+    from sigma.matching import HandoverInterval
+
+    handover = HandoverInterval(
+        interval_id="2026-01-01T10",
+        start=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+        end=datetime(2026, 1, 1, 10, 5, tzinfo=timezone.utc),
+        source_receiver="group-a",
+        target_receiver="group-b",
+    )
+
+    matcher = SigmaMatcher(collection, handover_intervals=[handover])
+    event = Event(
+        timestamp=timestamp,
+        logsource=logsource,
+        data=data,
+        synthetic_event_id="event-123",
+        receiver_id="group-a",
+    )
+    outcome = matcher.process_event(event)
+
+Correlation windows deduplicate by ``synthetic_event_id`` globally. Events without a synthetic
+identifier are deduplicated by their complete event content while the timestamp is inside an
+acknowledged handover interval. Two different events that share a timestamp therefore remain
+distinct, while a legitimate replay does not increase counts or value aggregates.
+
+Each event also carries ``receiver_id``. After the interval ends, if one required receiver group
+was never observed, :meth:`~sigma.matching.SigmaMatcher.finalize` or the
+``undeterminable_ranges`` value on :class:`~sigma.matching.MatchOutcome` reports the interval that
+cannot be fully assessed.
+
+Split and Resume
+~~~~~~~~~~~~~~~~
+
+A handover can be processed in two runs. Export state at the split, create a new matcher for the
+second run, restore the state, and continue processing events:
+
+.. code-block:: python
+
+    state = first_matcher.snapshot_state()
+    second_matcher = SigmaMatcher(collection, handover_intervals=[handover])
+    second_matcher.restore_state(state)
+
+    for event in second_segment:
+        outcome = second_matcher.process_event(event)
+
+Restored correlation windows preserve the original event identities, so replaying overlap events in
+the second segment produces the same alerts as one continuous run.

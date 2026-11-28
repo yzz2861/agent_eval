@@ -26,7 +26,14 @@ class Event:
     logsource: EventLogSource
     data: dict[str, Any]
     raw: str | None = None
+    synthetic_event_id: str | None = None
+    synthetic_id: str | None = None
+    receiver_id: str | None = None
     _raw_cache: str | None = field(init=False, default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.synthetic_event_id is None and self.synthetic_id is not None:
+            self.synthetic_event_id = self.synthetic_id
 
     def get_raw(self) -> str:
         """Return raw log representation, falling back to JSON-serialized data."""

@@ -25,6 +25,16 @@ Event
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: sigma.matching.HandoverInterval
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.HandoverUndeterminableRange
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 SigmaMatcher
 ------------
 
@@ -37,6 +47,11 @@ SigmaMatch
 ----------
 
 .. autoclass:: sigma.matching.SigmaMatch
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: sigma.matching.MatchOutcome
    :members:
    :undoc-members:
    :show-inheritance:
