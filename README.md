@@ -42,6 +42,60 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Offline, policy-aware index
+---------------------------
+`evtx_index` builds a JSON index from the same record view used by `evtx_dump`,
+without needing the original log at query time.  Field access is controlled by
+an explicit allow-list.
+
+Build an index that only exposes event types:
+
+    evtx_index build Security.evtx -o event-index.json --policy event-type
+
+Build an index for a team that may also see a small set of fields:
+
+    evtx_index build Security.evtx -o field-index.json --policy limited \
+        --allow EventData.TargetUserName --allow EventData.LogonType
+
+Check whether conditions can be used before running them:
+
+    evtx_index explain field-index.json --policy limited \
+        --where 'EventID=4624' --where 'TargetUserName~=admin'
+
+Query and retain the evidence locations and hit counts:
+
+    evtx_index query field-index.json --policy limited \
+        --where 'EventID=4624' --where 'TargetUserName~=admin'
+
+Queries are conjunctions and are all-or-nothing.  If one condition is not
+permitted, not present in the index's field projection, or uses an unsupported
+operator, the result reports that condition and refuses the whole query with
+`hit_count: null`.  Conditions are never silently dropped, so a count cannot
+leak the value of an undisclosed field.
+
+The build policy is the storage boundary: fields outside it are not written to
+the index at all.  A viewer policy passed to `query`, `show`, or a loaded
+`OfflineIndex` can only narrow that projection further.  Per-record
+`projection_sha256` values and index fingerprints are computed over the visible
+projection, so changing an unauthorized field does not alter the restricted
+presentation.
+
+Corrupt or truncated inputs do not abort the build.  The index retains every
+record that can be structurally verified and rendered, and its `coverage`
+block records missing chunks, failed checksums, and skipped records.  Queries
+over those verified fragments remain available.
+
+
+Security model quick reference
+------------------------------
+`AccessPolicy.event_type_only()` exposes only `System.EventID`.
+`AccessPolicy.limited_fields([...])` exposes an explicit field set.
+`AccessPolicy.all_fields()` exposes every field stored in the index.
+`build_evtx_index(path, policy)` and `build_index_from_views(views, policy)` are
+available programmatically; `OfflineIndex.save()` and `OfflineIndex.load()`
+move the index between hosts.
+
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:
@@ -71,4 +125,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-
