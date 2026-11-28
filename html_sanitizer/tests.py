@@ -1,5 +1,11 @@
 from unittest import TestCase
 
+from .policy import (
+    ApprovalPolicy,
+    CentralPolicySanitizer,
+    EditorialSection,
+    PolicySanitizer,
+)
 from .sanitizer import Sanitizer
 
 
@@ -830,3 +836,264 @@ git commit
             ],
             sanitizer=sanitizer,
         )
+
+
+class PolicySanitizerTestCase(TestCase):
+    def test_shared_fragment_is_judged_independently_per_section(self):
+        basic_policy = ApprovalPolicy(
+            id="basic",
+            source="Basic formatting policy, revision 1",
+            settings={
+                "tags": {"p"},
+                "attributes": {},
+                "empty": set(),
+                "separate": set(),
+            },
+        )
+        rich_policy = ApprovalPolicy(
+            id="rich",
+            source="Rich text policy, revision 3",
+            settings={
+                "tags": {"p", "strong"},
+                "attributes": {"p": {"title"}},
+                "empty": set(),
+                "separate": set(),
+            },
+        )
+        sanitizer = CentralPolicySanitizer([basic_policy, rich_policy])
+        shared_fragment = '<p title="Shared"><strong>bold</strong> text</p>'
+        sections = [
+            EditorialSection(
+                id="basic-section",
+                html=shared_fragment,
+                policy_id="basic",
+            ),
+            EditorialSection(
+                id="rich-section",
+                html=shared_fragment,
+                policy_id="rich",
+            ),
+        ]
+        self.assertEqual(sections[0].html, sections[1].html)
+
+        reviewed = sanitizer.compose(sections)
+
+        self.assertEqual(
+            reviewed.html,
+            '<p>bold text</p><p title="Shared"><strong>bold</strong> text</p>',
+        )
+
+        basic_section, rich_section = reviewed.sections
+        self.assertEqual(basic_section.policy_source, basic_policy.source)
+        self.assertEqual(rich_section.policy_source, rich_policy.source)
+
+        self.assertEqual(
+            [
+                (item.tag, item.attribute, item.path)
+                for item in basic_section.retained_formats
+            ],
+            [("p", None, "/div/p[1]")],
+        )
+        self.assertEqual(
+            [
+                (item.tag, item.attribute, item.reason, item.path)
+                for item in basic_section.rejected_formats
+            ],
+            [
+                (
+                    "p",
+                    "title",
+                    "attribute_not_allowed",
+                    "/div/p[1]",
+                ),
+                ("strong", None, "tag_not_allowed", "/div/p[1]/strong[1]"),
+            ],
+        )
+        self.assertEqual(
+            [
+                (item.tag, item.attribute, item.path, item.policy_id)
+                for item in rich_section.retained_formats
+            ],
+            [
+                ("p", None, "/div/p[1]", "rich"),
+                ("p", "title", "/div/p[1]", "rich"),
+                ("strong", None, "/div/p[1]/strong[1]", "rich"),
+            ],
+        )
+        self.assertEqual(rich_section.rejected_formats, ())
+
+        self.assertEqual(
+            [item.policy_id for item in reviewed.retained_formats],
+            ["basic", "rich", "rich", "rich"],
+        )
+        self.assertEqual(
+            [item.section_id for item in reviewed.rejected_formats],
+            ["basic-section", "basic-section"],
+        )
+        self.assertIn("basic-section: approved by basic", reviewed.explanation())
+        self.assertIn(
+            'rejected <strong> at /div/p[1]/strong[1]',
+            reviewed.explanation(),
+        )
+        self.assertEqual(sanitizer.compose([]).html, "")
+
+    def test_policy_and_section_validation(self):
+        sanitizer = CentralPolicySanitizer(
+            [
+                ApprovalPolicy(
+                    id="basic",
+                    source="Basic formatting policy",
+                    settings={
+                        "tags": {"p"},
+                        "attributes": {},
+                        "empty": set(),
+                        "separate": set(),
+                    },
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, 'Unknown policy id "missing"'):
+            sanitizer.sanitize_section(
+                EditorialSection(id="section", html="<p>text</p>", policy_id="missing")
+            )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate policy id"):
+            CentralPolicySanitizer(
+                [
+                    ApprovalPolicy(id="same", source="first"),
+                    ApprovalPolicy(id="same", source="second"),
+                ]
+            )
+
+        with self.assertRaisesRegex(ValueError, "Section ids must be unique"):
+            sanitizer.sanitize_and_compose(
+                [
+                    EditorialSection(id="same", html="<p>one</p>", policy_id="basic"),
+                    EditorialSection(id="same", html="<p>two</p>", policy_id="basic"),
+                ]
+            )
+
+    def test_preprocessed_format_reports_effective_allowed_tag(self):
+        policy = ApprovalPolicy(
+            id="rich",
+            source="Rich text policy",
+            settings={
+                "tags": {"p", "strong", "span"},
+                "attributes": {"span": {"style"}},
+                "empty": set(),
+                "separate": {"p"},
+            },
+        )
+        sanitizer = CentralPolicySanitizer([policy])
+
+        section = sanitizer.sanitize_section(
+            EditorialSection(
+                id="editor",
+                html='<p><span style="font-weight:bold">bold</span></p>',
+                policy_id="rich",
+            )
+        )
+
+        self.assertEqual(
+            section.html,
+            "<p><strong>bold</strong></p>",
+        )
+        self.assertEqual(
+            [(item.tag, item.attribute) for item in section.retained_formats],
+            [("p", None), ("strong", None)],
+        )
+        self.assertEqual(section.rejected_formats, ())
+
+    def test_preprocessed_format_reports_effective_rejected_tag(self):
+        policy = ApprovalPolicy(
+            id="text-only",
+            source="Text-only policy",
+            settings={
+                "tags": {"p"},
+                "attributes": {},
+                "empty": set(),
+                "separate": set(),
+            },
+        )
+        section = CentralPolicySanitizer([policy]).sanitize_section(
+            EditorialSection(
+                id="editor",
+                html="<p><b>bold</b></p>",
+                policy_id="text-only",
+            )
+        )
+
+        self.assertEqual(section.html, "<p>bold</p>")
+        self.assertEqual(
+            [
+                (item.tag, item.reason, item.path)
+                for item in section.rejected_formats
+            ],
+            [("b", "tag_not_allowed", "/div/p[1]/b[1]")],
+        )
+
+    def test_attribute_report_follows_original_element_after_tag_removal(self):
+        policy = ApprovalPolicy(
+            id="basic",
+            source="Basic formatting policy",
+            settings={
+                "tags": {"p"},
+                "attributes": {"p": {"title"}},
+                "empty": set(),
+                "separate": set(),
+            },
+        )
+        section = CentralPolicySanitizer([policy]).sanitize_section(
+            EditorialSection(
+                id="editor",
+                html=(
+                    '<section><p>removed wrapper</p></section>'
+                    '<p title="kept" data-extra="no">kept</p>'
+                ),
+                policy_id="basic",
+            )
+        )
+
+        self.assertEqual(
+            section.html,
+            '<p>removed wrapper</p><p title="kept">kept</p>',
+        )
+        self.assertEqual(
+            [
+                (item.tag, item.attribute, item.path)
+                for item in section.rejected_formats
+            ],
+            [
+                ("section", None, "/div/section[1]"),
+                ("p", "data-extra", "/div/p[2]"),
+            ],
+        )
+
+    def test_backward_compatible_policy_sanitizer_alias(self):
+        self.assertIs(PolicySanitizer, CentralPolicySanitizer)
+
+    def test_broken_html_uses_same_parser_fallback_for_audit(self):
+        policy = ApprovalPolicy(
+            id="basic",
+            source="Broken HTML policy",
+            settings={
+                "tags": {"p", "strong"},
+                "attributes": {},
+                "empty": set(),
+                "separate": set(),
+            },
+        )
+        section = CentralPolicySanitizer([policy]).sanitize_section(
+            EditorialSection(
+                id="broken",
+                html="<p><strong>bla<>/dsiad<p/",
+                policy_id="basic",
+            )
+        )
+
+        self.assertEqual(
+            section.html,
+            "<p><strong>bla&lt;&gt;/dsiad</strong></p>",
+        )
+        self.assertEqual(section.rejected_formats, ())

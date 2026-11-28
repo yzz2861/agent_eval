@@ -37,6 +37,53 @@ Usage
     >>> sanitizer.sanitize('<span style="font-weight:bold">some text</span>')
     '<strong>some text</strong>'
 
+Policy provenance
+=================
+
+When several editing areas have different approval scopes, wrap each set
+of sanitizer settings in an ``ApprovalPolicy``. Sections are sanitized
+independently, including when they contain the same shared fragment, and
+the resulting report keeps the policy id, source and fragment position
+for every retained or rejected format.
+
+    >>> from html_sanitizer import (
+    ...     ApprovalPolicy, CentralPolicySanitizer, EditorialSection,
+    ... )
+    >>> policies = [
+    ...     ApprovalPolicy(
+    ...         id="basic",
+    ...         source="Basic formatting policy, revision 1",
+    ...         settings={
+    ...             "tags": {"p"},
+    ...             "attributes": {},
+    ...             "empty": set(),
+    ...             "separate": set(),
+    ...         },
+    ...     ),
+    ...     ApprovalPolicy(
+    ...         id="rich",
+    ...         source="Rich text policy, revision 3",
+    ...         settings={
+    ...             "tags": {"p", "strong"},
+    ...             "attributes": {},
+    ...             "empty": set(),
+    ...             "separate": set(),
+    ...         },
+    ...     ),
+    ... ]
+    >>> reviewer = CentralPolicySanitizer(policies)
+    >>> shared = '<p><strong>bold</strong> text</p>'
+    >>> reviewed = reviewer.sanitize_and_compose([
+    ...     EditorialSection("intro", shared, "basic"),
+    ...     EditorialSection("body", shared, "rich"),
+    ... ])
+    >>> reviewed.html
+    '<p>bold text</p><p><strong>bold</strong> text</p>'
+    >>> reviewed.sections[0].policy_source
+    'Basic formatting policy, revision 1'
+    >>> reviewed.sections[1].retained_formats[1].path
+    '/div/p[1]/strong[1]'
+
 Settings
 ========
 
