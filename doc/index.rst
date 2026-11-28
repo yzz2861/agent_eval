@@ -33,6 +33,7 @@ Reference Guide
    dyld
    dylib
    framework
+   forensics
    macho_o
    ptypes
 

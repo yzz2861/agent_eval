@@ -11,6 +11,7 @@ import sys
 from macholib.util import fileview
 
 from .mach_o import (
+    CPU_TYPE_NAMES,
     FAT_MAGIC,
     FAT_MAGIC_64,
     LC_DYSYMTAB,
@@ -33,6 +34,7 @@ from .mach_o import (
     fat_arch,
     fat_arch64,
     fat_header,
+    get_cpu_subtype,
     load_command,
     mach_header,
     mach_header_64,
@@ -178,6 +180,28 @@ class MachO(object):
         for header in self.headers:
             header.write(f)
 
+    def verify_excerpt(self, declaration, **kwargs):
+        """Verify a forensic excerpt declaration against this file.
+
+        See :mod:`macholib.forensics` for the declaration format and the
+        meaning of the returned result.
+        """
+        from .forensics import verify_excerpt
+
+        return verify_excerpt(self, declaration, **kwargs)
+
+    def verify_excerpts(self, declarations, **kwargs):
+        """Verify a bound ledger of forensic excerpt declarations."""
+        from .forensics import verify_excerpts
+
+        return verify_excerpts(self, declarations, **kwargs)
+
+    def slice_records(self):
+        """Return the slices with absolute and slice-relative metadata."""
+        from .forensics import slice_records
+
+        return slice_records(self)
+
 
 class MachOHeader(object):
     """
@@ -237,6 +261,51 @@ class MachOHeader(object):
             self.size,
             self.endian,
         )
+
+    @property
+    def slice_offset(self):
+        """Absolute file offset of this slice's Mach-O header."""
+        return self.offset
+
+    @property
+    def slice_size(self):
+        """Size of this slice in bytes."""
+        return self.size
+
+    @property
+    def cputype(self):
+        return int(self.header.cputype)
+
+    @property
+    def cpusubtype(self):
+        return int(self.header.cpusubtype)
+
+    @property
+    def arch(self):
+        """Human readable CPU architecture name for this slice."""
+        return CPU_TYPE_NAMES.get(self.cputype, str(self.cputype))
+
+    @property
+    def cpu_subtype(self):
+        return get_cpu_subtype(self.cputype, self.cpusubtype)
+
+    def verify_excerpt(self, declaration, **kwargs):
+        """Verify an excerpt against this slice.
+
+        The current header is used as the owning slice unless the declaration
+        (or the caller) selects a different slice explicitly.
+        """
+        from .forensics import verify_excerpt
+
+        if "slice_index" not in kwargs:
+            kwargs["slice_index"] = self.parent.headers.index(self)
+        return verify_excerpt(self.parent, declaration, **kwargs)
+
+    def slice_record(self):
+        """Return the forensic slice record for this header."""
+        from .forensics import slice_records
+
+        return slice_records(self.parent)[self.parent.headers.index(self)]
 
     def load(self, fh):
         fh = fileview(fh, self.offset, self.size)

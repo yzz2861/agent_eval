@@ -1,6 +1,15 @@
 Release history
 ===============
 
+macholib 1.17 (unreleased)
+--------------------------
+
+* Add :mod:`macholib.forensics` for verifying forensic excerpt records
+  against Mach-O slices.  Declarations carry an explicit coordinate system
+  (file or slice), owning architecture and per-segment lengths, so a digest
+  match is never mistaken for proof of slice ownership.  Old file-relative
+  records can be reconstructed to slice-relative offsets.
+
 macholib 1.16.4
 ---------------
 
