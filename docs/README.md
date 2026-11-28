@@ -43,6 +43,11 @@ Dlint uses a simple, folder-based hierarchy written in [Markdown](https://en.wik
 * [`DUO137` `BadItsDangerousKwargUseLinter` insecure "itsdangerous" use allowing empty signing](https://github.com/dlint-py/dlint/blob/master/docs/linters/DUO137.md)
 * [`DUO138` `BadReCatastrophicUseLinter` catastrophic "re" usage - denial-of-service possible](https://github.com/dlint-py/dlint/blob/master/docs/linters/DUO138.md)
 
+# Compatibility probes
+
+* [XML AST compatibility probe](xml-ast-compat.md) - verify `DUO107` coverage
+  and plugin records across Python minor-version boundaries.
+
 # FAQs
 
 ## Why not Bandit?
