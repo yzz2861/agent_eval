@@ -142,6 +142,42 @@ Assuming ``metadata.xml`` contains SAML metadata for the assertion source:
     )
     verified_data = XMLVerifier().verify(data, expect_config=config).signed_xml
 
+Purpose-scoped algorithm policies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SignXML can apply a purpose-specific algorithm policy to signing and verification. This is useful when the
+same organization keeps long-term internal archives and also accepts signatures from external delivery
+partners: the archive can use RSA-PSS or SHA-3, while the delivery endpoint rejects those archive-only
+suites. Policies are opt-in, so existing callers without a purpose keep the legacy behavior described above.
+
+Pass ``SignaturePurpose.DELIVERY`` when verifying external delivery traffic, or ``SignaturePurpose.ARCHIVE``
+for internal archival workflows::
+
+    from signxml import SignatureConfiguration, SignaturePurpose, XMLVerifier
+
+    delivery_config = SignatureConfiguration(signature_purpose=SignaturePurpose.DELIVERY)
+    verifier = XMLVerifier()
+    verifier.verify(data, x509_cert=cert, expect_config=delivery_config)
+
+The same purpose can be supplied to ``XMLSigner`` and ``XAdESSigner`` through the ``purpose`` keyword. The
+delivery policy permits RSA PKCS#1 v1.5, ECDSA, DSA-SHA256, and HMAC with SHA-256/384/512. It rejects
+RSA-PSS, SHA-3, SHA-1, and comment-preserving canonicalization; those remain available under the archive
+policy. ``signature_purpose`` is also available as the shorter ``purpose`` and ``profile`` aliases.
+
+To inspect the admission decision for every combination implemented by the library, use
+``admission_matrix``. Each entry is one of ``AlgorithmAdmission.ALLOWED``, ``DENIED``, ``UNCONFIGURED``, or
+``UNSUPPORTED``. ``UNCONFIGURED`` means no purpose was supplied and the caller must make its own decision;
+``UNSUPPORTED`` means SignXML or its cryptographic backend does not implement the algorithm::
+
+    from signxml import DigestAlgorithm, SignatureMethod, SignaturePurpose, admission_matrix
+
+    matrix = admission_matrix(SignaturePurpose.DELIVERY)
+    matrix[(SignatureMethod.SHA256_RSA_MGF1, DigestAlgorithm.SHA256, None)]
+    # AlgorithmAdmission.DENIED
+
+Policy failures raise :class:`signxml.AlgorithmPolicyViolation`, while an unimplemented algorithm raises
+:class:`signxml.UnsupportedAlgorithm`. Both are subclasses of :class:`signxml.InvalidInput`.
+
 Signing with external private keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

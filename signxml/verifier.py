@@ -23,6 +23,7 @@ from .algorithms import (
     digest_algorithm_implementations,
 )
 from .exceptions import InvalidCertificate, InvalidDigest, InvalidInput, InvalidSignature, SignXMLException
+from .policy import AlgorithmAdmission, SignatureAlgorithmPolicy, SignaturePurpose, _resolve_purpose_aliases
 from .processor import XMLSignatureProcessor
 from .util import (
     X509CertChainVerifier,
@@ -105,6 +106,112 @@ class SignatureConfiguration:
     the digests and signature, but there are some uses of XML Signatures where the canonicalization method is
     fixed, and not added to the Transforms. This setting can be used to validate signatures in those use-cases.
     """
+
+    c14n_algorithms: frozenset[CanonicalizationMethod] = frozenset(CanonicalizationMethod)
+    """
+    Set of acceptable canonicalization methods. This applies to the SignedInfo canonicalization method,
+    canonicalization transforms on references, and the default reference canonicalization method. Any
+    signature or reference that uses a method not listed here will fail verification.
+    """
+
+    signature_purpose: SignaturePurpose | str | None = None
+    """
+    Intended use of the signature. Set this to ``SignaturePurpose.DELIVERY`` to reject algorithm suites
+    that are reserved for internal archival, such as RSA-PSS and SHA-3. Leave unset to preserve legacy
+    verification behavior; use :func:`signxml.admission_matrix` to report unconfigured combinations.
+    """
+
+    purpose: SignaturePurpose | str | None = None
+    """Alias for ``signature_purpose``."""
+
+    profile: SignaturePurpose | str | None = None
+    """Alias for ``signature_purpose``."""
+
+    algorithm_policy: SignatureAlgorithmPolicy | None = None
+    """
+    Explicit algorithm policy to apply. If omitted and a purpose is set, the built-in policy for that
+    purpose is used. The policy is applied in addition to ``signature_methods``, ``digest_algorithms``,
+    and ``c14n_algorithms``.
+    """
+
+    def __post_init__(self) -> None:
+        purpose = _resolve_purpose_aliases((self.signature_purpose, self.purpose, self.profile))
+
+        policy = self.algorithm_policy
+        if isinstance(policy, (str, SignaturePurpose)):
+            policy = SignatureAlgorithmPolicy.for_purpose(policy)
+        if policy is not None and not isinstance(policy, SignatureAlgorithmPolicy):
+            raise InvalidInput("algorithm_policy must be a SignatureAlgorithmPolicy")
+        if policy is not None and purpose is not None and policy.purpose is not None and policy.purpose != purpose:
+            # dataclasses.replace() keeps the old algorithm_policy when a purpose alias changes.
+            policy = SignatureAlgorithmPolicy.for_purpose(purpose)
+        if purpose is None and policy is not None:
+            purpose = policy.purpose
+        if policy is None and purpose is not None:
+            policy = SignatureAlgorithmPolicy.for_purpose(purpose)
+
+        object.__setattr__(self, "signature_purpose", purpose)
+        object.__setattr__(self, "purpose", purpose)
+        object.__setattr__(self, "profile", purpose)
+        object.__setattr__(self, "algorithm_policy", policy)
+        object.__setattr__(self, "c14n_algorithms", frozenset(self.c14n_algorithms))
+
+    def admission(
+        self,
+        signature_method: SignatureMethod | str | None = None,
+        digest_algorithm: DigestAlgorithm | str | None = None,
+        c14n_method: CanonicalizationMethod | str | None = None,
+    ) -> AlgorithmAdmission:
+        """Classify a combination against this verification configuration without verifying a document."""
+        try:
+            signature_method = (
+                SignatureMethod(signature_method) if isinstance(signature_method, str) else signature_method
+            )
+            digest_algorithm = (
+                DigestAlgorithm(digest_algorithm) if isinstance(digest_algorithm, str) else digest_algorithm
+            )
+            c14n_method = CanonicalizationMethod(c14n_method) if isinstance(c14n_method, str) else c14n_method
+        except (InvalidInput, ValueError):
+            return AlgorithmAdmission.UNSUPPORTED
+
+        if self.algorithm_policy is not None:
+            status = self.algorithm_policy.admission(signature_method, digest_algorithm, c14n_method)
+            if status in (AlgorithmAdmission.DENIED, AlgorithmAdmission.UNSUPPORTED):
+                return status
+        if signature_method is not None and signature_method not in self.signature_methods:
+            return AlgorithmAdmission.DENIED
+        if digest_algorithm is not None and digest_algorithm not in self.digest_algorithms:
+            return AlgorithmAdmission.DENIED
+        if c14n_method is not None and c14n_method not in self.c14n_algorithms:
+            return AlgorithmAdmission.DENIED
+        if self.signature_purpose is None and self.algorithm_policy is None:
+            return AlgorithmAdmission.UNCONFIGURED
+        return AlgorithmAdmission.ALLOWED
+
+    @classmethod
+    def for_purpose(cls, purpose: SignaturePurpose | str | None, **kwargs) -> SignatureConfiguration:
+        """Build a configuration for *purpose*, forwarding any additional configuration fields."""
+        return cls(signature_purpose=purpose, **kwargs)
+
+    @classmethod
+    def for_delivery(cls, **kwargs) -> SignatureConfiguration:
+        """Build a configuration that rejects archive-only algorithm suites."""
+        return cls.for_purpose(SignaturePurpose.DELIVERY, **kwargs)
+
+    @classmethod
+    def for_archive(cls, **kwargs) -> SignatureConfiguration:
+        """Build a configuration that permits internal archival algorithm suites."""
+        return cls.for_purpose(SignaturePurpose.ARCHIVE, **kwargs)
+
+    @classmethod
+    def for_archival(cls, **kwargs) -> SignatureConfiguration:
+        """Alias for :meth:`for_archive`."""
+        return cls.for_archive(**kwargs)
+
+    @classmethod
+    def for_internal_archive(cls, **kwargs) -> SignatureConfiguration:
+        """Alias for :meth:`for_archive`."""
+        return cls.for_archive(**kwargs)
 
 
 _DEFAULT_SIGNATURE_CONFIG = SignatureConfiguration()
@@ -253,6 +360,7 @@ class XMLVerifier(XMLSignatureProcessor):
                     c14n_algorithm = CanonicalizationMethod(algorithm)
                 except ValueError:
                     raise InvalidInput(f"Unsupported transform algorithm: {algorithm}")
+                self.check_c14n_alg_expected(c14n_algorithm)
 
             # XMLDSig 4.4.3.2: XML transforms parse octet streams before processing.
             if isinstance(payload, (str, bytes)):
@@ -286,6 +394,7 @@ class XMLVerifier(XMLSignatureProcessor):
             return b""
         if not isinstance(payload, (str, bytes)):
             payload = self._fromstring(self._tostring(payload))
+            self.check_c14n_alg_expected(self.config.default_reference_c14n_method)
             payload = self._c14n(payload, algorithm=self.config.default_reference_c14n_method)
         return payload
 
@@ -368,10 +477,22 @@ class XMLVerifier(XMLSignatureProcessor):
     def check_digest_alg_expected(self, digest_alg):
         if digest_alg not in self.config.digest_algorithms:
             raise InvalidInput(f"Digest algorithm {digest_alg.name} forbidden by configuration")
+        if self.config.algorithm_policy is not None:
+            policy = self.config.algorithm_policy
+            if policy.admission(digest_algorithm=digest_alg) is AlgorithmAdmission.DENIED:
+                policy.check(digest_algorithm=digest_alg)
 
     def check_signature_alg_expected(self, signature_alg):
         if signature_alg not in self.config.signature_methods:
             raise InvalidInput(f"Signature method {signature_alg.name} forbidden by configuration")
+        if self.config.algorithm_policy is not None:
+            self.config.algorithm_policy.check(signature_method=signature_alg)
+
+    def check_c14n_alg_expected(self, c14n_alg):
+        if c14n_alg not in self.config.c14n_algorithms:
+            raise InvalidInput(f"Canonicalization method {c14n_alg.name} forbidden by configuration")
+        if self.config.algorithm_policy is not None:
+            self.config.algorithm_policy.check(c14n_method=c14n_alg)
 
     def verify(
         self,
@@ -532,6 +653,7 @@ class XMLVerifier(XMLSignatureProcessor):
         signed_info = self._find(signature, "SignedInfo")
         c14n_method = self._find(signed_info, "CanonicalizationMethod")
         c14n_algorithm = CanonicalizationMethod(c14n_method.get("Algorithm"))
+        self.check_c14n_alg_expected(c14n_algorithm)
         inclusive_ns_prefixes = self._get_inclusive_ns_prefixes(c14n_method)
         signature_method = self._find(signed_info, "SignatureMethod")
         signature_value = self._find(signature, "SignatureValue")
@@ -765,7 +887,9 @@ class XMLVerifier(XMLSignatureProcessor):
 
             return p == pubk_p and q == pubk_q and g == pubk_g
 
-        elif signature_alg.name.startswith("RSA_") and isinstance(public_key, rsa.RSAPublicKey):
+        elif (signature_alg.name.startswith("RSA_") or signature_alg.name.endswith("_RSA_MGF1")) and isinstance(
+            public_key, rsa.RSAPublicKey
+        ):
             rsa_key_value = self._find(key_value, "RSAKeyValue")
             n = self._get_long(rsa_key_value, "Modulus")
             e = self._get_long(rsa_key_value, "Exponent")
@@ -812,7 +936,7 @@ class XMLVerifier(XMLSignatureProcessor):
             return p == pubk_p and q == pubk_q and g == pubk_g
 
         elif (
-            signature_alg.name.startswith("RSA_")
+            (signature_alg.name.startswith("RSA_") or signature_alg.name.endswith("_RSA_MGF1"))
             and isinstance(der_public_key, rsa.RSAPublicKey)
             and isinstance(public_key, rsa.RSAPublicKey)
         ):

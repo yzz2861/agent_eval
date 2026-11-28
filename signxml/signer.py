@@ -21,6 +21,7 @@ from .algorithms import (
 )
 from .exceptions import InvalidInput
 from .external import ExternalSigningKey, SigningRequest
+from .policy import AlgorithmAdmission, SignatureAlgorithmPolicy, SignaturePurpose, _resolve_purpose_aliases
 from .processor import XMLSignatureProcessor
 from .util import (
     SigningSettings,
@@ -104,6 +105,10 @@ class XMLSigner(XMLSignatureProcessor):
         signature_algorithm: SignatureMethod | str = SignatureMethod.RSA_SHA256,
         digest_algorithm: DigestAlgorithm | str = DigestAlgorithm.SHA256,
         c14n_algorithm: CanonicalizationMethod | str = CanonicalizationMethod.CANONICAL_XML_1_1,
+        purpose: SignaturePurpose | str | None = None,
+        signature_purpose: SignaturePurpose | str | None = None,
+        profile: SignaturePurpose | str | None = None,
+        algorithm_policy: SignatureAlgorithmPolicy | None = None,
     ):
         if method is None or method not in SignatureConstructionMethod:
             raise InvalidInput(f"Unknown signature construction method {method}")
@@ -118,6 +123,34 @@ class XMLSigner(XMLSignatureProcessor):
             self.digest_alg = DigestAlgorithm(digest_algorithm)
         self.check_deprecated_methods()
         self.c14n_alg = CanonicalizationMethod(c14n_algorithm)
+        resolved_purpose = _resolve_purpose_aliases((signature_purpose, purpose, profile))
+
+        resolved_policy = algorithm_policy
+        if isinstance(resolved_policy, (str, SignaturePurpose)):
+            resolved_policy = SignatureAlgorithmPolicy.for_purpose(resolved_policy)
+        if resolved_policy is not None and not isinstance(resolved_policy, SignatureAlgorithmPolicy):
+            raise InvalidInput("algorithm_policy must be a SignatureAlgorithmPolicy")
+        if (
+            resolved_policy is not None
+            and resolved_purpose is not None
+            and resolved_policy.purpose is not None
+            and resolved_policy.purpose != resolved_purpose
+        ):
+            raise InvalidInput(f"Algorithm policy purpose {resolved_policy.purpose} does not match {resolved_purpose}")
+        if resolved_purpose is None and resolved_policy is not None:
+            resolved_purpose = resolved_policy.purpose
+        if resolved_policy is None and resolved_purpose is not None:
+            resolved_policy = SignatureAlgorithmPolicy.for_purpose(resolved_purpose)
+        if resolved_policy is not None:
+            resolved_policy.check(
+                signature_method=self.sign_alg,
+                digest_algorithm=self.digest_alg,
+                c14n_method=self.c14n_alg,
+            )
+        self.signature_purpose = resolved_purpose
+        self.purpose = resolved_purpose
+        self.profile = resolved_purpose
+        self.algorithm_policy = resolved_policy
         self.namespaces: dict[str, str] = {"ds": namespaces.ds}
         self._parser = None
         self.signature_annotators = [self._add_key_info]
@@ -141,6 +174,49 @@ class XMLSigner(XMLSignatureProcessor):
         if "SHA1" in self.sign_alg.name or "SHA1" in self.digest_alg.name:
             msg = "SHA1-based algorithms are not supported in the default configuration because they are not secure"
             raise InvalidInput(msg)
+
+    def admission(
+        self,
+        signature_method: SignatureMethod | str | None = None,
+        digest_algorithm: DigestAlgorithm | str | None = None,
+        c14n_method: CanonicalizationMethod | str | None = None,
+    ) -> AlgorithmAdmission:
+        """Classify a combination against this signer's purpose policy without signing a document."""
+        policy = self.algorithm_policy
+        if policy is None:
+            policy = SignatureAlgorithmPolicy.for_purpose(None)
+        status = policy.admission(signature_method, digest_algorithm, c14n_method)
+        if self.algorithm_policy is None and status is AlgorithmAdmission.UNCONFIGURED:
+            method_name = getattr(signature_method, "name", str(signature_method))
+            digest_name = getattr(digest_algorithm, "name", str(digest_algorithm))
+            if "SHA1" in method_name or "SHA1" in digest_name:
+                return AlgorithmAdmission.DENIED
+        return status
+
+    @classmethod
+    def for_purpose(cls, purpose: SignaturePurpose | str | None, **kwargs) -> XMLSigner:
+        """Build a signer for *purpose*, forwarding any additional constructor arguments."""
+        return cls(purpose=purpose, **kwargs)
+
+    @classmethod
+    def for_delivery(cls, **kwargs) -> XMLSigner:
+        """Build a signer that refuses archive-only algorithm suites."""
+        return cls.for_purpose(SignaturePurpose.DELIVERY, **kwargs)
+
+    @classmethod
+    def for_archive(cls, **kwargs) -> XMLSigner:
+        """Build a signer that permits internal archival algorithm suites."""
+        return cls.for_purpose(SignaturePurpose.ARCHIVE, **kwargs)
+
+    @classmethod
+    def for_archival(cls, **kwargs) -> XMLSigner:
+        """Alias for :meth:`for_archive`."""
+        return cls.for_archive(**kwargs)
+
+    @classmethod
+    def for_internal_archive(cls, **kwargs) -> XMLSigner:
+        """Alias for :meth:`for_archive`."""
+        return cls.for_archive(**kwargs)
 
     def sign(
         self,
@@ -489,6 +565,12 @@ class XMLSigner(XMLSignatureProcessor):
                 reference = replace(reference, c14n_method=self.c14n_alg)
             if reference.inclusive_ns_prefixes is None:
                 reference = replace(reference, inclusive_ns_prefixes=inclusive_ns_prefixes)
+            if self.algorithm_policy is not None:
+                self.algorithm_policy.check(
+                    signature_method=self.sign_alg,
+                    digest_algorithm=self.digest_alg,
+                    c14n_method=reference.c14n_method,
+                )
             reference_node = SubElement(signed_info, self._ds_tag("Reference"), URI=reference.URI)
             transforms = SubElement(reference_node, self._ds_tag("Transforms"))
             self._build_transforms_for_reference(

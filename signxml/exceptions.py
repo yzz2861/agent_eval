@@ -31,5 +31,17 @@ class InvalidInput(ValueError, SignXMLException):
     pass
 
 
+class AlgorithmPolicyViolation(InvalidInput):
+    """
+    Raised when a signature algorithm combination is not permitted by the configured purpose policy.
+    """
+
+
+class UnsupportedAlgorithm(InvalidInput):
+    """
+    Raised when SignXML or its cryptographic backend does not implement an algorithm or combination.
+    """
+
+
 class RedundantCert(SignXMLException):
     pass
