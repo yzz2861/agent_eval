@@ -21,6 +21,7 @@ import re
 import xml.sax.saxutils
 
 import Evtx.Nodes as e_nodes
+from Evtx.Evidence import collect_record_evidence
 
 XML_HEADER = '<?xml version="1.1" encoding="utf-8" standalone="yes" ?>\n'
 
@@ -200,6 +201,67 @@ def evtx_record_xml_view(record, cache=None):
       str: the rendered XML document.
     """
     return render_root_node(record.root())
+
+
+def evtx_record_evidence_view(record, cache=None):
+    """Collect the BinXML provenance behind a record's rendered XML.
+
+    Unlike :func:`evtx_record_xml_view`, this keeps the template origin and
+    the byte range of each substitution value.  Nodes that exist in the
+    binary stream but contribute no value to the XML (stream starts, close
+    tokens, etc.) are reported as uncaptured node evidence rather than
+    dropped silently.
+
+    Args:
+      record (Evtx.Evtx.Record): the record to inspect.
+      cache (dict, optional): cache shared by callers.  Entries are keyed by
+        the artifact buffer, chunk offset, and absolute template offset, so
+        the same chunk-relative template offset in another chunk (or another
+        file) cannot be mistaken for the same origin.
+
+    Returns:
+      Evtx.Evidence.EvidenceRecord: the evidence report.
+    """
+    return collect_record_evidence(record, cache=cache)
+
+
+# Compatibility spellings for callers that describe the same operation as a
+# forensic/provenance view.  All of these return the same evidence report.
+evtx_record_forensic_view = evtx_record_evidence_view
+evtx_record_forensics_view = evtx_record_evidence_view
+evtx_record_provenance_view = evtx_record_evidence_view
+evtx_record_evidence = evtx_record_evidence_view
+evtx_evidence_view = evtx_record_evidence_view
+
+
+def evtx_chunk_evidence_view(chunk, cache=None):
+    """Generate per-record evidence reports for the records in a chunk.
+
+    A single cache is reused across the records in this block, which is safe
+    because cache keys include the chunk identity.
+
+    Yields:
+      tuple[Evtx.Evidence.EvidenceRecord, Evtx.Evtx.Record]: the evidence
+      report and the raw record.
+    """
+    if cache is None:
+        cache = {}
+    for record in chunk.records():
+        yield collect_record_evidence(record, cache=cache), record
+
+
+def evtx_file_evidence_view(file_header, cache=None):
+    """Generate per-record evidence reports for the records in an EVTX file.
+
+    Yields:
+      tuple[Evtx.Evidence.EvidenceRecord, Evtx.Evtx.Record]: the evidence
+      report and the raw record.
+    """
+    if cache is None:
+        cache = {}
+    for chunk in file_header.chunks():
+        for report, record in evtx_chunk_evidence_view(chunk, cache=cache):
+            yield report, record
 
 
 def evtx_chunk_xml_view(chunk):

@@ -487,7 +487,7 @@ class Record(Block):
         """
         return self._buf[self.offset() : self.offset() + self.size()]
 
-    def xml(self):
+    def xml(self, cache=None):
         """
         render the record into XML.
         does not include the xml declaration header.
@@ -495,9 +495,63 @@ class Record(Block):
         Returns:
           str: the rendered xml document.
         """
-        return e_views.evtx_record_xml_view(self)
+        return e_views.evtx_record_xml_view(self, cache=cache)
 
-    def lxml(self):
+    def evidence(self, cache=None):
+        """Collect the binary evidence used to render this record.
+
+        The report contains the template origin (including the chunk and
+        template byte range), the byte range of every substitution value, and
+        the nodes that have no value evidence to capture.  A cache is scoped
+        by artifact, chunk, and template location so that unrelated chunks
+        cannot share a template origin merely because they use the same
+        chunk-relative offset.
+
+        Returns:
+          Evtx.Evidence.EvidenceRecord: the per-record evidence report.
+        """
+        return e_views.evtx_record_evidence_view(self, cache=cache)
+
+    def evidence_view(self, cache=None):
+        """Alias for :meth:`evidence`."""
+        return self.evidence(cache=cache)
+
+    def provenance(self, cache=None):
+        """Alias for :meth:`evidence`."""
+        return self.evidence(cache=cache)
+
+    def forensics(self, cache=None):
+        """Alias for :meth:`evidence`."""
+        return self.evidence(cache=cache)
+
+    def template_source(self, cache=None):
+        """Return the primary template origin for this record."""
+        return self.evidence(cache=cache)["template_source"]
+
+    def value_ranges(self, cache=None):
+        """Return the substitution values and their byte ranges."""
+        return self.evidence(cache=cache)["value_ranges"]
+
+    def value_range(self, index, cache=None):
+        """Return the evidence for one substitution index, or None."""
+        for value in self.value_ranges(cache=cache):
+            if value["index"] == index:
+                return value
+        return None
+
+    def missing_node_evidence(self, cache=None):
+        """Alias for :meth:`uncaptured_nodes`."""
+        return self.uncaptured_nodes(cache=cache)
+
+    def template_origin(self, cache=None):
+        """Alias for :meth:`template_source`."""
+        return self.template_source(cache=cache)
+
+    def uncaptured_nodes(self, cache=None):
+        """Return the nodes for which no value evidence exists."""
+        return self.evidence(cache=cache)["uncaptured_nodes"]
+
+    def lxml(self, cache=None):
         """
         render the record into a lxml document.
         this is useful for querying data from the record using xpath, etc.
@@ -512,4 +566,4 @@ class Record(Block):
         """
         import lxml.etree
 
-        return lxml.etree.fromstring((e_views.XML_HEADER + self.xml()).encode("utf-8"))
+        return lxml.etree.fromstring((e_views.XML_HEADER + self.xml(cache=cache)).encode("utf-8"))

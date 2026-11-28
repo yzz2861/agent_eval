@@ -41,6 +41,24 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 
 Working with python-evtx is really easy!
 
+Record evidence
+---------------
+`record.xml()` intentionally discards where the rendered bytes came from.  For
+review work, use `record.evidence()` (or
+`Evtx.Views.evtx_record_evidence_view(record, cache=cache)`) to get the
+template origin and the binary range of every substitution value:
+
+    evidence = record.evidence()
+    evidence["template_source"]["chunk_offset"]
+    evidence["template_source"]["range"]          # template bytes
+    evidence["value_ranges"][0]["range"]           # substitution value bytes
+    evidence["uncaptured_nodes"]                   # structural nodes with no value payload
+
+Template identity includes the artifact buffer, chunk offset, and absolute
+template offset.  A cache may be shared across records, but it is namespaced
+per chunk, so the same chunk-relative template offset in another page/block
+is never reported as the same origin.
+
 
 Installation
 ------------
@@ -71,4 +89,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-
