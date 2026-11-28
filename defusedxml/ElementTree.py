@@ -17,7 +17,14 @@ from xml.etree.ElementTree import tostring
 import importlib
 
 
-from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .common import (
+    DTDForbidden,
+    EntitiesForbidden,
+    ExternalReferenceForbidden,
+    RequestConfig,
+    _UNSET,
+    resolve_request_config,
+)
 
 __origin__ = "xml.etree.ElementTree"
 
@@ -119,8 +126,18 @@ class DefusedXMLParser(_XMLParser):
 XMLTreeBuilder = XMLParse = XMLParser = DefusedXMLParser
 
 
-def parse(source, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def parse(
+    source,
+    parser=None,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
+):
     if parser is None:
+        forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+            request_config, forbid_dtd, forbid_entities, forbid_external
+        )
         parser = DefusedXMLParser(
             target=_TreeBuilder(),
             forbid_dtd=forbid_dtd,
@@ -134,11 +151,15 @@ def iterparse(
     source,
     events=None,
     parser=None,
-    forbid_dtd=False,
-    forbid_entities=True,
-    forbid_external=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
     if parser is None:
+        forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+            request_config, forbid_dtd, forbid_entities, forbid_external
+        )
         parser = DefusedXMLParser(
             target=_TreeBuilder(),
             forbid_dtd=forbid_dtd,
@@ -148,7 +169,16 @@ def iterparse(
     return _iterparse(source, events, parser)
 
 
-def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def fromstring(
+    text,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
+):
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     parser = DefusedXMLParser(
         target=_TreeBuilder(),
         forbid_dtd=forbid_dtd,
@@ -162,7 +192,16 @@ def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=Tru
 XML = fromstring
 
 
-def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def fromstringlist(
+    sequence,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
+):
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     parser = DefusedXMLParser(
         target=_TreeBuilder(),
         forbid_dtd=forbid_dtd,
@@ -176,6 +215,7 @@ def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_exte
 
 __all__ = [
     "ParseError",
+    "RequestConfig",
     "XML",
     "XMLParse",
     "XMLParser",

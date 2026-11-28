@@ -9,7 +9,13 @@ from __future__ import print_function, absolute_import
 
 from xml.sax.expatreader import ExpatParser as _ExpatParser
 
-from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .common import (
+    DTDForbidden,
+    EntitiesForbidden,
+    ExternalReferenceForbidden,
+    _UNSET,
+    resolve_request_config,
+)
 
 __origin__ = "xml.sax.expatreader"
 
@@ -21,10 +27,14 @@ class DefusedExpatParser(_ExpatParser):
         self,
         namespaceHandling=0,
         bufsize=2**16 - 20,
-        forbid_dtd=False,
-        forbid_entities=True,
-        forbid_external=True,
+        forbid_dtd=_UNSET,
+        forbid_entities=_UNSET,
+        forbid_external=_UNSET,
+        request_config=None,
     ):
+        forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+            request_config, forbid_dtd, forbid_entities, forbid_external
+        )
         super().__init__(namespaceHandling, bufsize)
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
@@ -57,5 +67,5 @@ class DefusedExpatParser(_ExpatParser):
             parser.ExternalEntityRefHandler = self.defused_external_entity_ref_handler
 
 
-def create_parser(*args, **kwargs):
-    return DefusedExpatParser(*args, **kwargs)
+def create_parser(*args, request_config=None, **kwargs):
+    return DefusedExpatParser(*args, request_config=request_config, **kwargs)

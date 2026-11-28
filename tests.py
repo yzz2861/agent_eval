@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import asyncio
 import io
 import os
 import sys
@@ -16,10 +17,16 @@ from pyexpat import ExpatError
 from defusedxml import ElementTree, minidom, pulldom, sax, xmlrpc, expatreader
 from defusedxml import defuse_stdlib
 from defusedxml import (
+    DEFAULT_FORBID_DTD,
+    DEFAULT_FORBID_ENTITIES,
+    DEFAULT_FORBID_EXTERNAL,
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
     NotSupportedError,
+    RequestConfig,
+    get_request_config,
+    request_config,
 )
 
 from xml.etree.ElementTree import Element as ElementAfterImport
@@ -525,6 +532,310 @@ class TestXmlRpc(DefusedTestCase):
             xmlrpc.unmonkey_patch()
 
 
+class _PolicyRecorder(orig_elementtree.TreeBuilder):
+    """TreeBuilder that records the parser's defusing switches on use.
+
+    On the first element it also starts a second, nested parse through the
+    public defusedxml entry point, mimicking a SAX/TreeBuilder callback that
+    begins reading another document while the outer parse is in flight.
+    """
+
+    def __init__(
+        self,
+        log,
+        request_id,
+        nested_doc=None,
+        nested_config=None,
+        nested_request_id=None,
+    ):
+        super().__init__()
+        self._log = log
+        self._request_id = request_id
+        self._nested_doc = nested_doc
+        self._nested_config = nested_config
+        self._nested_request_id = nested_request_id or request_id
+        self._nested_done = False
+
+    def _record(self, tag):
+        parser = getattr(self, "_parser_ref", None)
+        if parser is not None:
+            self._log.append(
+                (
+                    self._request_id,
+                    tag,
+                    parser.forbid_dtd,
+                    parser.forbid_entities,
+                    parser.forbid_external,
+                )
+            )
+
+    def start(self, tag, attrs):
+        self._record(tag)
+        if not self._nested_done and self._nested_doc is not None:
+            self._nested_done = True
+            if self._nested_config is not None:
+                with request_config(self._nested_config):
+                    nested_builder = _PolicyRecorder(
+                        self._log, self._nested_request_id
+                    )
+                    _feed_with_builder(self._nested_doc, nested_builder)
+            else:
+                ElementTree.fromstring(self._nested_doc)
+        return super().start(tag, attrs)
+
+
+def _feed_with_builder(doc, builder, chunk_size=12):
+    from defusedxml.common import resolve_request_config
+
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config()
+    parser = ElementTree.DefusedXMLParser(
+        target=builder,
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+    )
+    builder._parser_ref = parser
+    for index in range(0, len(doc), chunk_size):
+        parser.feed(doc[index:index + chunk_size])
+    return parser.close()
+
+
+SHORT_DOC = "<doc><item>one</item><item>two</item></doc>"
+SHORT_DOC_WITH_DTD = (
+    '<!DOCTYPE doc [<!ENTITY greeting "hello">]>'
+    "<doc><item>&greeting;</item></doc>"
+)
+
+
+class TestRequestConfig(unittest.TestCase):
+    """Per-request policies must follow their own execution context."""
+
+    def setUp(self):
+        self.assertIsNone(get_request_config())
+
+    def tearDown(self):
+        self.assertIsNone(get_request_config())
+
+    def test_defaults_match_historical_guarantees(self):
+        self.assertEqual(DEFAULT_FORBID_DTD, False)
+        self.assertEqual(DEFAULT_FORBID_ENTITIES, True)
+        self.assertEqual(DEFAULT_FORBID_EXTERNAL, True)
+        self.assertEqual(
+            RequestConfig(),
+            RequestConfig(forbid_dtd=False, forbid_entities=True, forbid_external=True),
+        )
+        # old callers without any keyword arguments keep working unchanged
+        root = ElementTree.fromstring(SHORT_DOC)
+        self.assertEqual(root.tag, "doc")
+
+    def test_context_restores_outer_state(self):
+        strict = RequestConfig(forbid_dtd=True)
+        relaxed = RequestConfig(
+            forbid_dtd=False, forbid_entities=False, forbid_external=False
+        )
+        with request_config(strict):
+            self.assertIs(get_request_config(), strict)
+            with request_config(relaxed):
+                self.assertIs(get_request_config(), relaxed)
+                ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+            self.assertIs(get_request_config(), strict)
+            with self.assertRaises(DTDForbidden):
+                ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+        self.assertIsNone(get_request_config())
+
+    def test_context_restore_on_exception(self):
+        strict = RequestConfig(forbid_dtd=True)
+        with self.assertRaises(DTDForbidden):
+            with request_config(strict):
+                ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+        self.assertIsNone(get_request_config())
+
+    def test_explicit_kwargs_override_request_config(self):
+        strict = RequestConfig(forbid_dtd=True)
+        with request_config(strict):
+            # an explicit per-call switch wins over the bound request config
+            ElementTree.fromstring(
+                SHORT_DOC_WITH_DTD,
+                forbid_dtd=False,
+                forbid_entities=False,
+                forbid_external=False,
+            )
+        self.assertIsNone(get_request_config())
+
+    def test_request_config_keyword_on_entry_points(self):
+        strict = RequestConfig(forbid_dtd=True)
+        with self.assertRaises(DTDForbidden):
+            ElementTree.fromstring(SHORT_DOC_WITH_DTD, request_config=strict)
+        with self.assertRaises(DTDForbidden):
+            ElementTree.fromstringlist(
+                [SHORT_DOC_WITH_DTD[:20], SHORT_DOC_WITH_DTD[20:]],
+                request_config=strict,
+            )
+        stream = io.BytesIO(SHORT_DOC_WITH_DTD.encode("utf-8"))
+        with self.assertRaises(DTDForbidden):
+            list(ElementTree.iterparse(stream, request_config=strict))
+        self.assertIsNone(get_request_config())
+
+    def test_nested_parse_inside_callback_uses_request_policy(self):
+        log = []
+        strict = RequestConfig(forbid_dtd=True)
+        relaxed = RequestConfig(
+            forbid_dtd=False, forbid_entities=False, forbid_external=False
+        )
+        # The outer, relaxed request parses a plain doc. Its first builder
+        # callback starts a second, strict request reading another plain doc.
+        with request_config(relaxed):
+            builder = _PolicyRecorder(
+                log,
+                "relaxed",
+                nested_doc=SHORT_DOC,
+                nested_config=strict,
+                nested_request_id="strict",
+            )
+            _feed_with_builder(SHORT_DOC, builder)
+
+        by_request = {}
+        for request_id, tag, forbid_dtd, forbid_entities, forbid_external in log:
+            by_request.setdefault(request_id, set()).add(
+                (forbid_dtd, forbid_entities, forbid_external)
+            )
+        self.assertEqual(by_request["relaxed"], {(False, False, False)})
+        self.assertEqual(by_request["strict"], {(True, True, True)})
+        # the stricter request rejects a DTD while the relaxed one accepts it
+        with request_config(strict):
+            with self.assertRaises(DTDForbidden):
+                ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+        with request_config(relaxed):
+            ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+        self.assertIsNone(get_request_config())
+
+    def test_interleaved_requests_keep_isolated_policies(self):
+        log = []
+        strict = RequestConfig(forbid_dtd=True)
+        relaxed = RequestConfig(
+            forbid_dtd=False, forbid_entities=False, forbid_external=False
+        )
+
+        async def parse_interleaved(request_id, config, doc, chunk_size=12):
+            with request_config(config):
+                await asyncio.sleep(0)
+                builder = _PolicyRecorder(log, request_id)
+                seen_config = get_request_config()
+                self.assertIs(seen_config, config)
+                _feed_with_builder(doc, builder, chunk_size=chunk_size)
+                await asyncio.sleep(0)
+                return get_request_config()
+
+        async def main():
+            strict_task = asyncio.ensure_future(
+                parse_interleaved("strict", strict, SHORT_DOC)
+            )
+            relaxed_task = asyncio.ensure_future(
+                parse_interleaved("relaxed", relaxed, SHORT_DOC)
+            )
+            strict_seen, relaxed_seen = await asyncio.gather(
+                strict_task, relaxed_task
+            )
+            return strict_seen, relaxed_seen
+
+        strict_seen, relaxed_seen = asyncio.run(main())
+        self.assertIs(strict_seen, strict)
+        self.assertIs(relaxed_seen, relaxed)
+
+        observed = {}
+        for request_id, tag, forbid_dtd, forbid_entities, forbid_external in log:
+            observed.setdefault(request_id, set()).add(
+                (forbid_dtd, forbid_entities, forbid_external)
+            )
+        # every parser event always carries the policy of its own request
+        self.assertEqual(observed["strict"], {(True, True, True)})
+        self.assertEqual(observed["relaxed"], {(False, False, False)})
+        # and the stricter request independently enforces its own limit
+        async def strict_rejects_dtd():
+            with request_config(strict):
+                with self.assertRaises(DTDForbidden):
+                    ElementTree.fromstring(SHORT_DOC_WITH_DTD)
+
+        asyncio.run(strict_rejects_dtd())
+        self.assertIsNone(get_request_config())
+
+    def test_cancelled_task_cleans_up_its_own_state(self):
+        log = []
+        strict = RequestConfig(forbid_dtd=True)
+        relaxed = RequestConfig(
+            forbid_dtd=False, forbid_entities=False, forbid_external=False
+        )
+
+        async def cancelled_request():
+            with request_config(strict):
+                builder = _PolicyRecorder(log, "strict")
+                parser = ElementTree.DefusedXMLParser(
+                    target=builder,
+                    forbid_dtd=True,
+                    forbid_entities=True,
+                    forbid_external=True,
+                )
+                builder._parser_ref = parser
+                # builder events fire and record the strict policy before
+                # the task gives up control and gets cancelled
+                parser.feed("<doc><item>one</item>")
+                await asyncio.sleep(10)
+                parser.feed(SHORT_DOC)  # pragma: no cover - cancelled
+                parser.close()  # pragma: no cover - cancelled
+
+        async def surviving_request():
+            with request_config(relaxed):
+                await asyncio.sleep(0)
+                _feed_with_builder(SHORT_DOC, _PolicyRecorder(log, "relaxed"))
+                self.assertIs(get_request_config(), relaxed)
+                return get_request_config()
+
+        async def main():
+            cancel_target = asyncio.ensure_future(cancelled_request())
+            survivor = asyncio.ensure_future(surviving_request())
+            await asyncio.sleep(0.01)
+            cancel_target.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cancel_target
+            survivor_config = await survivor
+            return survivor_config
+
+        survivor_config = asyncio.run(main())
+        self.assertIs(survivor_config, relaxed)
+        self.assertIsNone(get_request_config())
+        observed = {}
+        for request_id, tag, forbid_dtd, forbid_entities, forbid_external in log:
+            observed.setdefault(request_id, set()).add(
+                (forbid_dtd, forbid_entities, forbid_external)
+            )
+        self.assertEqual(observed["relaxed"], {(False, False, False)})
+        self.assertEqual(observed["strict"], {(True, True, True)})
+
+    def test_invalid_config_arguments(self):
+        with self.assertRaises(TypeError):
+            ElementTree.fromstring(SHORT_DOC, request_config={"forbid_dtd": True})
+        with self.assertRaises(TypeError):
+            with request_config(object()):
+                pass
+        with self.assertRaises(TypeError):
+            with request_config(RequestConfig(), forbid_dtd=True):
+                pass
+
+    def test_all_facades_follow_request_config(self):
+        strict = RequestConfig(forbid_dtd=True)
+        dtd_bytes = SHORT_DOC_WITH_DTD.encode("utf-8")
+        with request_config(strict):
+            with self.assertRaises(DTDForbidden):
+                minidom.parseString(SHORT_DOC_WITH_DTD)
+            with self.assertRaises(DTDForbidden):
+                list(pulldom.parseString(SHORT_DOC_WITH_DTD))
+            with self.assertRaises(DTDForbidden):
+                sax.parseString(dtd_bytes, XMLGenerator())
+        # outside the context the historical, less strict default applies
+        minidom.parseString(SHORT_DOC)
+        list(pulldom.parseString(SHORT_DOC))
+
+
 @unittest.skipUnless(gzip is not None, "test requires gzip")
 class TestDefusedGzip(DefusedTestCase):
     def get_gzipped(self, length):
@@ -590,6 +901,7 @@ def test_main():
         TestDefusedSax,
         TestDefusedLxml,
         TestXmlRpc,
+        TestRequestConfig,
         TestDefusedGzip,
     ]
     for c in cls:

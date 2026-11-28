@@ -10,7 +10,13 @@ from __future__ import print_function, absolute_import
 from xml.dom.expatbuilder import ExpatBuilder as _ExpatBuilder
 from xml.dom.expatbuilder import Namespaces as _Namespaces
 
-from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .common import (
+    DTDForbidden,
+    EntitiesForbidden,
+    ExternalReferenceForbidden,
+    _UNSET,
+    resolve_request_config,
+)
 
 __origin__ = "xml.dom.expatbuilder"
 
@@ -67,11 +73,21 @@ class DefusedExpatBuilderNS(_Namespaces, DefusedExpatBuilder):
         self._initNamespaces()
 
 
-def parse(file, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def parse(
+    file,
+    namespaces=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
+):
     """Parse a document, returning the resulting Document node.
 
     'file' may be either a file name or an open file object.
     """
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     if namespaces:
         build_builder = DefusedExpatBuilderNS
     else:
@@ -92,11 +108,19 @@ def parse(file, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_
 
 
 def parseString(
-    string, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    namespaces=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
     """Parse a document from a string, returning the resulting
     Document node.
     """
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     if namespaces:
         build_builder = DefusedExpatBuilderNS
     else:

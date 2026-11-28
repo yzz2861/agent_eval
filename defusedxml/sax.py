@@ -11,6 +11,7 @@ from xml.sax import InputSource as _InputSource
 from xml.sax import ErrorHandler as _ErrorHandler
 
 from . import expatreader
+from .common import _UNSET, resolve_request_config
 
 __origin__ = "xml.sax"
 
@@ -19,10 +20,14 @@ def parse(
     source,
     handler,
     errorHandler=_ErrorHandler(),
-    forbid_dtd=False,
-    forbid_entities=True,
-    forbid_external=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     parser = make_parser()
     parser.setContentHandler(handler)
     parser.setErrorHandler(errorHandler)
@@ -36,14 +41,18 @@ def parseString(
     string,
     handler,
     errorHandler=_ErrorHandler(),
-    forbid_dtd=False,
-    forbid_entities=True,
-    forbid_external=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
     from io import BytesIO
 
     if errorHandler is None:
         errorHandler = _ErrorHandler()
+    forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+        request_config, forbid_dtd, forbid_entities, forbid_external
+    )
     parser = make_parser()
     parser.setContentHandler(handler)
     parser.setErrorHandler(errorHandler)
@@ -56,5 +65,5 @@ def parseString(
     parser.parse(inpsrc)
 
 
-def make_parser(parser_list=[]):
-    return expatreader.create_parser()
+def make_parser(parser_list=[], request_config=None):
+    return expatreader.create_parser(request_config=request_config)

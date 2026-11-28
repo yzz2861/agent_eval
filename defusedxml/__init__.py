@@ -10,12 +10,19 @@ from __future__ import print_function, absolute_import
 import warnings
 
 from .common import (
+    DEFAULT_FORBID_DTD,
+    DEFAULT_FORBID_ENTITIES,
+    DEFAULT_FORBID_EXTERNAL,
     DefusedXmlException,
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
     NotSupportedError,
+    RequestConfig,
     _apply_defusing,
+    get_request_config,
+    request_config,
+    resolve_request_config,
 )
 
 
@@ -60,9 +67,16 @@ def defuse_stdlib():
 __version__ = "0.8.0rc2"
 
 __all__ = [
+    "DEFAULT_FORBID_DTD",
+    "DEFAULT_FORBID_ENTITIES",
+    "DEFAULT_FORBID_EXTERNAL",
     "DefusedXmlException",
     "DTDForbidden",
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
     "NotSupportedError",
+    "RequestConfig",
+    "get_request_config",
+    "request_config",
+    "resolve_request_config",
 ]

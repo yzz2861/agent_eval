@@ -1,6 +1,16 @@
 Changelog
 =========
 
+defusedxml (unreleased)
+-----------------------
+
+- Add per-request ``RequestConfig`` and the ``request_config()`` context
+  manager. Defusing switches can now be bound to the current execution
+  context (``contextvars``) so concurrent or interleaved parsing jobs keep
+  isolated policies; nested parses and cancelled tasks restore their own
+  state. Entry points accept an optional ``request_config`` keyword while
+  callers without arguments retain the historical default guarantees.
+
 defusedxml 0.8.0
 ----------------
 

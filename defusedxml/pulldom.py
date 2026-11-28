@@ -10,6 +10,7 @@ from __future__ import print_function, absolute_import
 from xml.dom.pulldom import parse as _parse
 from xml.dom.pulldom import parseString as _parseString
 from .sax import make_parser
+from .common import _UNSET, resolve_request_config
 
 __origin__ = "xml.dom.pulldom"
 
@@ -18,11 +19,15 @@ def parse(
     stream_or_string,
     parser=None,
     bufsize=None,
-    forbid_dtd=False,
-    forbid_entities=True,
-    forbid_external=True,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
     if parser is None:
+        forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+            request_config, forbid_dtd, forbid_entities, forbid_external
+        )
         parser = make_parser()
         parser.forbid_dtd = forbid_dtd
         parser.forbid_entities = forbid_entities
@@ -31,9 +36,17 @@ def parse(
 
 
 def parseString(
-    string, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    parser=None,
+    forbid_dtd=_UNSET,
+    forbid_entities=_UNSET,
+    forbid_external=_UNSET,
+    request_config=None,
 ):
     if parser is None:
+        forbid_dtd, forbid_entities, forbid_external = resolve_request_config(
+            request_config, forbid_dtd, forbid_entities, forbid_external
+        )
         parser = make_parser()
         parser.forbid_dtd = forbid_dtd
         parser.forbid_entities = forbid_entities
