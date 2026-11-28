@@ -33,7 +33,7 @@ from dissect.cstruct.types import (
 from dissect.cstruct.types.base import normalize_endianness
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator, Iterable, Mapping
     from typing import TypeAlias
 
     from dissect.cstruct.types import (
@@ -438,6 +438,39 @@ class cstruct:
             The parsed data.
         """
         return self.resolve(name).read(stream)
+
+    def read_union_evidence(
+        self,
+        name: str,
+        data: bytes | bytearray | memoryview,
+        approvals: Iterable[str] | Mapping[str, bool] | str | None = None,
+        *,
+        revision: int | str | None = None,
+        layout: str | None = None,
+        strict: bool = True,
+    ) -> Any:
+        """Read a union by name with an explicit approval set and reproducible evidence.
+
+        See :func:`dissect.cstruct.evidence.read_union_evidence` for the meaning of
+        approvals and the returned evidence record.
+        """
+        from dissect.cstruct.evidence import read_union_evidence
+
+        return read_union_evidence(
+            self.resolve(name), data, approvals, cs=self, revision=revision, layout=layout, strict=strict
+        )
+
+    def replay_union_evidence(
+        self,
+        data: bytes | bytearray | memoryview,
+        revisions: Iterable[Any],
+        *,
+        strict: bool = True,
+    ) -> Any:
+        """Read the same bytes against multiple layout revisions, in caller order."""
+        from dissect.cstruct.evidence import replay_union_evidence
+
+        return replay_union_evidence(data, revisions, cs=self, strict=strict)
 
     def resolve(self, name: type[BaseType] | str) -> type[BaseType]:
         """Resolve a type name to get the actual type object.

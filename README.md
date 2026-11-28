@@ -230,6 +230,43 @@ assert b.c == b"deadbeef"
 
 ```
 
+### Union evidence and approvals
+When several interpretations of the same union bytes are valid, their evidence can be reported together instead of
+letting one member overwrite the others. Approvals name the members that may be returned; removing an approval revokes
+that interpretation without changing the retained bytes.
+
+```python
+from dissect.cstruct import cstruct
+
+cs = cstruct().load("""
+union sample {
+    uint32 whole;
+    uint16 low;
+    char   raw[4];
+};
+""")
+
+data = b"\x11\x22\x33\x44"
+evidence = cs.sample.read_evidence(data, {"whole", "low"})
+
+assert evidence.proven_members == ("whole", "low")
+assert evidence.basis == data
+assert evidence.has_divergence  # Both members hold, but decode to different values.
+
+# Revoking one approval changes the provable member list, not the bytes.
+restricted = cs.read_union_evidence("sample", data, {"low"})
+assert restricted.basis == evidence.basis
+assert restricted.proven_members == ("low",)
+
+# Each witness carries its exact byte range, raw bytes and value digest.
+assert restricted.witnesses[0].byte_range == (0, 2)
+assert restricted.recompute().digest == restricted.digest
+```
+
+Use `cs.replay_union_evidence(data, revisions)` or `replay_union_evidence(data, revisions)` to read the same bytes
+against multiple layout revisions in version order. `LayoutRevision` entries keep their own revision, layout name and
+approval set.
+
 ### Parse bit fields
 Bit fields are supported as part of structures. They are properly aligned to their boundaries.
 

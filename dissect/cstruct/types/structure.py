@@ -28,7 +28,7 @@ from dissect.cstruct.types.enum import EnumMetaType
 from dissect.cstruct.types.pointer import Pointer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
     from types import FunctionType
 
     from typing_extensions import Self
@@ -360,6 +360,23 @@ class StructureMetaType(MetaType):
 
         if not cls.__updating__:
             cls.commit()
+
+    def read_evidence(
+        cls,
+        data: bytes | bytearray | memoryview,
+        approvals: Iterable[str] | Mapping[str, bool] | str | None = None,
+        *,
+        revision: int | str | None = None,
+        layout: str | None = None,
+        strict: bool = True,
+    ) -> Any:
+        """Read this union with an explicit approval set and reproducible member evidence.
+
+        Only meaningful for unions; see :func:`dissect.cstruct.evidence.read_union_evidence`.
+        """
+        from dissect.cstruct.evidence import read_union_evidence
+
+        return read_union_evidence(cls, data, approvals, revision=revision, layout=layout, strict=strict)
 
     @contextmanager
     def start_update(cls) -> Iterator[None]:
@@ -724,6 +741,22 @@ class Union(Structure, metaclass=UnionMetaType):
 
     _buf: bytes
     _endian: Endianness
+
+    def evidence(
+        self,
+        approvals: Iterable[str] | Mapping[str, bool] | str | None = None,
+        *,
+        revision: int | str | None = None,
+        layout: str | None = None,
+        strict: bool = True,
+    ) -> Any:
+        """Return reproducible member evidence for this already-read union."""
+        from dissect.cstruct.evidence import read_union_evidence
+
+        buf = getattr(self, "_buf", None)
+        if buf is None:
+            buf = self.dumps()
+        return read_union_evidence(self.__class__, buf, approvals, revision=revision, layout=layout, strict=strict)
 
     def __eq__(self, other: object) -> bool:
         return self.__class__ is other.__class__ and bytes(self) == bytes(other)
