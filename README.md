@@ -460,6 +460,15 @@ analytics:
 
 ## Configuration
 
+### Generated-source provenance
+
+`detect-secrets feedback` groups repeated hits in generated files under one
+verifiable upstream source while retaining every original scan location.  It
+requires a caller-provided generation source declaration and configuration
+version; ambiguous, stale, or removed source edges are reported as rescan
+requests.  Hand-written files are never absorbed into a generated group, even
+when they contain the same hash.  See [docs/provenance.md](docs/provenance.md).
+
 This tool operates through a system of **plugins** and **filters**.
 
 - **Plugins** find secrets in code

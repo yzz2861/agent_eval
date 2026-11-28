@@ -24,16 +24,36 @@ def create(
     should_scan_all_files: bool = False,
     root: str = '',
     num_processors: Optional[int] = None,
+    generation_sources: Any = None,
+    config_version: Optional[str] = None,
+    **kwargs: Any,
 ) -> SecretsCollection:
     """Scans all the files recursively in path to initialize a baseline."""
-    kwargs = {}
-    if num_processors:
-        kwargs['num_processors'] = num_processors
+    for key in (
+        'generation_declaration',
+        'manifest',
+        'declaration',
+        'source_declaration',
+        'provenance',
+    ):
+        if generation_sources is None and key in kwargs:
+            generation_sources = kwargs.pop(key)
+    for key in ('configuration_version', 'current_config_version'):
+        if config_version is None and key in kwargs:
+            config_version = kwargs.pop(key)
 
-    secrets = SecretsCollection(root=root)
+    scan_kwargs = {}
+    if num_processors:
+        scan_kwargs['num_processors'] = num_processors
+
+    secrets = SecretsCollection(
+        root=root,
+        generation_sources=generation_sources,
+        config_version=config_version,
+    )
     secrets.scan_files(
         *get_files_to_scan(*paths, should_scan_all_files=should_scan_all_files, root=root),
-        **kwargs,
+        **scan_kwargs,
     )
 
     return secrets

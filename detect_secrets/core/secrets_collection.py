@@ -25,7 +25,12 @@ class PatchedFile:
 
 
 class SecretsCollection:
-    def __init__(self, root: str = '') -> None:
+    def __init__(
+        self,
+        root: str = '',
+        generation_sources: Any = None,
+        config_version: Optional[str] = None,
+    ) -> None:
         """
         :param root: if specified, will scan as if the root was the value provided,
             rather than the current working directory. We still store results as if
@@ -34,6 +39,8 @@ class SecretsCollection:
         """
         self.data: Dict[str, Set[PotentialSecret]] = defaultdict(set)
         self.root = root
+        self.generation_sources = generation_sources
+        self.config_version = config_version
 
     @classmethod
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':
@@ -49,8 +56,18 @@ class SecretsCollection:
     def files(self) -> Set[str]:
         return set(self.data.keys())
 
-    def scan_files(self, *filenames: str, num_processors: Optional[int] = None) -> None:
+    def scan_files(
+        self,
+        *filenames: str,
+        num_processors: Optional[int] = None,
+        generation_sources: Any = None,
+        config_version: Optional[str] = None,
+    ) -> None:
         """Just like scan_file, but optimized through parallel processing."""
+        if generation_sources is not None:
+            self.generation_sources = generation_sources
+        if config_version is not None:
+            self.config_version = config_version
         if len(filenames) == 1:
             self.scan_file(filenames[0])
             return
@@ -72,14 +89,32 @@ class SecretsCollection:
                 for secret in secrets:
                     self[os.path.relpath(secret.filename, self.root)].add(secret)
 
-    def scan_file(self, filename: str) -> None:
+    def scan_file(
+        self,
+        filename: str,
+        generation_sources: Any = None,
+        config_version: Optional[str] = None,
+    ) -> None:
+        if generation_sources is not None:
+            self.generation_sources = generation_sources
+        if config_version is not None:
+            self.config_version = config_version
         for secret in scan.scan_file(os.path.join(self.root, convert_local_os_path(filename))):
             self[convert_local_os_path(filename)].add(secret)
 
-    def scan_diff(self, diff: str) -> None:
+    def scan_diff(
+        self,
+        diff: str,
+        generation_sources: Any = None,
+        config_version: Optional[str] = None,
+    ) -> None:
         """
         :raises: UnidiffParseError
         """
+        if generation_sources is not None:
+            self.generation_sources = generation_sources
+        if config_version is not None:
+            self.config_version = config_version
         try:
             for secret in scan.scan_diff(diff):
                 self[secret.filename].add(secret)
@@ -208,6 +243,31 @@ class SecretsCollection:
             output[filename].append(secret.json())
 
         return dict(output)
+
+    def to_feedback(
+        self,
+        generation_sources: Any = None,
+        config_version: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Attribute the collection's hits to generated sources.
+
+        The collection itself is left untouched, so manually written files with
+        an identical hash are still reported and blocked normally.
+        """
+        from ..provenance import build_feedback
+
+        return build_feedback(
+            self,
+            self.generation_sources if generation_sources is None else generation_sources,
+            config_version=(
+                self.config_version if config_version is None else config_version
+            ),
+            **kwargs,
+        )
+
+    feedback = to_feedback
+    provenance_feedback = to_feedback
 
     def exactly_equals(self, other: Any) -> bool:
         return self.__eq__(other, strict=True)      # type: ignore

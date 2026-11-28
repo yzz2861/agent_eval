@@ -24,6 +24,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
     _add_mode_parser(parser)
     _add_report_module(parser)
     _add_statistics_module(parser)
+    _add_provenance_module(parser)
     return cast(argparse.ArgumentParser, parser)
 
 
@@ -96,6 +97,50 @@ def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
         '--json',
         action='store_true',
         help='Outputs results in a machine-readable format.',
+    )
+
+
+def _add_provenance_module(parent: argparse.ArgumentParser) -> None:
+    parser = parent.add_argument_group(
+        title='provenance',
+        description=(
+            'Attribute findings to generated sources and report any locations that '
+            'need to be rescanned.'
+        ),
+    )
+    parser.add_argument(
+        '--generation-sources',
+        '--generation-source',
+        '--generated-sources',
+        '--generated-source-declaration',
+        '--generated-source-manifest',
+        '--generation-source-declaration',
+        '--source-manifest',
+        '--generation-config',
+        '--source-declaration',
+        '--sources',
+        '--manifest',
+        dest='generation_sources',
+        help='Caller-provided generation source declaration (JSON or YAML).',
+    )
+    parser.add_argument(
+        '--config-version',
+        '--configuration-version',
+        '--generation-config-version',
+        dest='config_version',
+        help='Configuration version used for the baseline scan.',
+    )
+    parser.add_argument(
+        '--previous-feedback',
+        '--baseline-feedback',
+        dest='previous_feedback',
+        help='Previous feedback output, used to identify newly pending hits.',
+    )
+    parser.add_argument(
+        '--previous-sources',
+        '--previous-generation-sources',
+        dest='previous_generation_sources',
+        help='Previous generation source declaration.',
     )
 
 

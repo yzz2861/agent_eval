@@ -5,6 +5,7 @@ from typing import List
 from typing import Optional
 
 from . import audit
+from . import provenance
 from .core import baseline
 from .core import plugins
 from .core.log import log
@@ -30,6 +31,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         handle_scan_action(args)
     elif args.action == 'audit':
         handle_audit_action(args)
+    elif args.action in {'feedback', 'provenance', 'generated-sources', 'generation-feedback'}:
+        handle_feedback_action(args)
 
     return 0
 
@@ -84,6 +87,20 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         # default.
         secrets.merge(args.baseline)
 
+    if getattr(args, 'generation_sources', None) or getattr(args, 'feedback', False):
+        print(json.dumps(
+            provenance.build_feedback(
+                secrets,
+                args.generation_sources,
+                config_version=args.config_version,
+                previous_feedback=args.previous_feedback,
+                previous_generation_sources=args.previous_generation_sources,
+            ).json(),
+            indent=2,
+        ))
+        return
+
+    if args.baseline is not None:
         baseline.save_to_file(secrets, args.baseline_filename)
     else:
         print(json.dumps(baseline.format_for_output(secrets, is_slim_mode=args.slim), indent=2))
@@ -119,7 +136,21 @@ def scan_adhoc_string(line: str) -> str:
 
 def handle_audit_action(args: argparse.Namespace) -> None:
     try:
-        if args.stats:
+        if getattr(args, 'generation_sources', None):
+            data = baseline.load_from_file(args.filename[0])
+            secrets = SecretsCollection.load_from_baseline(data)
+            print(json.dumps(
+                provenance.build_feedback(
+                    secrets,
+                    args.generation_sources,
+                    config_version=args.config_version,
+                    previous_feedback=args.previous_feedback,
+                    previous_generation_sources=args.previous_generation_sources,
+                ).json(),
+                indent=4,
+                sort_keys=True,
+            ))
+        elif args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
             if args.diff:
                 # TODO
@@ -152,3 +183,18 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 audit.audit_baseline(args.filename[0])
     except InvalidBaselineError:
         pass
+
+
+def handle_feedback_action(args: argparse.Namespace) -> None:
+    data = baseline.load_from_file(args.baseline_path)
+    secrets = SecretsCollection.load_from_baseline(data)
+    print(json.dumps(
+        provenance.build_feedback(
+            secrets,
+            args.generation_sources,
+            config_version=args.config_version,
+            previous_feedback=args.previous_feedback,
+            previous_generation_sources=args.previous_generation_sources,
+        ).json(),
+        indent=2,
+    ))

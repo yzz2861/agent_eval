@@ -8,6 +8,7 @@ from . import audit
 from . import baseline
 from . import filters
 from . import plugins
+from . import provenance
 from . import scan
 from ...settings import get_settings
 from .common import initialize_plugin_settings
@@ -83,6 +84,9 @@ class ParserBuilder:
 
         audit.add_audit_action(subparser)
         self._post_processors.append(audit.parse_args)
+
+        provenance.add_provenance_action(subparser)
+        self._post_processors.append(provenance.parse_args)
         return self
 
     def add_pre_commit_arguments(self) -> 'ParserBuilder':

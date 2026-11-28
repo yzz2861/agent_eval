@@ -2,7 +2,6 @@ from enum import Enum
 from typing import Any
 from typing import Callable
 from typing import Dict
-from typing import List
 from typing import Tuple
 
 from ..constants import VerifiedResult
@@ -28,7 +27,20 @@ def generate_report(
     baseline_file: str,
     class_to_print: SecretClassToPrint = None,
     line_getter_factory: Callable[[str], 'LineGetter'] = open_file,
-) -> Dict[str, List[Dict[str, Any]]]:
+    generation_sources: Any = None,
+    config_version: str = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    if generation_sources is not None or config_version is not None or kwargs:
+        from ..provenance import build_feedback
+
+        secrets = get_baseline_from_file(baseline_file)
+        return build_feedback(
+            secrets,
+            generation_sources,
+            config_version=config_version,
+            **kwargs,
+        ).json()
 
     secrets: Dict[Tuple[str, str], Any] = {}
     for filename, secret in get_baseline_from_file(baseline_file):

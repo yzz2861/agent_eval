@@ -85,6 +85,45 @@ def _add_initialize_baseline_options(parser: argparse.ArgumentParser) -> None:
             'slim baselines will need to be remade to be audited.'
         ),
     )
+    group.add_argument(
+        '--generation-sources',
+        '--generation-source',
+        '--generated-sources',
+        '--generated-source-declaration',
+        '--generated-source-manifest',
+        '--generation-source-declaration',
+        '--source-manifest',
+        '--generation-config',
+        '--source-declaration',
+        '--sources',
+        '--manifest',
+        dest='generation_sources',
+        help='Caller-provided generation source declaration (JSON or YAML).',
+    )
+    group.add_argument(
+        '--config-version',
+        '--configuration-version',
+        '--generation-config-version',
+        dest='config_version',
+        help='Configuration version used for this scan.',
+    )
+    group.add_argument(
+        '--previous-feedback',
+        '--baseline-feedback',
+        dest='previous_feedback',
+        help='Previous feedback output, used to identify newly pending hits.',
+    )
+    group.add_argument(
+        '--previous-sources',
+        '--previous-generation-sources',
+        dest='previous_generation_sources',
+        help='Previous generation source declaration.',
+    )
+    group.add_argument(
+        '--feedback',
+        action='store_true',
+        help='Emit attributed reviewer feedback instead of a baseline.',
+    )
 
 
 def parse_args(args: argparse.Namespace) -> None:
