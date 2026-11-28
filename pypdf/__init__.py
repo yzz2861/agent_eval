@@ -11,6 +11,14 @@ from ._configuration import Configuration, apply_configuration, get_configuratio
 from ._crypt_providers import crypt_provider
 from ._doc_common import DocumentInformation
 from ._encryption import PasswordType
+from ._metadata_provenance import (
+    CopyRecord,
+    FieldProvenance,
+    LayerRecord,
+    MetadataLayer,
+    MetadataProvenance,
+    MissingMetadataLayerError,
+)
 from ._page import PageObject, Transformation
 from ._reader import PdfReader
 from ._text_extraction import mult
@@ -33,8 +41,14 @@ _debug_versions = (
 
 __all__ = [
     "Configuration",
+    "CopyRecord",
     "DocumentInformation",
+    "FieldProvenance",
     "ImageType",
+    "LayerRecord",
+    "MetadataLayer",
+    "MetadataProvenance",
+    "MissingMetadataLayerError",
     "ObjectDeletionFlag",
     "PageObject",
     "PageRange",
