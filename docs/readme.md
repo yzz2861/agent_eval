@@ -16,6 +16,7 @@ links to the source for the various pre-defined type classes.
  - [X.509 certificates](../asn1crypto/x509.py), `asn1crypto.x509`
  - [Certificate revocation lists (CRLs)](../asn1crypto/crl.py), `asn1crypto.crl`
  - [Online certificate status protocol (OCSP)](../asn1crypto/ocsp.py), `asn1crypto.ocsp`
+ - [Correction intake over OCSP status material](status_intake.md), `asn1crypto.status_intake`
  - [Certificate signing requests (CSRs)](../asn1crypto/csr.py), `asn1crypto.csr`
  - [Private key/certificate containers (PKCS#12)](../asn1crypto/pkcs12.py), `asn1crypto.pkcs12`
  - [Cryptographic message syntax (CMS, PKCS#7)](../asn1crypto/cms.py), `asn1crypto.cms`

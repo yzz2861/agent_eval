@@ -171,6 +171,7 @@ def test_classes():
     from .test_ocsp import OCSPTests
     from .test_pem import PEMTests
     from .test_pkcs12 import PKCS12Tests
+    from .test_status_intake import StatusIntakeTests
     from .test_tsp import TSPTests
     from .test_x509 import X509Tests
     from .test_util import UtilTests
@@ -187,6 +188,7 @@ def test_classes():
         OCSPTests,
         PEMTests,
         PKCS12Tests,
+        StatusIntakeTests,
         TSPTests,
         UtilTests,
         ParserTests,
