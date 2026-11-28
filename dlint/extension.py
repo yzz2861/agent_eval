@@ -92,7 +92,10 @@ class Flake8Extension(object):
         return linter_classes
 
     def run(self):
-        linter_instances = [l() for l in self.get_linter_classes()]
+        linter_instances = [
+            self._instantiate_linter(linter_class)
+            for linter_class in self.get_linter_classes()
+        ]
         multi_visitor = dlint.multi.MultiNodeVisitor(linter_instances)
         multi_visitor.visit(self.tree)
 
@@ -104,3 +107,8 @@ class Flake8Extension(object):
                     result.message,
                     type(linter_instance)
                 )
+
+    def _instantiate_linter(self, linter_class):
+        if linter_class is dlint.linters.BadHashlibUseLinter:
+            return linter_class(filename=self.filename)
+        return linter_class()

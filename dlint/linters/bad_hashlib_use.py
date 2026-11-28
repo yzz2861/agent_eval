@@ -7,7 +7,10 @@ from __future__ import (
     unicode_literals,
 )
 
+import datetime
+
 from .helpers import bad_module_attribute_use
+from . import hashlib_exemptions
 
 
 class BadHashlibUseLinter(bad_module_attribute_use.BadModuleAttributeUseLinter):
@@ -27,3 +30,26 @@ class BadHashlibUseLinter(bad_module_attribute_use.BadModuleAttributeUseLinter):
                 'sha1',
             ],
         }
+
+    def __init__(self, filename=None, today=None, *args, **kwargs):
+        self.filename = filename
+        self.today = today or datetime.date.today()
+        self._module_node = None
+
+        super(BadHashlibUseLinter, self).__init__(*args, **kwargs)
+
+    def visit_Module(self, node):
+        self._module_node = node
+        self.generic_visit(node)
+
+    def get_results(self):
+        results = super(BadHashlibUseLinter, self).get_results()
+        if self._module_node is None:
+            return results
+
+        return hashlib_exemptions.filter_results(
+            results,
+            self._module_node,
+            self.filename,
+            self.today
+        )
