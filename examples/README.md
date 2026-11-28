@@ -4,3 +4,4 @@
 * [client](client)
 * [uploader tool](uploader)
 * [Low-level Metadata API examples](manual_repo)
+* [Delegated role rotation windows](rotation_windows)

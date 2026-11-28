@@ -1,0 +1,62 @@
+{
+  "signatures": [],
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.0",
+    "version": 42,
+    "expires": "2027-12-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "synthetic-new-alpha-1": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {"public": "0000000000000000000000000000000000000000000000000000000000000011"}
+        },
+        "synthetic-new-beta-1": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {"public": "0000000000000000000000000000000000000000000000000000000000000012"}
+        },
+        "synthetic-new-beta-2": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {"public": "0000000000000000000000000000000000000000000000000000000000000013"}
+        },
+        "synthetic-new-gamma-1": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {"public": "0000000000000000000000000000000000000000000000000000000000000014"}
+        },
+        "synthetic-new-gamma-2": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {"public": "0000000000000000000000000000000000000000000000000000000000000015"}
+        }
+      },
+      "roles": [
+        {
+          "name": "delegated-alpha",
+          "keyids": ["synthetic-new-alpha-1"],
+          "threshold": 1,
+          "terminating": false,
+          "paths": ["alpha/*"]
+        },
+        {
+          "name": "delegated-beta",
+          "keyids": ["synthetic-new-beta-1", "synthetic-new-beta-2"],
+          "threshold": 2,
+          "terminating": false,
+          "paths": ["beta/*"]
+        },
+        {
+          "name": "delegated-gamma",
+          "keyids": ["synthetic-new-gamma-1", "synthetic-new-gamma-2"],
+          "threshold": 2,
+          "terminating": false,
+          "paths": ["gamma/*"]
+        }
+      ]
+    }
+  }
+}

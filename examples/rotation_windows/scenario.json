@@ -1,0 +1,10 @@
+{
+  "orders": [
+    ["delegated-alpha", "delegated-beta", "delegated-gamma"],
+    ["delegated-alpha", "delegated-gamma", "delegated-beta"]
+  ],
+  "delay": {
+    "role": "delegated-beta",
+    "minutes": 15
+  }
+}

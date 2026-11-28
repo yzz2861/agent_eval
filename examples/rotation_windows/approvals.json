@@ -1,0 +1,36 @@
+{
+  "delegated-alpha": {
+    "not_before": "2026-12-01T09:00:00+08:00",
+    "not_after": "2026-12-01T11:00:00+08:00",
+    "duration_seconds": 600,
+    "requires": [],
+    "events": [
+      {"keyid": "synthetic-old-alpha-1", "signed_at": "2026-12-01T09:00:05+08:00"},
+      {"keyid": "synthetic-old-alpha-2", "signed_at": "2026-12-01T09:00:10+08:00"},
+      {"keyid": "synthetic-new-alpha-1", "signed_at": "2026-12-01T09:00:15+08:00"}
+    ]
+  },
+  "delegated-beta": {
+    "not_before": "2026-12-01T09:20:00+08:00",
+    "not_after": "2026-12-01T10:35:00+08:00",
+    "duration_seconds": 600,
+    "requires": ["delegated-alpha"],
+    "events": [
+      {"keyid": "synthetic-old-beta-1", "signed_at": "2026-12-01T09:20:05+08:00"},
+      {"keyid": "synthetic-new-beta-1", "signed_at": "2026-12-01T09:20:10+08:00"},
+      {"keyid": "synthetic-new-beta-2", "signed_at": "2026-12-01T09:20:15+08:00"}
+    ]
+  },
+  "delegated-gamma": {
+    "not_before": "2026-12-01T09:10:00+08:00",
+    "not_after": "2026-12-01T09:50:00+08:00",
+    "duration_seconds": 600,
+    "requires": ["delegated-alpha"],
+    "events": [
+      {"keyid": "synthetic-old-gamma-1", "signed_at": "2026-12-01T09:10:05+08:00"},
+      {"keyid": "synthetic-old-gamma-2", "signed_at": "2026-12-01T09:10:10+08:00"},
+      {"keyid": "synthetic-new-gamma-1", "signed_at": "2026-12-01T09:10:15+08:00"},
+      {"keyid": "synthetic-new-gamma-2", "signed_at": "2026-12-01T09:10:20+08:00"}
+    ]
+  }
+}
