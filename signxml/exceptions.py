@@ -33,3 +33,11 @@ class InvalidInput(ValueError, SignXMLException):
 
 class RedundantCert(SignXMLException):
     pass
+
+
+class InsufficientEndorsement(SignXMLException):
+    """
+    Raised when one or more cryptographically verified references lack the required number of independent
+    endorsements. This is deliberately not a subclass of :class:`InvalidSignature`: the signature itself is
+    valid, but the caller-supplied endorsement quorum is not met for every reference in scope.
+    """

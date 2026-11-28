@@ -28,7 +28,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from signxml import (
     CanonicalizationMethod,
     DigestAlgorithm,
+    Endorsement,
     ExternalSigningKey,
+    InsufficientEndorsement,
     InvalidCertificate,
     InvalidDigest,
     InvalidInput,
@@ -42,6 +44,7 @@ from signxml import (
     XMLSignatureProcessor,
     XMLSigner,
     XMLVerifier,
+    compute_endorsement_coverage,
     methods,
     namespaces,
     processor,
@@ -1937,6 +1940,87 @@ class TestXAdES(unittest.TestCase, LoadExampleKeys):
                     break
             else:
                 XAdESVerifier().verify(doc, **kwargs)
+
+
+
+
+class TestEndorsementCoverage(unittest.TestCase):
+    hmac_config = SignatureConfiguration(require_x509=False)
+    hmac_config_multi = SignatureConfiguration(require_x509=False, expect_references=2)
+
+    def sign_and_verify(self, xml=b"<data/>", **sign_kwargs):
+        signer = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256)
+        signed = signer.sign(etree.fromstring(xml), key=b"secret", **sign_kwargs)
+        config = self.hmac_config_multi if sign_kwargs.get("reference_uri") else self.hmac_config
+        return XMLVerifier().verify(signed, hmac_key=b"secret", expect_config=config)
+
+    def test_deduplicated_retries_expose_endorsement_gap(self):
+        result = self.sign_and_verify()
+        # Three receipt services acknowledged the verified document, but two deliveries are retries
+        # of the same verification task.
+        deliveries = [
+            Endorsement(source="svc-alpha", task_id="task-1"),
+            Endorsement(source="svc-beta", task_id="task-2"),
+            Endorsement(source="svc-gamma", task_id="task-2"),
+        ]
+        coverage = compute_endorsement_coverage(result, deliveries, required=3)
+        self.assertEqual(3, coverage.references[0].deliveries)
+        self.assertEqual(2, coverage.references[0].independent)
+        self.assertEqual(frozenset({"svc-alpha", "svc-beta"}), coverage.references[0].sources)
+        self.assertFalse(coverage.sufficient)
+        with self.assertRaises(InsufficientEndorsement) as ctx:
+            coverage.require()
+        self.assertNotIsInstance(ctx.exception, InvalidSignature)
+        self.assertFalse(issubclass(InsufficientEndorsement, InvalidSignature))
+        # The gap only appears once duplicate deliveries are removed: the raw receipt count meets quorum.
+        self.assertGreaterEqual(coverage.references[0].deliveries, 3)
+        self.assertTrue(compute_endorsement_coverage(result, deliveries, required=2).sufficient)
+
+    def test_partial_reference_confirmation_is_not_verification_failure(self):
+        xml = b'<root><a Id="first">1</a><b Id="second">2</b></root>'
+        results = self.sign_and_verify(xml, reference_uri=["#first", "#second"])
+        self.assertEqual(2, len(results))
+        deliveries = [
+            Endorsement(source="svc-alpha", task_id="task-1"),
+            Endorsement(source="svc-beta", task_id="task-2", references=frozenset({"#first"})),
+        ]
+        coverage = compute_endorsement_coverage(results, deliveries, required=2)
+        self.assertFalse(coverage.sufficient)
+        self.assertEqual(("#second",), tuple(reference.uri for reference in coverage.insufficient))
+        self.assertEqual(1, coverage.references[1].independent)
+        with self.assertRaises(InsufficientEndorsement):
+            coverage.require()
+        # The caller may restrict the approval scope to fully endorsed references.
+        scoped = compute_endorsement_coverage(results, deliveries, required=2, scope=["#first"])
+        self.assertTrue(scoped.sufficient)
+        self.assertIs(scoped.require(), scoped)
+
+    def test_caller_supplied_independence_rule(self):
+        result = self.sign_and_verify()
+        deliveries = [
+            Endorsement(source="svc-alpha", task_id="task-1"),
+            Endorsement(source="svc-alpha", task_id="task-2"),
+            Endorsement(source="svc-beta", task_id="task-3"),
+        ]
+        # The default rule (one endorsement per verification task) counts three independent deliveries.
+        self.assertTrue(compute_endorsement_coverage(result, deliveries, required=3).sufficient)
+        # A stricter caller-supplied rule (one endorsement per source) exposes the gap.
+        coverage = compute_endorsement_coverage(
+            result, deliveries, required=3, independence_key=lambda delivery: delivery.source
+        )
+        self.assertFalse(coverage.sufficient)
+        self.assertEqual(2, coverage.references[0].independent)
+
+    def test_invalid_coverage_inputs(self):
+        result = self.sign_and_verify()
+        with self.assertRaises(InvalidInput):
+            compute_endorsement_coverage(result, [], required=0)
+        with self.assertRaises(InvalidInput):
+            compute_endorsement_coverage(result, [], scope=["#missing"])
+        with self.assertRaises(InvalidInput):
+            compute_endorsement_coverage(
+                result, [Endorsement(source="svc-alpha", task_id="task-1", references=frozenset({"#missing"}))]
+            )
 
 
 if __name__ == "__main__":
