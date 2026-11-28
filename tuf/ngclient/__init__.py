@@ -4,6 +4,14 @@
 """TUF client public API."""
 
 from tuf.api.metadata import TargetFile
+from tuf.ngclient.batch import (
+    TargetBatchResult,
+    TargetBatchVerifier,
+    TargetVerificationResult,
+    TargetVerificationStatus,
+    TrustMaterial,
+    verify_targets,
+)
 from tuf.ngclient.config import UpdaterConfig
 from tuf.ngclient.fetcher import FetcherInterface
 from tuf.ngclient.updater import Updater
@@ -13,6 +21,12 @@ __all__ = [  # noqa: PLE0604
     FetcherInterface.__name__,
     Urllib3Fetcher.__name__,
     TargetFile.__name__,
+    TargetBatchResult.__name__,
+    TargetBatchVerifier.__name__,
+    TargetVerificationResult.__name__,
+    TargetVerificationStatus.__name__,
+    TrustMaterial.__name__,
     Updater.__name__,
     UpdaterConfig.__name__,
+    verify_targets.__name__,
 ]
