@@ -56,6 +56,27 @@ Simple file type checking
     if __name__ == '__main__':
         main()
 
+Verified file handoff
+^^^^^^^^^^^^^^^^^^^^^
+
+Use ``HandoffRegistry`` when a recognized file must be approved before a job
+can consume its bytes. The handoff object keeps its content identity, the
+recognition result captured at registration, and the verified byte source
+separate. A renamed file can be located again by its content fingerprint,
+while a different file registered at the old path gets a new object and a new
+recognition result. Cancelled handoffs cannot provide bytes.
+
+.. code-block:: python
+
+    import filetype
+
+    registry = filetype.HandoffRegistry()
+    handoff = registry.register('incoming/sample.jpg')
+    handoff.approve()
+
+    # After the file is moved or renamed:
+    data = handoff.read_bytes('jobs/sample-work-item.jpg')
+
 Supported types
 ---------------
 
