@@ -14,6 +14,7 @@ Using and Extending Bandit
    start
    config
    integrations
+   triage
    plugins/index
    blacklists/index
    formatters/index
