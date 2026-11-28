@@ -186,6 +186,18 @@ The [type references example](../examples/dwarf_type_references.py) demonstrates
 following these references through typedefs and other types, and displays both
 the stored values and the resolved DIE offsets.
 
+For archival and forensic work, `elftools/dwarf/type_deps.py` builds a
+read-only dependency graph of the type DIEs. Register one or more already
+parsed `DWARFInfo` objects with `TypeDependencyIndex.register_artifact` (a
+stripped executable, its `.gnu_debuglink` companion and a supplementary
+object can all be registered under distinct names), then call `query` with
+either a `DIEKey` or a type name. The returned `DependencyResult` lists every
+reachable type node, the excerpts (artifact, debug section and byte range)
+that carry them, and the minimum excerpts that must be retained under a
+`RetentionPolicy`. Recursive type references are preserved, references that
+cannot be resolved from the registered artifacts are reported in `missing` as
+the minimum additional evidence required instead of raising an exception.
+
 Contrary to ELF with its structured set of sections and segments, DWARF
 information is quite ad hoc for the special needs it serves. Each DWARF
 section contains different information that has to be decoded and
